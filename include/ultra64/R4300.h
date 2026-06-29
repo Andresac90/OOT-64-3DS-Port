@@ -26,14 +26,24 @@
 #define ECC_VEC     (K0BASE + 0x100)        /* Ecc exception vector */
 #define E_VEC       (K0BASE + 0x180)        /* Gen. exception vector */
 
-/* Address conversion macros */
-#define K0_TO_K1(x)     (U32(x) | 0xA0000000)  /* kseg0 to kseg1 */
-#define K1_TO_K0(x)     (U32(x) & 0x9FFFFFFF)  /* kseg1 to kseg0 */
-#define K0_TO_PHYS(x)   (U32(x) & 0x1FFFFFFF)  /* kseg0 to physical */
-#define K1_TO_PHYS(x)   (U32(x) & 0x1FFFFFFF)  /* kseg1 to physical */
-#define KDM_TO_PHYS(x)  (U32(x) & 0x1FFFFFFF)  /* direct mapped to physical */
-#define PHYS_TO_K0(x)   (U32(x) | 0x80000000)  /* physical to kseg0 */
-#define PHYS_TO_K1(x)   (U32(x) | 0xA0000000)  /* physical to kseg1 */
+/* Address conversion macros (PORT: native pointers pass through) */
+#ifdef __3DS__
+/* 3DS: host RAM lives at physical-equivalent addresses BELOW 0x10000000 (binary
+ * .data, arena, gfx pools) — there is no emulated RDRAM mapped at 0x80000000.
+ * So anything that isn't a KSEG0/KSEG1 address (>= 0x80000000) is already a
+ * usable host pointer; never add 0x80000000. (KSEG addresses still strip down.) */
+#define PORT_IS_NATIVE(x) (U32(x) < 0x80000000u)
+#else
+#define PORT_IS_NATIVE(x) (U32(x) >= 0x10000000u && U32(x) < 0x80000000u)
+#endif
+
+#define K0_TO_K1(x)     (PORT_IS_NATIVE(x) ? U32(x) : (U32(x) | 0xA0000000))  /* kseg0 to kseg1 */
+#define K1_TO_K0(x)     (PORT_IS_NATIVE(x) ? U32(x) : (U32(x) & 0x9FFFFFFF))  /* kseg1 to kseg0 */
+#define K0_TO_PHYS(x)   (PORT_IS_NATIVE(x) ? U32(x) : (U32(x) & 0x1FFFFFFF))  /* kseg0 to physical */
+#define K1_TO_PHYS(x)   (PORT_IS_NATIVE(x) ? U32(x) : (U32(x) & 0x1FFFFFFF))  /* kseg1 to physical */
+#define KDM_TO_PHYS(x)  (PORT_IS_NATIVE(x) ? U32(x) : (U32(x) & 0x1FFFFFFF))  /* direct mapped to physical */
+#define PHYS_TO_K0(x)   (PORT_IS_NATIVE(x) ? U32(x) : (U32(x) | 0x80000000))  /* physical to kseg0 */
+#define PHYS_TO_K1(x)   (PORT_IS_NATIVE(x) ? U32(x) : (U32(x) | 0xA0000000))  /* physical to kseg1 */
 
 /* Address predicates */
 #define IS_KSEG0(x)     (U32(x) >= K0BASE && U32(x) < K1BASE)

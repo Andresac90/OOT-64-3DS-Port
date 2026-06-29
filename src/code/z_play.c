@@ -285,6 +285,11 @@ void Play_Destroy(GameState* thisx) {
 #endif
 }
 
+#ifdef __3DS__
+extern void PortDbg(const char* str);
+#else
+#define PortDbg(str) ((void)0)
+#endif
 void Play_Init(GameState* thisx) {
     PlayState* this = (PlayState*)thisx;
     GraphicsContext* gfxCtx = this->state.gfxCtx;
@@ -297,6 +302,7 @@ void Play_Init(GameState* thisx) {
     u8 baseSceneLayer;
     s32 pad[2];
 
+    PortDbg("Play_Init: enter");
     if (gSaveContext.save.entranceIndex == ENTR_LOAD_OPENING) {
         gSaveContext.save.entranceIndex = 0;
         this->state.running = false;
@@ -428,8 +434,10 @@ void Play_Init(GameState* thisx) {
     Cutscene_HandleEntranceTriggers(this);
 #endif
 
+    PortDbg("Play: -> KaleidoInit/Interface");
     KaleidoScopeCall_Init(this);
     Interface_Init(this);
+    PortDbg("Play: <- Interface_Init");
 
     if (gSaveContext.nextDayTime != NEXT_TIME_NONE) {
         if (gSaveContext.nextDayTime == NEXT_TIME_DAY) {
@@ -498,16 +506,21 @@ void Play_Init(GameState* thisx) {
     Fault_AddClient(&D_801614B8, ZeldaArena_Display, NULL, NULL);
 #endif
 
+    PortDbg("Play: -> Actor_InitContext");
     Actor_InitContext(this, &this->actorCtx, this->playerEntry);
+    PortDbg("Play: <- Actor_InitContext");
 
     // Busyloop until the room loads
+    PortDbg("Play: room busyloop enter");
     while (!Room_ProcessRoomRequest(this, &this->roomCtx)) {
         ; // Empty Loop
     }
+    PortDbg("Play: room busyloop done");
 
     player = GET_PLAYER(this);
     Camera_InitDataUsingPlayer(&this->mainCamera, player);
     Camera_RequestMode(&this->mainCamera, CAM_MODE_NORMAL);
+    PortDbg("Play: after Camera init");
 
     playerStartBgCamIndex = PLAYER_GET_START_BG_CAM_INDEX(&player->actor);
 
@@ -528,7 +541,9 @@ void Play_Init(GameState* thisx) {
     Environment_PlaySceneSequence(this);
     gSaveContext.seqId = this->sceneSequences.seqId;
     gSaveContext.natureAmbienceId = this->sceneSequences.natureAmbienceId;
+    PortDbg("Play: -> Actor_InitPlayerHorse");
     Actor_InitPlayerHorse(this, GET_PLAYER(this));
+    PortDbg("Play: <- Actor_InitPlayerHorse");
     AnimTaskQueue_Update(this, &this->animTaskQueue);
     gSaveContext.respawnFlag = 0;
 

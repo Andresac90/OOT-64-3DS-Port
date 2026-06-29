@@ -1820,6 +1820,7 @@ void Cutscene_ProcessScript(PlayState* play, CutsceneContext* csCtx, u8* script)
     s32 csFrameCount;
     s16 j;
 
+    u8* csScriptStart = script; /* PORT_CS_BOUNDS */
     MemCpy(&totalEntries, script, sizeof(totalEntries));
     script += sizeof(totalEntries);
 
@@ -1831,6 +1832,15 @@ void Cutscene_ProcessScript(PlayState* play, CutsceneContext* csCtx, u8* script)
         return;
     }
 
+    { /* PORT_CSGUARD: detect byteswapped/garbage cutscene script */
+      extern int fprintf(); extern void* stderr; static int shown=0;
+      if(!shown){shown=1; fprintf(stderr,"[CS] totalEntries=%d csFrameCount=%d script=%p\n",totalEntries,csFrameCount,(void*)script);}
+      if (totalEntries < 0 || totalEntries > 100000) {
+        fprintf(stderr,"[CS] garbage totalEntries=%d -> stopping cutscene\n", totalEntries);
+        csCtx->state = CS_STATE_STOP; return;
+      }
+    }
+
 #if DEBUG_FEATURES
     if (CHECK_BTN_ALL(play->state.input[0].press.button, BTN_DRIGHT)) {
         csCtx->state = CS_STATE_STOP;
@@ -1839,6 +1849,11 @@ void Cutscene_ProcessScript(PlayState* play, CutsceneContext* csCtx, u8* script)
 #endif
 
     for (i = 0; i < totalEntries; i++) {
+        if (script < csScriptStart || (script - csScriptStart) > 0x40000) {
+            extern int fprintf(); extern void* stderr;
+            fprintf(stderr, "[CS] runaway script (i=%d span=%ld) -> stop\n", i, (long)(script - csScriptStart));
+            csCtx->state = CS_STATE_STOP; return;
+        }
         MemCpy(&cmdType, script, sizeof(cmdType));
         script += sizeof(cmdType);
 
@@ -2234,6 +2249,12 @@ void Cutscene_ProcessScript(PlayState* play, CutsceneContext* csCtx, u8* script)
                 MemCpy(&cmdEntries, script, 4);
                 script += sizeof(cmdEntries);
 
+                if (cmdEntries < 0 || cmdEntries > 1000) { /* PORT: garbage -> stop */
+                    extern int fprintf(); extern void* stderr;
+                    fprintf(stderr, "[CS] bad default cmdType=%d cmdEntries=%d i=%d -> stop\n",
+                            cmdType, cmdEntries, i);
+                    csCtx->state = CS_STATE_STOP; return;
+                }
                 for (j = 0; j < cmdEntries; j++) {
                     script += 0x30;
                 }

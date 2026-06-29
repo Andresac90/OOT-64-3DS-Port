@@ -518,14 +518,24 @@ void GameState_Init(GameState* gameState, GameStateFunc init, GraphicsContext* g
     PRINTF(T("game コンストラクタ終了\n", "game constructor end\n"));
 }
 
+#ifdef __3DS__
+extern void PortDbg(const char* s);
+#else
+#define PortDbg(s) ((void)0)
+#endif
 void GameState_Destroy(GameState* gameState) {
     PRINTF(T("game デストラクタ開始\n", "game destructor start\n"));
+    PortDbg("gsd: enter");
     AudioMgr_StopAllSfx();
+    PortDbg("gsd: after StopAllSfx");
     Audio_Update();
+    PortDbg("gsd: after Audio_Update");
     osRecvMesg(&gameState->gfxCtx->queue, NULL, OS_MESG_BLOCK);
+    PortDbg("gsd: after recvmesg");
     LOG_UTILS_CHECK_NULL_POINTER("this->cleanup", gameState->destroy, "../game.c", 1139);
     if (gameState->destroy != NULL) {
         gameState->destroy(gameState);
+        PortDbg("gsd: after destroy cb");
     }
     Rumble_Destroy();
     SpeedMeter_Destroy(&D_801664D0);
@@ -537,6 +547,7 @@ void GameState_Destroy(GameState* gameState) {
     }
     THA_Destroy(&gameState->tha);
     GameAlloc_Cleanup(&gameState->alloc);
+    PortDbg("gsd: cleanup done");
 
 #if PLATFORM_GC && DEBUG_FEATURES
     SystemArena_Display();

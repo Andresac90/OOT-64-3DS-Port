@@ -2334,6 +2334,9 @@ void Audio_UpdateFanfare(void);
  * This is Audio_Update for the graph thread
  */
 void Audio_Update(void) {
+#ifdef __3DS__
+    return; /* audio not implemented yet (bring-up) */
+#endif
     if (func_800FAD34() == 0) {
 #if DEBUG_FEATURES
         sAudioUpdateTaskStart = gAudioCtx.totalTaskCount;

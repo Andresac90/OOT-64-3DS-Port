@@ -3275,6 +3275,7 @@ s32 Player_UpperAction_CarryActor(Player* this, PlayState* play) {
 
     if (heldActor == NULL) {
         func_80834644(play, this);
+    PortDbg("PIC: -> SkelAnime_InitLink#1");
     }
 #endif
 
@@ -10644,7 +10645,15 @@ static EffectBlureInit2 D_8085470C = {
 
 static Vec3s sSkeletonBaseTransl = { -57, 3377, 0 };
 
+#ifdef __3DS__
+extern void PortDbg(const char* str);
+extern void PortDbgX(const char* str, unsigned val);
+#else
+#define PortDbg(str) ((void)0)
+#define PortDbgX(str,val) ((void)0)
+#endif
 void Player_InitCommon(Player* this, PlayState* play, FlexSkeletonHeader* skelHeader) {
+    PortDbg("PIC: enter");
     this->ageProperties = &sAgeProperties[gSaveContext.save.linkAge];
     Actor_ProcessInitChain(&this->actor, sInitChain);
     this->meleeWeaponEffectIndex = TOTAL_EFFECT_COUNT;
@@ -10653,9 +10662,11 @@ void Player_InitCommon(Player* this, PlayState* play, FlexSkeletonHeader* skelHe
 
     SkelAnime_InitLink(play, &this->skelAnime, skelHeader, GET_PLAYER_ANIM(PLAYER_ANIMGROUP_wait, this->modelAnimType),
                        9, this->jointTable, this->morphTable, PLAYER_LIMB_MAX);
+    PortDbg("PIC: <- SkelAnime_InitLink#1");
     this->skelAnime.baseTransl = sSkeletonBaseTransl;
     SkelAnime_InitLink(play, &this->upperSkelAnime, skelHeader, Player_GetIdleAnim(this), 9, this->upperJointTable,
                        this->upperMorphTable, PLAYER_LIMB_MAX);
+    PortDbg("PIC: <- SkelAnime_InitLink#2");
     this->upperSkelAnime.baseTransl = sSkeletonBaseTransl;
 
     Effect_Add(play, &this->meleeWeaponEffectIndex, EFFECT_BLURE2, 0, 0, &D_8085470C);
@@ -10670,6 +10681,7 @@ void Player_InitCommon(Player* this, PlayState* play, FlexSkeletonHeader* skelHe
     Collider_SetQuad(play, &this->meleeWeaponQuads[1], &this->actor, &D_80854650);
     Collider_InitQuad(play, &this->shieldQuad);
     Collider_SetQuad(play, &this->shieldQuad, &this->actor, &D_808546A0);
+    PortDbg("PIC: done");
 }
 
 static void (*sStartModeFuncs[PLAYER_START_MODE_MAX])(PlayState* play, Player* this) = {
@@ -10722,7 +10734,9 @@ void Player_Init(Actor* thisx, PlayState* play2) {
     Player_SetEquipmentData(play, this);
     this->prevBoots = this->currentBoots;
 
+    PortDbg("PInit: -> InitCommon");
     Player_InitCommon(this, play, gPlayerSkelHeaders[((void)0, gSaveContext.save.linkAge)]);
+    PortDbg("PInit: <- InitCommon");
 
     // `giObjectSegment` is used for both "get item" objects and title cards. The maximum size for
     // get item objects is 0x2000 (see the assert in func_8083AE40), and the maximum size for
@@ -10798,7 +10812,9 @@ void Player_Init(Actor* thisx, PlayState* play2) {
         }
     }
 
+    PortDbgX("PInit: -> startMode", (unsigned)startMode);
     sStartModeFuncs[startMode](play, this);
+    PortDbg("PInit: <- startMode");
 
     if (startMode != PLAYER_START_MODE_NOTHING) {
         if ((gSaveContext.gameMode == GAMEMODE_NORMAL) || (gSaveContext.gameMode == GAMEMODE_END_CREDITS)) {
@@ -10825,6 +10841,7 @@ void Player_Init(Actor* thisx, PlayState* play2) {
 
     Map_SavePlayerInitialInfo(play);
     MREG(64) = 0;
+    PortDbg("PInit: DONE");
 }
 
 void Player_ApproachZeroBinang(s16* pValue) {

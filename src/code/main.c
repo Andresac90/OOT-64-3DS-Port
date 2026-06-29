@@ -43,10 +43,18 @@ extern struct IrqMgr gIrqMgr;
 #include "debug.h"
 #include "thread.h"
 
+#ifdef __3DS__
+extern void PortDbg(const char* s);
+#else
+#define PortDbg(s) ((void)0)
+#endif
+
 #pragma increment_block_number "gc-eu:128 gc-eu-mq:128 gc-jp:128 gc-jp-ce:128 gc-jp-mq:128 gc-us:128 gc-us-mq:128" \
                                "ique-cn:0 ntsc-1.0:51 ntsc-1.1:51 ntsc-1.2:51 pal-1.0:49 pal-1.1:49"
 
+#ifndef __3DS__
 extern u8 _buffersSegmentEnd[];
+#endif
 
 s32 gScreenWidth = SCREEN_WIDTH;
 s32 gScreenHeight = SCREEN_HEIGHT;
@@ -99,8 +107,10 @@ void Main(void* arg) {
     gScreenHeight = SCREEN_HEIGHT;
     gAppNmiBufferPtr = (PreNmiBuff*)osAppNMIBuffer;
     PreNmiBuff_Init(gAppNmiBufferPtr);
+    PortDbg("Main: entered");
     Fault_Init();
-#if PLATFORM_N64
+    PortDbg("after Fault_Init");
+#if PLATFORM_N64 && !defined(__3DS__)
     func_800AD410();
     if (D_80121211 != 0) {
         systemHeapStart = (uintptr_t)_n64ddSegmentEnd;
@@ -113,12 +123,14 @@ void Main(void* arg) {
 #else
     SysCfb_Init(0);
     systemHeapStart = (uintptr_t)_buffersSegmentEnd;
+    PortDbg("after SysCfb_Init");
 #endif
     fb = (uintptr_t)SysCfb_GetFbPtr(0);
     gSystemHeapSize = fb - systemHeapStart;
     PRINTF(T("システムヒープ初期化 %08x-%08x %08x\n", "System heap initialization %08x-%08x %08x\n"), systemHeapStart,
            fb, gSystemHeapSize);
     Runtime_Init((void*)systemHeapStart, gSystemHeapSize);
+    PortDbg("after Runtime_Init");
 
 #if DEBUG_FEATURES
     {
@@ -156,8 +168,9 @@ void Main(void* arg) {
     PRINTF(T("タスクスケジューラの初期化\n", "Initialize the task scheduler\n"));
     StackCheck_Init(&sSchedStackInfo, sSchedStack, STACK_TOP(sSchedStack), 0, 0x100, "sched");
     Sched_Init(&gScheduler, STACK_TOP(sSchedStack), THREAD_PRI_SCHED, gViConfigModeType, 1, &gIrqMgr);
+    PortDbg("after Sched_Init");
 
-#if PLATFORM_N64
+#if PLATFORM_N64 && !defined(__3DS__)
     CIC6105_AddFaultClient();
     CIC6105_RunBootTask();
 #endif
@@ -166,15 +179,19 @@ void Main(void* arg) {
 
     StackCheck_Init(&sAudioStackInfo, sAudioStack, STACK_TOP(sAudioStack), 0, 0x100, "audio");
     AudioMgr_Init(&sAudioMgr, STACK_TOP(sAudioStack), THREAD_PRI_AUDIOMGR, THREAD_ID_AUDIOMGR, &gScheduler, &gIrqMgr);
+    PortDbg("after AudioMgr_Init");
 
     StackCheck_Init(&sPadMgrStackInfo, sPadMgrStack, STACK_TOP(sPadMgrStack), 0, 0x100, "padmgr");
     PadMgr_Init(&gPadMgr, &sSerialEventQueue, &gIrqMgr, THREAD_ID_PADMGR, THREAD_PRI_PADMGR, STACK_TOP(sPadMgrStack));
+    PortDbg("after PadMgr_Init");
 
     AudioMgr_WaitForInit(&sAudioMgr);
+    PortDbg("after AudioMgr_WaitForInit");
 
     StackCheck_Init(&sGraphStackInfo, sGraphStack, STACK_TOP(sGraphStack), 0, 0x100, "graph");
     osCreateThread(&sGraphThread, THREAD_ID_GRAPH, Graph_ThreadEntry, arg, STACK_TOP(sGraphStack), THREAD_PRI_GRAPH);
     osStartThread(&sGraphThread);
+    PortDbg("graph thread started; msg loop");
 
 #if OOT_VERSION >= PAL_1_0
     osSetThreadPri(NULL, THREAD_PRI_MAIN);
@@ -199,9 +216,10 @@ void Main(void* arg) {
     }
 
     PRINTF(T("mainproc 後始末\n", "mainproc Cleanup\n"));
+    PortDbg("msg loop exited; Main cleanup");
     osDestroyThread(&sGraphThread);
     RcpUtils_Reset();
-#if PLATFORM_N64
+#if PLATFORM_N64 && !defined(__3DS__)
     CIC6105_RemoveFaultClient();
 #endif
     PRINTF(T("mainproc 実行終了\n", "mainproc End of execution\n"));

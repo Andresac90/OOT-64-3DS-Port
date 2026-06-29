@@ -1,0 +1,209 @@
+/*
+ * ultra_shims.c — libultra replacement layer for the OoT port.
+ * Single-threaded synchronous model: the platform frame loop owns execution;
+ * N64 threads are recorded but never scheduled. Message queues are real.
+ */
+#include "ultra64.h"
+/* freestanding bring-up: libc via implicit decls (32-bit: int==ptr) */
+extern int fprintf();
+extern void* stderr;
+struct PortTimespec { long tv_sec; long tv_nsec; };
+extern int clock_gettime(int clk, struct PortTimespec* ts);
+#define PORT_CLOCK_MONOTONIC 1
+extern void* memset();
+
+/* ------------------------------------------------------------------ */
+/* Message queues — faithful ring-buffer semantics, minus blocking.    */
+/* In a single-threaded world a blocking recv on an empty queue would  */
+/* deadlock; we log it so bring-up shows us each spot that needs the   */
+/* frame loop to feed it. */
+
+void osCreateMesgQueue(OSMesgQueue* mq, OSMesg* msg, s32 count) {
+    mq->validCount = 0;
+    mq->first = 0;
+    mq->msgCount = count;
+    mq->msg = msg;
+}
+
+s32 osSendMesg(OSMesgQueue* mq, OSMesg msg, s32 flag) {
+    if (mq == NULL) { return -1; }
+    if (mq->validCount >= mq->msgCount) {
+        (void)flag;
+        return -1; /* BLOCK defused: single-threaded bring-up */
+    }
+    mq->msg[(mq->first + mq->validCount) % mq->msgCount] = msg;
+    mq->validCount++;
+    return 0;
+}
+
+s32 osJamMesg(OSMesgQueue* mq, OSMesg msg, s32 flag) {
+    if (mq == NULL) { return -1; }
+    if (mq->validCount >= mq->msgCount) {
+        (void)flag;
+        return -1; /* BLOCK defused: single-threaded bring-up */
+    }
+    mq->first = (mq->first + mq->msgCount - 1) % mq->msgCount;
+    mq->msg[mq->first] = msg;
+    mq->validCount++;
+    return 0;
+}
+
+s32 osRecvMesg(OSMesgQueue* mq, OSMesg* msg, s32 flag) {
+    if (mq == NULL) { return -1; }
+    if (mq->validCount == 0) {
+        (void)flag;
+        return -1; /* BLOCK defused: single-threaded bring-up */
+    }
+    if (msg != NULL) {
+        *msg = mq->msg[mq->first];
+    }
+    mq->first = (mq->first + 1) % mq->msgCount;
+    mq->validCount--;
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Threads — recorded, never run. The frame loop calls what matters.   */
+
+static OSThread* sThreads[32];
+static int sThreadCount = 0;
+
+void osCreateThread(OSThread* t, OSId id, void (*entry)(void*), void* arg, void* sp, OSPri pri) {
+    (void)sp;
+    t->id = id;
+    t->priority = pri;
+    if (sThreadCount < 32) {
+        sThreads[sThreadCount++] = t;
+    }
+    fprintf(stderr, "[shim] thread %d created (entry %p) — not scheduled\n", (int)id, (void*)entry);
+}
+
+void osStartThread(OSThread* t) { (void)t; }
+void osStopThread(OSThread* t) { (void)t; }
+void osDestroyThread(OSThread* t) { (void)t; }
+void osYieldThread(void) {}
+OSId osGetThreadId(OSThread* t) { return (t != NULL) ? t->id : 0; }
+OSPri osGetThreadPri(OSThread* t) { return (t != NULL) ? t->priority : 0; }
+void osSetThreadPri(OSThread* t, OSPri pri) { if (t != NULL) { t->priority = pri; } }
+
+/* ------------------------------------------------------------------ */
+/* Events, interrupts, timers                                          */
+
+static OSMesgQueue* sEventQueues[OS_NUM_EVENTS];
+static OSMesg sEventMesgs[OS_NUM_EVENTS];
+
+void osSetEventMesg(OSEvent e, OSMesgQueue* mq, OSMesg msg) {
+    if (e < OS_NUM_EVENTS) {
+        sEventQueues[e] = mq;
+        sEventMesgs[e] = msg;
+    }
+}
+
+/* The platform loop calls this to deliver VI retrace etc. */
+void PortShim_RaiseEvent(OSEvent e) {
+    if (e < OS_NUM_EVENTS && sEventQueues[e] != NULL) {
+        osSendMesg(sEventQueues[e], sEventMesgs[e], OS_MESG_NOBLOCK);
+    }
+}
+
+OSIntMask osSetIntMask(OSIntMask mask) { (void)mask; return OS_IM_ALL; }
+u32 osGetIntMask(void) { return OS_IM_ALL; }
+
+static u64 TicksNow(void) {
+    struct PortTimespec ts;
+    clock_gettime(PORT_CLOCK_MONOTONIC, &ts);
+    /* OS_CLOCK_RATE ticks (46.875 MHz counter on N64) */
+    return (u64)ts.tv_sec * 46875000ULL + (u64)ts.tv_nsec * 46875ULL / 1000000ULL;
+}
+
+#ifndef __3DS__
+/* on 3DS, libctru provides osGetTime — avoid the symbol collision */
+OSTime osGetTime(void) { return TicksNow(); }
+#endif
+void osSetTime(OSTime t) { (void)t; }
+u32 osGetCount(void) { return (u32)TicksNow(); }
+
+s32 osSetTimer(OSTimer* timer, OSTime countdown, OSTime interval, OSMesgQueue* mq, OSMesg msg) {
+    (void)timer; (void)countdown; (void)interval; (void)mq; (void)msg;
+    return 0; /* frame loop will deliver time-based messages */
+}
+s32 osStopTimer(OSTimer* timer) { (void)timer; return 0; }
+
+/* ------------------------------------------------------------------ */
+/* Cache / TLB / misc CPU — meaningless on the host                    */
+
+void osInvalDCache(void* addr, s32 size) { (void)addr; (void)size; }
+void osInvalICache(void* addr, s32 size) { (void)addr; (void)size; }
+void osWritebackDCache(void* addr, s32 size) { (void)addr; (void)size; }
+void osWritebackDCacheAll(void) {}
+u32 osVirtualToPhysical(void* addr) { return (u32)(uintptr_t)addr; }
+void osMapTLBRdb(void) {}
+void osUnmapTLBAll(void) {}
+s32 osAfterPreNMI(void) { return 0; }
+void osInitialize(void) {}
+u32 osGetMemSize(void) { return 8 * 1024 * 1024; }
+
+/* ------------------------------------------------------------------ */
+/* VI — frame presentation is the platform layer's job                 */
+
+static void* sNextFb = NULL;
+static void* sCurrentFb = NULL;
+
+void osViSetMode(OSViMode* mode) { (void)mode; }
+void osViSetSpecialFeatures(u32 func) { (void)func; }
+void osViSetXScale(f32 v) { (void)v; }
+void osViSetYScale(f32 v) { (void)v; }
+void osViExtendVStart(u32 v) { (void)v; }
+void osViBlack(u8 active) { (void)active; }
+static u32 sSwapCount = 0;
+void osViSwapBuffer(void* fb) {
+    sNextFb = fb;
+    sSwapCount++;
+    if ((sSwapCount % 60) == 1) {
+        fprintf(stderr, "[vi] frame %d (fb %p)\n", sSwapCount, fb);
+    }
+}
+void* osViGetNextFramebuffer(void) { return sNextFb; }
+void* osViGetCurrentFramebuffer(void) { return (sCurrentFb != NULL) ? sCurrentFb : sNextFb; }
+void osViSetEvent(OSMesgQueue* mq, OSMesg msg, u32 retraceCount) {
+    (void)retraceCount;
+    osSetEventMesg(OS_EVENT_VI, mq, msg);
+}
+void osCreateViManager(OSPri pri) { (void)pri; }
+
+/* ------------------------------------------------------------------ */
+/* Controller — zeroed pad until the input backend lands               */
+
+s32 osContInit(OSMesgQueue* mq, u8* bitpattern, OSContStatus* status) {
+    (void)mq;
+    *bitpattern = 1; /* controller 1 present */
+    memset(status, 0, 4 * sizeof(OSContStatus));
+    status[0].type = CONT_TYPE_NORMAL;
+    return 0;
+}
+s32 osContStartReadData(OSMesgQueue* mq) { PortShim_RaiseEvent(OS_EVENT_SI); (void)mq; return 0; }
+
+/* keyboard -> pad, implemented in pc_gfx.c */
+extern unsigned short PortInput_GetPad(signed char* outX, signed char* outY);
+
+void osContGetReadData(OSContPad* pad) {
+    signed char sx = 0, sy = 0;
+    memset(pad, 0, 4 * sizeof(OSContPad));
+    pad[0].button = PortInput_GetPad(&sx, &sy);
+    pad[0].stick_x = sx;
+    pad[0].stick_y = sy;
+    if (pad[0].button != 0 || sx != 0 || sy != 0) {
+        static u16 last = 0; static s8 lx = 0, ly = 0;
+        if (pad[0].button != last || sx != lx || sy != ly) {
+            last = pad[0].button; lx = sx; ly = sy;
+            fprintf(stderr, "[input] button=%04x stick=(%d,%d)\n", pad[0].button, sx, sy);
+        }
+    }
+}
+s32 osContStartQuery(OSMesgQueue* mq) { (void)mq; return 0; }
+void osContGetQuery(OSContStatus* status) { memset(status, 0, 4 * sizeof(OSContStatus)); }
+s32 osContSetCh(u8 ch) { (void)ch; return 0; }
+
+/* Rumble + Controller Pak: absent hardware */
+s32 osMotorInit(OSMesgQueue* mq, OSPfs* pfs, s32 channel) { (void)mq; (void)pfs; (void)channel; return 1; }
+s32 __osMotorAccess(OSPfs* pfs, s32 flag) { (void)pfs; (void)flag; return 1; }

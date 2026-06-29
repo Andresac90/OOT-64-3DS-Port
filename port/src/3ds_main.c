@@ -1,0 +1,208 @@
+/*
+ * 3ds_main.c — Nintendo 3DS entry point (libctru). Replaces pc_main.c/pc_gfx.c.
+ * Boots the port runtime, drives the OoT gamestate loop, and reads the real
+ * 3DS buttons into the controller shim. Rendering goes through the citro3d
+ * backend (gfx3ds/gfx_citro3d.c) via the same gfx_pc interface proven on PC.
+ */
+#include <3ds.h>
+#include <stdio.h>
+
+#include <PR/gbi.h>
+#include "ultra64/sptask.h"
+#include "gfx_pc.h"
+#include "gfx_3ds.h"
+#include "gfx_rendering_api.h"
+
+/* N64 controller button bits (from include/controller.h) */
+#define BTN_A_      0x8000
+#define BTN_B_      0x4000
+#define BTN_Z_      0x2000
+#define BTN_START_  0x1000
+#define BTN_DUP_    0x0800
+#define BTN_DDOWN_  0x0400
+#define BTN_DLEFT_  0x0200
+#define BTN_DRIGHT_ 0x0100
+#define BTN_L_      0x0020
+#define BTN_R_      0x0010
+#define BTN_CUP_    0x0008
+#define BTN_CDOWN_  0x0004
+#define BTN_CLEFT_  0x0002
+#define BTN_CRIGHT_ 0x0001
+
+extern struct GfxWindowManagerAPI gfx_3ds;
+extern struct GfxRenderingAPI gfx_citro3d_api;
+
+extern void Main(void* arg);
+extern void Graph_ThreadEntry(void* arg);
+extern void PortDma_Init(const char* romPath);
+
+/* VI config globals the boot path expects (idle.c) */
+extern unsigned char gViConfigModeType;
+extern void* osViModeNtscLan1;
+
+/* read by osContGetReadData via the shim */
+static unsigned short s3dsButtons;
+static signed char s3dsStickX, s3dsStickY;
+
+unsigned short PortInput_GetPad(signed char* outX, signed char* outY) {
+    if (outX) *outX = s3dsStickX;
+    if (outY) *outY = s3dsStickY;
+    return s3dsButtons;
+}
+
+static void Port3ds_PollInput(void) {
+    hidScanInput();
+    u32 k = hidKeysHeld();
+    unsigned short b = 0;
+    if (k & KEY_A)      b |= BTN_A_;
+    if (k & KEY_B)      b |= BTN_B_;
+    if (k & KEY_X)      b |= BTN_CUP_;   /* map X/Y to C-up/down for now */
+    if (k & KEY_Y)      b |= BTN_CDOWN_;
+    if (k & KEY_START)  b |= BTN_START_;
+    if (k & KEY_L)      b |= BTN_L_;
+    if (k & KEY_R)      b |= BTN_R_;
+    if (k & KEY_ZL)     b |= BTN_Z_;     /* New 3DS ZL as Z trigger */
+    if (k & KEY_ZR)     b |= BTN_Z_;
+    if (k & KEY_DUP)    b |= BTN_DUP_;
+    if (k & KEY_DDOWN)  b |= BTN_DDOWN_;
+    if (k & KEY_DLEFT)  b |= BTN_DLEFT_;
+    if (k & KEY_DRIGHT) b |= BTN_DRIGHT_;
+    /* C-stick (New 3DS) -> C buttons */
+    if (k & KEY_CSTICK_UP)    b |= BTN_CUP_;
+    if (k & KEY_CSTICK_DOWN)  b |= BTN_CDOWN_;
+    if (k & KEY_CSTICK_LEFT)  b |= BTN_CLEFT_;
+    if (k & KEY_CSTICK_RIGHT) b |= BTN_CRIGHT_;
+
+    circlePosition cp;
+    hidCircleRead(&cp);
+    /* circle pad range ~ +-156; scale to N64 +-80 */
+    s3dsStickX = (signed char)(cp.dx * 80 / 156);
+    s3dsStickY = (signed char)(cp.dy * 80 / 156);
+    s3dsButtons = b;
+}
+
+/* render hooks — override sched_shim's weak PortGfx_RunTask (the 3DS analogue
+ * of pc_gfx.c). Drives the citro3d backend via the gfx_pc interface. */
+static int sGfxInited = 0;
+
+void PortGfx_Init(void) {
+    gfx_init(&gfx_3ds, &gfx_citro3d_api);
+    sGfxInited = 1;
+    printf("[gfx] citro3d renderer initialized\n");
+}
+
+void PortGfx_FrameReady(void) {}
+
+void PortGfx_RunTask(OSTask* task) {
+    if (!sGfxInited) PortGfx_Init();
+    Port3ds_PollInput();
+    gfx_start_frame();
+    gfx_run((Gfx*)task->t.data_ptr);
+    gfx_end_frame();
+}
+
+#define ROM_PATH "sdmc:/3ds/oot/baserom-decompressed.z64"
+#define LOG_PATH "sdmc:/3ds/oot/boot.log"
+
+static void boot_flush(void) {
+    gfxFlushBuffers();
+    gfxSwapBuffers();
+    gspWaitForVBlank();
+}
+
+/* Log to BOTH the bottom-screen console and a file on the SD. The file copy
+ * survives an ErrDisp/crash that wipes the screen, so after a failed boot we
+ * can read sdmc:/3ds/oot/boot.log to see exactly the last checkpoint reached.
+ * Each call reopens+closes so the line is guaranteed flushed to disk. */
+static void Log(const char* s) {
+    printf("%s\n", s);
+    boot_flush();
+    FILE* f = fopen(LOG_PATH, "a");
+    if (f) { fputs(s, f); fputc('\n', f); fflush(f); fclose(f); }
+}
+
+/* checkpoint logger called from engine init (main.c) */
+void PortDbg(const char* s) { Log(s); }
+
+/* hex value logger for diagnostics (e.g. scene-data dump) */
+void PortDbgX(const char* label, unsigned val) {
+    char buf[96];
+    sprintf(buf, "%s=%08x", label, val);
+    Log(buf);
+}
+
+/* Keep the bottom-screen console up so the message is readable instead of
+ * silently bouncing back to the HOME menu. */
+static void boot_halt(const char* msg) {
+    Log(msg);
+    printf("Press START to exit.\n");
+    boot_flush();
+    while (aptMainLoop()) {
+        hidScanInput();
+        if (hidKeysDown() & KEY_START) break;
+        gspWaitForVBlank();
+    }
+}
+
+/* ===== MINIMAL BOOT TEST (disabled) =====
+ * Isolation build used to prove the CIA packaging. Kept for future debugging.
+ * Renamed out of the way; the real entry point is main() below. */
+int main_minimal(int argc, char** argv) {
+    (void)argc; (void)argv;
+    gfxInitDefault();
+    consoleInit(GFX_BOTTOM, NULL);
+
+    int n = 0;
+    while (aptMainLoop()) {
+        hidScanInput();
+        if (hidKeysDown() & KEY_START) break;
+        printf("\x1b[2;2HOoT port MINIMAL boot test -- frame %d   ", n++);
+        printf("\x1b[4;2HIf you can read this, packaging is OK.");
+        printf("\x1b[6;2HPress START to exit.");
+        gfxFlushBuffers();
+        gfxSwapBuffers();
+        gspWaitForVBlank();
+    }
+    gfxExit();
+    return 0;
+}
+
+/* full boot path — the real entry point */
+int main(int argc, char** argv) {
+    (void)argc; (void)argv;
+    gfxInitDefault();
+    consoleInit(GFX_BOTTOM, NULL);
+    { extern void PortCompat_InitStreams(void); PortCompat_InitStreams(); }
+
+    /* Truncate the log file at the start of every boot. */
+    { FILE* f = fopen(LOG_PATH, "w");
+      if (f) { fputs("=== OoT 3DS boot log ===\n", f); fclose(f); } }
+
+    Log("OoT 3DS-Port booting...");
+
+    FILE* rf = fopen(ROM_PATH, "rb");
+    if (rf == NULL) { boot_halt("ROM not found at " ROM_PATH); gfxExit(); return 0; }
+    fclose(rf);
+    Log("ROM found.");
+
+    PortDma_Init(ROM_PATH);
+    Log("DMA init OK.");
+
+    gViConfigModeType = 0;
+
+    Log("calling Main() (engine init)...");
+    Main(0);
+    Log("Main() returned; entering graph loop.");
+
+    /* Audio isn't initialized on 3DS (audio thread never runs), so the SFX bank
+     * link-lists are garbage and any Audio_StopSfxById/etc. walk spins forever.
+     * Audio_ResetSfx() is CPU-side only (resets gSfxBanks to empty) and makes
+     * all the SFX functions safe until real audio lands. */
+    { extern void Audio_ResetSfx(void); Audio_ResetSfx(); Log("Audio_ResetSfx (sfx banks) done"); }
+
+    Graph_ThreadEntry(0);
+
+    boot_halt("graph loop exited");
+    gfxExit();
+    return 0;
+}

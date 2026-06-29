@@ -62,10 +62,7 @@ void MapMark_Init(PlayState* play) {
 
     sLoadedMarkDataTable = gMapMarkDataTable;
     sLoadedMarkDataTable =
-        (void*)(uintptr_t)((overlay->vramTable != NULL)
-                               ? (void*)((uintptr_t)overlay->vramTable -
-                                         (intptr_t)((uintptr_t)overlay->vramStart - (uintptr_t)overlay->loadedRamAddr))
-                               : NULL);
+        overlay->vramTable; /* PORT: statically linked, no relocation */
 
 #if PLATFORM_N64
     if ((B_80121220 != NULL) && (B_80121220->unk_2C != NULL)) {

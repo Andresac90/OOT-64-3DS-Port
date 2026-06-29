@@ -7,8 +7,13 @@
 
 struct PlayState;
 
+#ifndef __3DS__
 extern u8 _icon_item_staticSegmentRomStart[];
 extern u8 _icon_item_24_staticSegmentRomStart[];
+#else
+/* 3DS: these segment symbols are #defined to address constants in
+ * port/include/3ds_segment_consts.h; a raw extern would be mangled by the macro. */
+#endif
 
 // An "item icon" (gItemIcon*Tex) is 32x32 rgba32
 #define ITEM_ICON_WIDTH 32

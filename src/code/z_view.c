@@ -339,6 +339,12 @@ s32 View_ApplyPerspective(View* view) {
         guPerspective(projection, &view->normal, R_PERSPECTIVE_FOVY, R_PERSPECTIVE_ASPECT / 10000.0f,
                       R_PERSPECTIVE_NEAR, R_PERSPECTIVE_FAR, R_PERSPECTIVE_SCALE / 100.0f);
     } else {
+        if (getenv("PORT_VIEWLOG")) {
+            static int n = 0;
+            if (n++ < 5) { extern int fprintf(); extern void* stderr;
+                fprintf(stderr, "[VIEW] fovy=%f aspect=%f near=%f far=%f scale=%f\n",
+                        view->fovy, aspect, view->zNear, view->zFar, view->scale); }
+        }
         guPerspective(projection, &view->normal, view->fovy, aspect, view->zNear, view->zFar, view->scale);
     }
 

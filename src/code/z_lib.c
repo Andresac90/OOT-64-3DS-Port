@@ -341,10 +341,30 @@ void (*sInitChainHandlers[])(u8* ptr, InitChainEntry* ichain) = {
     IChain_Apply_Vec3f, IChain_Apply_Vec3fdiv1000, IChain_Apply_Vec3s,
 };
 
+#ifdef __3DS__
+extern void PortDbg(const char* str);
+extern void PortDbgX(const char* str, unsigned val);
+#else
+#define PortDbg(str) ((void)0)
+#define PortDbgX(str,val) ((void)0)
+#endif
 void Actor_ProcessInitChain(struct Actor* actor, InitChainEntry* ichain) {
+#ifdef __3DS__
+    { int _i = 0;
+      PortDbgX("IChain word0", *(unsigned*)ichain);
+      PortDbgX("IChain cont0", (unsigned)ichain->cont);
+      PortDbgX("IChain type0", (unsigned)ichain->type);
+      do {
+          sInitChainHandlers[ichain->type]((u8*)actor, ichain);
+          if (++_i > 2000) { PortDbg("IChain RUNAWAY break"); break; }
+      } while ((ichain++)->cont);
+      PortDbgX("IChain entries", (unsigned)_i);
+    }
+#else
     do {
         sInitChainHandlers[ichain->type]((u8*)actor, ichain);
     } while ((ichain++)->cont);
+#endif
 }
 
 void IChain_Apply_u8(u8* ptr, InitChainEntry* ichain) {

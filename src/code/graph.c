@@ -142,6 +142,12 @@ void Graph_UCodeFaultClient(Gfx* workBuf) {
 }
 #endif
 
+#ifdef __3DS__
+extern void PortDbg(const char* s);
+#else
+#define PortDbg(s) ((void)0)
+#endif
+
 void Graph_InitTHGA(GraphicsContext* gfxCtx) {
     GfxPool* pool = &gGfxPools[gfxCtx->gfxPoolIdx & 1];
 
@@ -363,7 +369,9 @@ void Graph_Update(GraphicsContext* gfxCtx, GameState* gameState) {
 #endif
 
     GameState_ReqPadData(gameState);
+    { static int _gu=0; if (_gu++==0) PortDbg("graph: first GameState_Update enter"); }
     GameState_Update(gameState);
+    { static int _gv=0; if (_gv++==0) PortDbg("graph: first GameState_Update return"); }
 
 #if DEBUG_FEATURES
     OPEN_DISPS(gfxCtx, "../graph.c", 987);
@@ -510,10 +518,13 @@ void Graph_ThreadEntry(void* arg0) {
 
     PRINTF(T("グラフィックスレッド実行開始\n", "Start graphic thread execution\n"));
     Graph_Init(&gfxCtx);
+    PortDbg("graph: Graph_Init done");
 
     while (nextOvl != NULL) {
         ovl = nextOvl;
+        PortDbg("graph: load ovl start");
         Overlay_LoadGameState(ovl);
+        PortDbg("graph: load ovl done");
 
         size = ovl->instanceSize;
         PRINTF(T("クラスサイズ＝%dバイト\n", "Class size = %d bytes\n"), size);
@@ -533,16 +544,25 @@ void Graph_ThreadEntry(void* arg0) {
 #endif
         }
 
+        PortDbg("graph: -> GameState_Init");
         GameState_Init(gameState, ovl->init, &gfxCtx);
+        PortDbg("graph: <- GameState_Init");
 
+        PortDbg("graph: entering inner loop");
         while (GameState_IsRunning(gameState)) {
+            { static int _ht=0; if ((_ht++ % 20)==0) PortDbg("graph: frame tick"); }
             Graph_Update(&gfxCtx, gameState);
         }
+        PortDbg("graph: inner loop exited");
 
         nextOvl = Graph_GetNextGameState(gameState);
+        PortDbg("graph: got next gamestate");
         GameState_Destroy(gameState);
+        PortDbg("graph: destroyed");
         SYSTEM_ARENA_FREE(gameState, "../graph.c", 1227);
+        PortDbg("graph: freed gamestate");
         Overlay_FreeGameState(ovl);
+        PortDbg("graph: freed ovl, looping");
     }
     Graph_Destroy(&gfxCtx);
     PRINTF(T("グラフィックスレッド実行終了\n", "End of graphic thread execution\n"));

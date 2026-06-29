@@ -939,6 +939,13 @@ void Actor_SetObjectDependency(PlayState* play, Actor* actor) {
     gSegments[6] = OS_K0_TO_PHYSICAL(play->objectCtx.slots[actor->objectSlot].segment);
 }
 
+#ifdef __3DS__
+extern void PortDbg(const char* str);
+extern void PortDbgX(const char* str, unsigned val);
+#else
+#define PortDbg(str) ((void)0)
+#define PortDbgX(str,val) ((void)0)
+#endif
 void Actor_Init(Actor* actor, PlayState* play) {
     Actor_SetWorldToHome(actor);
     Actor_SetShapeRotToWorld(actor);
@@ -957,7 +964,9 @@ void Actor_Init(Actor* actor, PlayState* play) {
     ActorShape_Init(&actor->shape, 0.0f, NULL, 0.0f);
     if (Object_IsLoaded(&play->objectCtx, actor->objectSlot)) {
         Actor_SetObjectDependency(play, actor);
+        { static int _n=0; if(_n<8){PortDbgX("Actor_Init -> init id",(unsigned)actor->id); _n++;} }
         actor->init(actor, play);
+        { static int _m=0; if(_m<8){PortDbg("Actor_Init <- init done"); _m++;} }
         actor->init = NULL;
     }
 }
@@ -2361,9 +2370,12 @@ void Actor_InitContext(PlayState* play, ActorContext* actorCtx, ActorEntry* play
 
     actorCtx->absoluteSpace = NULL;
 
+    PortDbg("ActorInitCtx: -> SpawnEntry(player)");
     Actor_SpawnEntry(actorCtx, playerEntry, play);
+    PortDbg("ActorInitCtx: <- SpawnEntry");
     Attention_Init(&actorCtx->attention, actorCtx->actorLists[ACTORCAT_PLAYER].head, play);
     func_8002FA60(play);
+    PortDbg("ActorInitCtx: done");
 }
 
 u32 sCategoryFreezeMasks[ACTORCAT_MAX] = {
@@ -3243,11 +3255,10 @@ Actor* Actor_Spawn(ActorContext* actorCtx, PlayState* play, s16 actorId, f32 pos
             overlayEntry->numLoaded = 0;
         }
 
-        profile = (void*)(uintptr_t)((overlayEntry->profile != NULL)
-                                         ? (void*)((uintptr_t)overlayEntry->profile -
-                                                   (intptr_t)((uintptr_t)overlayEntry->vramStart -
-                                                              (uintptr_t)overlayEntry->loadedRamAddr))
-                                         : NULL);
+        /* PORT: actor overlays are statically linked native; the profile is a
+         * real pointer, no N64 vram->ram relocation. (Restored after a stray
+         * `git checkout` reverted this uncommitted change.) */
+        profile = overlayEntry->profile;
     }
 
     objectSlot = Object_GetSlot(&play->objectCtx, profile->objectId);

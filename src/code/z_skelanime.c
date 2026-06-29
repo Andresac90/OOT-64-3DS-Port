@@ -1103,6 +1103,13 @@ void AnimTaskQueue_Update(PlayState* play, AnimTaskQueue* animTaskQueue) {
  * Initializes a skeleton to be used with Link animations to a looping animation, dynamically allocating the frame
  * tables if not given.
  */
+#ifdef __3DS__
+extern void PortDbg(const char* str);
+extern void PortDbgX(const char* str, unsigned val);
+#else
+#define PortDbg(str) ((void)0)
+#define PortDbgX(str,val) ((void)0)
+#endif
 void SkelAnime_InitLink(PlayState* play, SkelAnime* skelAnime, FlexSkeletonHeader* skeletonHeaderSeg,
                         LinkAnimationHeader* animation, s32 flags, Vec3s* jointTable, Vec3s* morphTable,
                         s32 limbBufCount) {
@@ -1121,6 +1128,8 @@ void SkelAnime_InitLink(PlayState* play, SkelAnime* skelAnime, FlexSkeletonHeade
         limbCount += headerJointCount;
     }
 
+    PortDbgX("SkelLink: skelHdr", (unsigned)(uintptr_t)skeletonHeader);
+    PortDbgX("SkelLink: limbCount", (unsigned)limbCount);
     skelAnime->limbCount = limbCount;
     skelAnime->dListCount = skeletonHeader->dListCount;
 
@@ -1148,7 +1157,9 @@ void SkelAnime_InitLink(PlayState* play, SkelAnime* skelAnime, FlexSkeletonHeade
         PRINTF_RST();
     }
 
+    PortDbgX("SkelLink: -> LinkAnimation_Change anim", (unsigned)(uintptr_t)animation);
     LinkAnimation_Change(play, skelAnime, animation, 1.0f, 0.0f, 0.0f, ANIMMODE_LOOP, 0.0f);
+    PortDbg("SkelLink: <- LinkAnimation_Change");
 }
 
 /**
