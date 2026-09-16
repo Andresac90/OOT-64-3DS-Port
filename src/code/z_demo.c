@@ -188,6 +188,11 @@ void Cutscene_DrawDebugInfo(PlayState* play, Gfx** dlist, CutsceneContext* csCtx
 void Cutscene_InitContext(PlayState* play, CutsceneContext* csCtx) {
     csCtx->state = CS_STATE_IDLE;
     csCtx->timer = 0.0f;
+#ifdef __3DS__
+    /* PORT: reset the scene-cutscene byte-order-normalization guard once per scene load,
+     * so a scene reload (e.g. title-demo loop) re-normalizes freshly-DMA'd packed data. */
+    gCsSceneNormalized = NULL;
+#endif
 }
 
 void Cutscene_StartManual(PlayState* play, CutsceneContext* csCtx) {
@@ -1388,6 +1393,9 @@ void CutsceneCmd_Destination(PlayState* play, CutsceneContext* csCtx, CsCmdDesti
                     Flags_GetEventChkInf(EVENTCHKINF_BD) && Flags_GetEventChkInf(EVENTCHKINF_BE) &&
                     Flags_GetEventChkInf(EVENTCHKINF_BF) && Flags_GetEventChkInf(EVENTCHKINF_AD)) {
                     play->csCtx.script = SEGMENTED_TO_VIRTUAL(gTowerBarrierCs);
+#ifdef __3DS__
+                    Cutscene_NormalizePackedFieldsOnce(play->csCtx.script); /* static array */
+#endif
                     play->csCtx.curFrame = 0;
                     gSaveContext.cutsceneTrigger = 1;
                     // Force cutsceneIndex to CS_INDEX_F so that CS_STATE_STOP is handled by the "scripted" system's
@@ -1561,6 +1569,13 @@ void CutsceneCmd_Transition(PlayState* play, CutsceneContext* csCtx, CsCmdTransi
     }
 }
 
+/* PORT: cutscene scripts are byte-order-normalized in place at load time by
+ * Cutscene_NormalizePackedFields (see below Cutscene_ProcessScript), so a camera point's
+ * continueFlag sits at native struct offset 0 on both endiannesses. (The former __3DS__
+ * word>>24 read was correct only for the still-packed data; after normalization the
+ * native field is correct on all platforms.) */
+#define CS_CAM_CONTINUE_FLAG(script) (((CutsceneCameraPoint*)(script))->continueFlag)
+
 s32 CutsceneCmd_UpdateCamEyeSpline(PlayState* play, CutsceneContext* csCtx, u8* script, u8 relativeToPlayer) {
     s32 shouldContinue = true;
     CsCmdCam* cmd = (CsCmdCam*)script;
@@ -1590,7 +1605,7 @@ s32 CutsceneCmd_UpdateCamEyeSpline(PlayState* play, CutsceneContext* csCtx, u8* 
     }
 
     while (shouldContinue) {
-        if (((CutsceneCameraPoint*)script)->continueFlag == CS_CAM_STOP) {
+        if (CS_CAM_CONTINUE_FLAG(script) == CS_CAM_STOP) {
             shouldContinue = false;
         }
 
@@ -1629,7 +1644,7 @@ s32 CutsceneCmd_UpdateCamAtSpline(PlayState* play, CutsceneContext* csCtx, u8* s
     }
 
     while (shouldContinue) {
-        if (((CutsceneCameraPoint*)script)->continueFlag == CS_CAM_STOP) {
+        if (CS_CAM_CONTINUE_FLAG(script) == CS_CAM_STOP) {
             shouldContinue = false;
         }
 
@@ -1811,6 +1826,274 @@ void CutsceneCmd_Text(PlayState* play, CutsceneContext* csCtx, CsCmdText* cmd) {
     }
 }
 
+#ifdef __3DS__
+/* --- PORT: cutscene packed-field byte-order normalization -------------------------
+ * OoT cutscene scripts are authored as packed BIG-ENDIAN words (CMD_BBH/CMD_HH/CMD_HBB
+ * in cutscene_commands.h). On this little-endian port the packed u32 VALUE is correct but
+ * its sub-fields land byte-reversed vs the C struct overlays in cutscene.h — so every
+ * packed field (continueFlag, cameraRoll, nextPointFrame, pos.x/y/z, ids, start/endFrame,
+ * rotations, hour/min, rumble params, ...) reads wrong. Full-word fields (CMD_W: header,
+ * cmdType, cmdEntries, actor-cue Vec3i positions; CMD_F: viewAngle, unused floats) are
+ * ALREADY correct and MUST NOT be swapped. This walks the script exactly like
+ * Cutscene_ProcessScript and byte-reverses ONLY the packed words, once per buffer fill.
+ * Afterwards z_demo.c handlers, z_camera.c and z_cutscene_spline.c read the structs
+ * natively with no per-site edits. NEVER compiled on big-endian N64. */
+/* Per-authoring-macro transforms from the packed BIG-ENDIAN VALUE to the native LE
+ * struct layout. NOT a whole-word byte reverse: that would restore the BE byte order,
+ * but the LE struct reads multi-byte fields LE, so byte-reversing byte-swaps every u16.
+ * CMD_HH(a,b)=(a<<16)|b  -> two 16-bit fields, swap halfwords.
+ * CMD_BBH(a,b,c)=(a<<24)|(b<<16)|c -> byte a@0, byte b@1, u16 c@2.
+ * CMD_HBB(a,b,c)=(a<<16)|(b<<8)|c  -> u16 a@0, byte b@2, byte c@3. */
+#define CS_HH(v)  (((u32)(v) >> 16) | ((u32)(v) << 16))
+#define CS_BBH(v) (((u32)(v) >> 24) | ((((u32)(v) >> 16) & 0xFFu) << 8) | (((u32)(v) & 0xFFFFu) << 16))
+#define CS_HBB(v) (((u32)(v) >> 16) | ((((u32)(v) >> 8) & 0xFFu) << 16) | (((u32)(v) & 0xFFu) << 24))
+
+/* Most cutscene words are CMD_HH pairs; this handles a run of them. Mixed commands
+ * (CMD_BBH/CMD_HBB words) are handled inline at their case. */
+static void Cutscene_SwapWords(u32* w, s32 count) {
+    s32 k;
+    for (k = 0; k < count; k++) {
+        w[k] = CS_HH(w[k]);
+    }
+}
+
+static s32 Cutscene_IsActorCueCmd(s32 cmdType) {
+    switch (cmdType) {
+        case CS_CMD_PLAYER_CUE:
+        case CS_CMD_ACTOR_CUE_0_0:  case CS_CMD_ACTOR_CUE_0_1:  case CS_CMD_ACTOR_CUE_0_2:
+        case CS_CMD_ACTOR_CUE_0_3:  case CS_CMD_ACTOR_CUE_0_4:  case CS_CMD_ACTOR_CUE_0_5:
+        case CS_CMD_ACTOR_CUE_0_6:  case CS_CMD_ACTOR_CUE_0_7:  case CS_CMD_ACTOR_CUE_0_8:
+        case CS_CMD_ACTOR_CUE_0_9:  case CS_CMD_ACTOR_CUE_0_10: case CS_CMD_ACTOR_CUE_0_11:
+        case CS_CMD_ACTOR_CUE_0_12: case CS_CMD_ACTOR_CUE_0_13: case CS_CMD_ACTOR_CUE_0_14:
+        case CS_CMD_ACTOR_CUE_0_15: case CS_CMD_ACTOR_CUE_0_16: case CS_CMD_ACTOR_CUE_0_17:
+        case CS_CMD_ACTOR_CUE_1_0:  case CS_CMD_ACTOR_CUE_1_1:  case CS_CMD_ACTOR_CUE_1_2:
+        case CS_CMD_ACTOR_CUE_1_3:  case CS_CMD_ACTOR_CUE_1_4:  case CS_CMD_ACTOR_CUE_1_5:
+        case CS_CMD_ACTOR_CUE_1_6:  case CS_CMD_ACTOR_CUE_1_7:  case CS_CMD_ACTOR_CUE_1_8:
+        case CS_CMD_ACTOR_CUE_1_9:  case CS_CMD_ACTOR_CUE_1_10: case CS_CMD_ACTOR_CUE_1_11:
+        case CS_CMD_ACTOR_CUE_1_12: case CS_CMD_ACTOR_CUE_1_13: case CS_CMD_ACTOR_CUE_1_14:
+        case CS_CMD_ACTOR_CUE_1_15: case CS_CMD_ACTOR_CUE_1_16: case CS_CMD_ACTOR_CUE_1_17:
+        case CS_CMD_ACTOR_CUE_2_0:  case CS_CMD_ACTOR_CUE_2_1:  case CS_CMD_ACTOR_CUE_2_2:
+        case CS_CMD_ACTOR_CUE_2_3:  case CS_CMD_ACTOR_CUE_2_4:  case CS_CMD_ACTOR_CUE_2_5:
+        case CS_CMD_ACTOR_CUE_2_6:  case CS_CMD_ACTOR_CUE_2_7:  case CS_CMD_ACTOR_CUE_2_8:
+        case CS_CMD_ACTOR_CUE_2_9:  case CS_CMD_ACTOR_CUE_2_10: case CS_CMD_ACTOR_CUE_2_11:
+        case CS_CMD_ACTOR_CUE_2_12: case CS_CMD_ACTOR_CUE_2_13:
+        case CS_CMD_ACTOR_CUE_3_0:  case CS_CMD_ACTOR_CUE_3_1:  case CS_CMD_ACTOR_CUE_3_2:
+        case CS_CMD_ACTOR_CUE_3_3:  case CS_CMD_ACTOR_CUE_3_4:  case CS_CMD_ACTOR_CUE_3_5:
+        case CS_CMD_ACTOR_CUE_3_6:  case CS_CMD_ACTOR_CUE_3_7:  case CS_CMD_ACTOR_CUE_3_8:
+        case CS_CMD_ACTOR_CUE_3_9:  case CS_CMD_ACTOR_CUE_3_10: case CS_CMD_ACTOR_CUE_3_11:
+        case CS_CMD_ACTOR_CUE_3_12:
+        case CS_CMD_ACTOR_CUE_4_0:  case CS_CMD_ACTOR_CUE_4_1:  case CS_CMD_ACTOR_CUE_4_2:
+        case CS_CMD_ACTOR_CUE_4_3:  case CS_CMD_ACTOR_CUE_4_4:  case CS_CMD_ACTOR_CUE_4_5:
+        case CS_CMD_ACTOR_CUE_4_6:  case CS_CMD_ACTOR_CUE_4_7:  case CS_CMD_ACTOR_CUE_4_8:
+        case CS_CMD_ACTOR_CUE_5_0:  case CS_CMD_ACTOR_CUE_5_1:  case CS_CMD_ACTOR_CUE_5_2:
+        case CS_CMD_ACTOR_CUE_5_3:  case CS_CMD_ACTOR_CUE_5_4:  case CS_CMD_ACTOR_CUE_5_5:
+        case CS_CMD_ACTOR_CUE_5_6:
+        case CS_CMD_ACTOR_CUE_6_0:  case CS_CMD_ACTOR_CUE_6_1:  case CS_CMD_ACTOR_CUE_6_2:
+        case CS_CMD_ACTOR_CUE_6_3:  case CS_CMD_ACTOR_CUE_6_4:  case CS_CMD_ACTOR_CUE_6_5:
+        case CS_CMD_ACTOR_CUE_6_6:  case CS_CMD_ACTOR_CUE_6_7:
+        case CS_CMD_ACTOR_CUE_7_0:  case CS_CMD_ACTOR_CUE_7_1:  case CS_CMD_ACTOR_CUE_7_2:
+        case CS_CMD_ACTOR_CUE_7_3:  case CS_CMD_ACTOR_CUE_7_4:  case CS_CMD_ACTOR_CUE_7_5:
+        case CS_CMD_ACTOR_CUE_7_6:
+        case CS_CMD_ACTOR_CUE_8_0:
+        case CS_CMD_ACTOR_CUE_9_0:
+            return true;
+        default:
+            return false;
+    }
+}
+
+void Cutscene_NormalizePackedFields(void* scriptPtr) {
+    u8* script = (u8*)scriptPtr;
+    s32 totalEntries;
+    s32 cmdType;
+    s32 cmdEntries;
+    s16 i;
+    s16 j;
+
+    if (script == NULL) {
+        return;
+    }
+    MemCpy(&totalEntries, script, sizeof(totalEntries)); /* CMD_W header - no swap */
+    script += 8;                                         /* totalEntries + frameCount */
+    if (totalEntries < 0 || totalEntries > 100000) {
+        return;
+    }
+
+    for (i = 0; i < totalEntries; i++) {
+        MemCpy(&cmdType, script, sizeof(cmdType));       /* CMD_W - no swap */
+        script += sizeof(cmdType);
+
+        if (cmdType == CS_CMD_END_OF_SCRIPT) {
+            return;
+        }
+
+        if (Cutscene_IsActorCueCmd(cmdType)) {
+            MemCpy(&cmdEntries, script, sizeof(cmdEntries));
+            script += sizeof(cmdEntries);
+            for (j = 0; j < cmdEntries; j++) {
+                Cutscene_SwapWords((u32*)script, 3);     /* id/startFrame, endFrame/rotX, rotY/rotZ */
+                script += sizeof(CsCmdActorCue);         /* leave Vec3i (CMD_W) + floats (CMD_F) */
+            }
+            continue;
+        }
+
+        switch (cmdType) {
+            case CS_CMD_CAM_EYE_SPLINE:
+            case CS_CMD_CAM_EYE_SPLINE_REL_TO_PLAYER:
+            case CS_CMD_CAM_AT_SPLINE:
+            case CS_CMD_CAM_AT_SPLINE_REL_TO_PLAYER: {
+                s32 stop;
+                Cutscene_SwapWords((u32*)script, 2);     /* CsCmdCam: HH, HH */
+                script += sizeof(CsCmdCam);
+                do {
+                    u32* pt = (u32*)script;
+                    stop = ((s8)((u32)pt[0] >> 24)) == CS_CAM_STOP; /* continueFlag = value's high byte, pre-swap */
+                    pt[0] = CS_BBH(pt[0]);               /* continueFlag(b)/roll(b)/nextPointFrame(h) */
+                    pt[2] = CS_HH(pt[2]);                /* pos.x(h) / pos.y(h)  (pt[1]=viewAngle CMD_F: leave) */
+                    pt[3] = CS_HH(pt[3]);                /* pos.z(h) / unused(h) */
+                    script += sizeof(CutsceneCameraPoint);
+                } while (!stop);
+                break;
+            }
+            case CS_CMD_CAM_EYE:
+            case CS_CMD_CAM_AT: {
+                u32* pt;
+                Cutscene_SwapWords((u32*)script, 2);     /* CsCmdCam */
+                script += sizeof(CsCmdCam);
+                pt = (u32*)script;
+                pt[0] = CS_BBH(pt[0]);                   /* continueFlag/roll/nextPointFrame */
+                pt[2] = CS_HH(pt[2]);                    /* pos.x / pos.y */
+                pt[3] = CS_HH(pt[3]);                    /* pos.z / unused */
+                script += sizeof(CutsceneCameraPoint);   /* single point (no terminator scan) */
+                break;
+            }
+            case CS_CMD_MISC:
+                MemCpy(&cmdEntries, script, sizeof(cmdEntries));
+                script += sizeof(cmdEntries);
+                for (j = 0; j < cmdEntries; j++) {
+                    Cutscene_SwapWords((u32*)script, 2); /* HH, HH; rest CMD_W */
+                    script += sizeof(CsCmdMisc);
+                }
+                break;
+            case CS_CMD_LIGHT_SETTING:
+                MemCpy(&cmdEntries, script, sizeof(cmdEntries));
+                script += sizeof(cmdEntries);
+                for (j = 0; j < cmdEntries; j++) {
+                    u32* p = (u32*)script;
+                    p[0] = CS_BBH(p[0]);                 /* (0, setting+1, startFrame) */
+                    p[1] = CS_HH(p[1]);                  /* (endFrame, unused) */
+                    script += sizeof(CsCmdLightSetting);
+                }
+                break;
+            case CS_CMD_START_SEQ:
+            case CS_CMD_STOP_SEQ:
+                MemCpy(&cmdEntries, script, sizeof(cmdEntries));
+                script += sizeof(cmdEntries);
+                for (j = 0; j < cmdEntries; j++) {
+                    Cutscene_SwapWords((u32*)script, 2);
+                    script += sizeof(CsCmdStartSeq);     /* == CsCmdStopSeq, 0x30 */
+                }
+                break;
+            case CS_CMD_FADE_OUT_SEQ:
+                MemCpy(&cmdEntries, script, sizeof(cmdEntries));
+                script += sizeof(cmdEntries);
+                for (j = 0; j < cmdEntries; j++) {
+                    Cutscene_SwapWords((u32*)script, 2);
+                    script += sizeof(CsCmdFadeOutSeq);
+                }
+                break;
+            case CS_CMD_RUMBLE_CONTROLLER:
+                MemCpy(&cmdEntries, script, sizeof(cmdEntries));
+                script += sizeof(cmdEntries);
+                for (j = 0; j < cmdEntries; j++) {
+                    u32* p = (u32*)script;
+                    p[0] = CS_HH(p[0]);                  /* (unused, startFrame) */
+                    p[1] = CS_HBB(p[1]);                 /* (endFrame, sourceStrength, duration) */
+                    p[2] = CS_BBH(p[2]);                 /* (decreaseRate, unused, unused) */
+                    script += sizeof(CsCmdRumble);
+                }
+                break;
+            case CS_CMD_TIME:
+                MemCpy(&cmdEntries, script, sizeof(cmdEntries));
+                script += sizeof(cmdEntries);
+                for (j = 0; j < cmdEntries; j++) {
+                    u32* p = (u32*)script;
+                    p[0] = CS_HH(p[0]);                  /* (unused, startFrame) */
+                    p[1] = CS_HBB(p[1]);                 /* (endFrame, hour, minute) */
+                    script += sizeof(CsCmdTime);         /* word2 = CMD_W(0), leave */
+                }
+                break;
+            case CS_CMD_TEXT:
+                MemCpy(&cmdEntries, script, sizeof(cmdEntries));
+                script += sizeof(cmdEntries);
+                for (j = 0; j < cmdEntries; j++) {
+                    Cutscene_SwapWords((u32*)script, 3); /* HH, HH, HH */
+                    script += sizeof(CsCmdText);
+                }
+                break;
+            case CS_CMD_TRANSITION:
+                script += sizeof(cmdEntries);            /* hardcoded 1 (CMD_W) - skip */
+                Cutscene_SwapWords((u32*)script, 2);
+                script += sizeof(CsCmdTransition);
+                break;
+            case CS_CMD_DESTINATION:
+                script += sizeof(cmdEntries);            /* hardcoded 1 (CMD_W) - skip */
+                Cutscene_SwapWords((u32*)script, 2);
+                script += sizeof(CsCmdDestination);
+                break;
+            default:
+                /* CS_UNK_DATA_LIST + unimplemented cmds: 0x30-byte entries, all CMD_W,
+                 * never dereferenced -> skip WITHOUT swapping (mirrors ProcessScript). */
+                MemCpy(&cmdEntries, script, sizeof(cmdEntries));
+                script += sizeof(cmdEntries);
+                if (cmdEntries < 0 || cmdEntries > 1000) {
+                    return;
+                }
+                for (j = 0; j < cmdEntries; j++) {
+                    script += 0x30;
+                }
+                break;
+        }
+    }
+}
+
+/* SCENE cutscenes are re-DMA'd fresh (BE-packed) into the play arena each scene load;
+ * Scene_CommandAlternateHeaderList can re-run the scene commands, so the assignment can
+ * fire >1x per load. Single-slot guard: normalize the currently-assigned script once;
+ * reset to NULL in Cutscene_InitContext (once per scene load) so a scene RELOAD (title-demo
+ * loop, same arena address, fresh data) re-normalizes. Only the LAST-assigned
+ * play->csCtx.script actually runs, so tracking one slot is sufficient. */
+void* gCsSceneNormalized = NULL;
+void Cutscene_NormalizeSceneScript(void* script) {
+    if (script != NULL && script != gCsSceneNormalized) {
+        Cutscene_NormalizePackedFields(script);
+        gCsSceneNormalized = script;
+    }
+}
+
+/* STATIC native cutscene arrays (gTowerBarrierCs, entrance/actor scripts) are never
+ * re-DMA'd; normalize each address at most once ever (persistent set, never reset). */
+#define CS_NORMALIZE_SET_SIZE 192
+static void* sCsNormalizedScripts[CS_NORMALIZE_SET_SIZE];
+static s32 sCsNormalizedCount = 0;
+void Cutscene_NormalizePackedFieldsOnce(void* script) {
+    s32 k;
+    if (script == NULL) {
+        return;
+    }
+    for (k = 0; k < sCsNormalizedCount; k++) {
+        if (sCsNormalizedScripts[k] == script) {
+            return; /* already native - do not double-swap */
+        }
+    }
+    Cutscene_NormalizePackedFields(script);
+    if (sCsNormalizedCount < CS_NORMALIZE_SET_SIZE) {
+        sCsNormalizedScripts[sCsNormalizedCount++] = script;
+    }
+}
+/* --- END PORT ------------------------------------------------------------------- */
+#endif
+
 void Cutscene_ProcessScript(PlayState* play, CutsceneContext* csCtx, u8* script) {
     s16 i;
     s32 totalEntries;
@@ -1832,13 +2115,8 @@ void Cutscene_ProcessScript(PlayState* play, CutsceneContext* csCtx, u8* script)
         return;
     }
 
-    { /* PORT_CSGUARD: detect byteswapped/garbage cutscene script */
-      extern int fprintf(); extern void* stderr; static int shown=0;
-      if(!shown){shown=1; fprintf(stderr,"[CS] totalEntries=%d csFrameCount=%d script=%p\n",totalEntries,csFrameCount,(void*)script);}
-      if (totalEntries < 0 || totalEntries > 100000) {
-        fprintf(stderr,"[CS] garbage totalEntries=%d -> stopping cutscene\n", totalEntries);
+    if (totalEntries < 0 || totalEntries > 100000) { /* PORT: garbage script -> stop safely */
         csCtx->state = CS_STATE_STOP; return;
-      }
     }
 
 #if DEBUG_FEATURES
@@ -1850,8 +2128,7 @@ void Cutscene_ProcessScript(PlayState* play, CutsceneContext* csCtx, u8* script)
 
     for (i = 0; i < totalEntries; i++) {
         if (script < csScriptStart || (script - csScriptStart) > 0x40000) {
-            extern int fprintf(); extern void* stderr;
-            fprintf(stderr, "[CS] runaway script (i=%d span=%ld) -> stop\n", i, (long)(script - csScriptStart));
+            /* PORT: safety guard against a runaway script pointer (desync) */
             csCtx->state = CS_STATE_STOP; return;
         }
         MemCpy(&cmdType, script, sizeof(cmdType));
@@ -2249,10 +2526,7 @@ void Cutscene_ProcessScript(PlayState* play, CutsceneContext* csCtx, u8* script)
                 MemCpy(&cmdEntries, script, 4);
                 script += sizeof(cmdEntries);
 
-                if (cmdEntries < 0 || cmdEntries > 1000) { /* PORT: garbage -> stop */
-                    extern int fprintf(); extern void* stderr;
-                    fprintf(stderr, "[CS] bad default cmdType=%d cmdEntries=%d i=%d -> stop\n",
-                            cmdType, cmdEntries, i);
+                if (cmdEntries < 0 || cmdEntries > 1000) { /* PORT: garbage -> stop safely */
                     csCtx->state = CS_STATE_STOP; return;
                 }
                 for (j = 0; j < cmdEntries; j++) {
@@ -2487,4 +2761,9 @@ void Cutscene_SetScript(PlayState* play, void* script) {
     } else {
         play->csCtx.script = script;
     }
+#ifdef __3DS__
+    /* PORT: entrance/actor cutscene scripts are static native arrays (big-endian-packed);
+     * normalize once per address (guard prevents double-swap on replay). */
+    Cutscene_NormalizePackedFieldsOnce(play->csCtx.script);
+#endif
 }

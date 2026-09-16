@@ -513,6 +513,15 @@ BAD_RETURN(s32) Scene_CommandAlternateHeaderList(PlayState* play, SceneCmd* cmd)
 BAD_RETURN(s32) Scene_CommandCutsceneData(PlayState* play, SceneCmd* cmd) {
     PRINTF("\ngame_play->demo_play.data=[%x]", play->csCtx.script);
     play->csCtx.script = SEGMENTED_TO_VIRTUAL(cmd->cutsceneData.data);
+#ifdef __3DS__
+    /* PORT: scene cutscene data is DMA'd big-endian-packed and byte-order-reversed vs the C
+     * structs; normalize once per scene load (single-slot guard, reset in Cutscene_InitContext,
+     * so an alt-header re-run of this command doesn't double-swap but a scene reload does). */
+    {
+        extern void Cutscene_NormalizeSceneScript(void* script);
+        Cutscene_NormalizeSceneScript(play->csCtx.script);
+    }
+#endif
 }
 
 BAD_RETURN(s32) Scene_CommandMiscSettings(PlayState* play, SceneCmd* cmd) {

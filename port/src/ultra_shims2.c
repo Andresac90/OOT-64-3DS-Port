@@ -76,7 +76,17 @@ s32 osEPiWriteIo(OSPiHandle* h, u32 devAddr, u32 data) { (void)h; (void)devAddr;
 
 /* Cartridge DMA → ROM image (PortDma in dma_shim.c). */
 extern s32 DmaMgr_AudioDmaHandler(OSPiHandle* pihandle, OSIoMesg* mb, s32 direction);
+#ifdef __3DS__
+extern s32 PortSram_Dma(OSIoMesg* mb, s32 direction); /* save data -> SD file */
+#endif
 s32 osEPiStartDma(OSPiHandle* h, OSIoMesg* mb, s32 direction) {
+#ifdef __3DS__
+    /* SRAM save window (cart 0x08000000, 32KB) is persisted to SD, not the ROM. */
+    u32 dev = (u32)mb->devAddr;
+    if (dev >= 0x08000000u && dev < 0x08008000u) {
+        return PortSram_Dma(mb, direction);
+    }
+#endif
     return DmaMgr_AudioDmaHandler(h, mb, direction);
 }
 

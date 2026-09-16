@@ -6,6 +6,7 @@
  */
 #include <3ds.h>
 #include <stdio.h>
+#include <dirent.h>
 
 #include <PR/gbi.h>
 #include "ultra64/sptask.h"
@@ -96,6 +97,9 @@ void PortGfx_FrameReady(void) {}
 void PortGfx_RunTask(OSTask* task) {
     if (!sGfxInited) PortGfx_Init();
     Port3ds_PollInput();
+    { extern void Port3ds_PumpInput(void); Port3ds_PumpInput(); } /* live buttons -> game PadMgr */
+    { extern void Audio_PortEnsureNullChannels(void); Audio_PortEnsureNullChannels(); } /* keep uninit audio channels non-NULL so direct game audio calls don't crash */
+    { extern void Port3ds_PumpAudio(void); Port3ds_PumpAudio(); } /* build+dispatch audio RSP task -> C audio microcode */
     gfx_start_frame();
     gfx_run((Gfx*)task->t.data_ptr);
     gfx_end_frame();
@@ -129,6 +133,34 @@ void PortDbgX(const char* label, unsigned val) {
     char buf[96];
     sprintf(buf, "%s=%08x", label, val);
     Log(buf);
+}
+
+/* Fast file-only loggers for high-volume renderer tracing. Unlike Log(), these
+ * skip the screen print + full-vblank wait (boot_flush), so thousands of lines
+ * cost SD I/O only. fopen/fputs/fclose per line still durably syncs each line to
+ * the card, so the last line survives a hard crash for post-mortem. */
+void PortLogFast(const char* s) {
+    FILE* f = fopen(LOG_PATH, "a");
+    if (f) { fputs(s, f); fputc('\n', f); fclose(f); }
+}
+void PortLogFastX(const char* label, unsigned val) {
+    char buf[96];
+    sprintf(buf, "%s=%08x", label, val);
+    PortLogFast(buf);
+}
+
+/* Return the end address (base+size) of the mapped, readable memory block that
+ * contains `addr`, or 0 if `addr` is unmapped/unreadable. The display-list
+ * interpreter uses this to bound its reads: an un-terminated or garbage DL that
+ * would otherwise walk into unmapped memory and data-abort is stopped cleanly at
+ * the edge of its mapped block. One svcQueryMemory per 4KB page walked = cheap. */
+unsigned PortMem_ReadableEnd(unsigned addr) {
+    MemInfo mi;
+    PageInfo pi;
+    if (R_FAILED(svcQueryMemory(&mi, &pi, addr))) return 0;
+    if (mi.state == MEMSTATE_FREE || mi.state == MEMSTATE_RESERVED) return 0;
+    if (!(mi.perm & MEMPERM_READ)) return 0;
+    return mi.base_addr + mi.size;
 }
 
 /* Keep the bottom-screen console up so the message is readable instead of
@@ -167,12 +199,32 @@ int main_minimal(int argc, char** argv) {
     return 0;
 }
 
+/* Delete any existing Luma crash dumps at boot. Luma writes crash_dump_%08u.dmp
+ * using the lowest free index, so with the folder emptied each launch, this
+ * session's crash (if any) always lands as crash_dump_00000000.dmp — one file,
+ * same name, which makes the user's Mac auto-transfer trivial. */
+static void WipeCrashDumps(void) {
+    const char* dir = "sdmc:/luma/dumps/arm11";
+    DIR* d = opendir(dir);
+    if (d == NULL) return;
+    struct dirent* ent;
+    char path[300];
+    while ((ent = readdir(d)) != NULL) {
+        if (ent->d_name[0] == '.') continue;
+        snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name);
+        remove(path);
+    }
+    closedir(d);
+}
+
 /* full boot path — the real entry point */
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
     gfxInitDefault();
     consoleInit(GFX_BOTTOM, NULL);
     { extern void PortCompat_InitStreams(void); PortCompat_InitStreams(); }
+    WipeCrashDumps(); /* keep only this run's crash dump, named crash_dump_00000000.dmp */
+    { extern void Port3ds_AudioInit(void); Port3ds_AudioInit(); } /* M3a ndsp plumbing; no-op without dspfirm.cdc */
 
     /* Truncate the log file at the start of every boot. */
     { FILE* f = fopen(LOG_PATH, "w");
@@ -199,6 +251,16 @@ int main(int argc, char** argv) {
      * Audio_ResetSfx() is CPU-side only (resets gSfxBanks to empty) and makes
      * all the SFX functions safe until real audio lands. */
     { extern void Audio_ResetSfx(void); Audio_ResetSfx(); Log("Audio_ResetSfx (sfx banks) done"); }
+    /* Point gAudioCtx table pointers at the native compiled tables so direct game
+     * reads (e.g. fanfare -> AudioLoad_GetFontsForSequence) can't NULL-deref. */
+    { extern void Audio_PortInitTables(void); Audio_PortInitTables(); Log("Audio_PortInitTables done"); }
+    /* Real audio bring-up: Audio_Init (AudioLoad_Init) sets up the audio heap and
+     * loads the spec, which sets audioBufferParameters.specUnk4 (nonzero). Without
+     * it AudioThread_Update's task path is gated off (specUnk4==0) so no synthesis
+     * task is ever built. DMA handler defaults to osEPiStartDma (port-routed). */
+    { extern void Audio_Init(void); extern void Audio_InitSound(void);
+      Audio_Init(); Log("Audio_Init done");
+      Audio_InitSound(); Log("Audio_InitSound done"); }
 
     Graph_ThreadEntry(0);
 

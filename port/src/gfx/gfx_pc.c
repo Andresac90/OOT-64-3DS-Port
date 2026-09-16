@@ -24,8 +24,30 @@ unsigned int gfx_port_tri_count;
 unsigned int gfx_port_frame_index;
 extern uintptr_t gSegments[];
 
+#ifdef __3DS__
+/* Log helpers (file-only, no vsync) used by the DL-walk crash guard below. */
+extern void PortLogFast(const char* s);
+extern void PortLogFastX(const char* label, unsigned val);
+/* Top of the loaded binary image (3dsx linker symbol); bounds the native
+ * static-image pointer range in seg_addr. */
+extern char __end__[];
+#endif
+
 /* PORT: warn-once instead of abort so renderer limits don't crash */
 #define SUPPORT_CHECK(x) do { static int _w=0; if(!(x)&&!_w){_w=1; fprintf(stderr, "[gfx] unsupported: %s\n", #x);} } while(0)
+
+/* PORT: texel/TLUT byte access, endian-corrected.
+ * Texture and palette data are stored as u64[] blobs. On the N64 (big-endian)
+ * the 8 bytes of each u64 are in memory order; our native little-endian build
+ * reverses them within each u64, so the byte at logical offset k physically
+ * lives at k^7 (base is u64-aligned). Every raw texel/palette read below indexes
+ * through this to recover N64 byte order. Geometry (Vtx/Gfx) is unaffected — it's
+ * typed struct fields the compiler already lays out correctly for LE. */
+#ifdef __3DS__
+#define TEXB(base, k) ((base)[(uintptr_t)(k) ^ 7u])
+#else
+#define TEXB(base, k) ((base)[(k)])
+#endif
 
 // SCALE_M_N: upscale/downscale M-bit integer to N-bit
 #define SCALE_5_8(VAL_) (((VAL_) * 0xFF) / 0x1F)
@@ -82,8 +104,15 @@ struct ColorCombiner {
     uint8_t shader_input_mapping[2][4];
 };
 
-static struct ColorCombiner color_combiner_pool[64];
-static uint8_t color_combiner_pool_size;
+/* PORT: OoT uses far more distinct combiner configs than sm64 (bug class #6 —
+ * same overflow as the citro3d shader pool). The old [64] pool + uint8_t size
+ * had NO bounds check: combiner #65+ wrote past the array and handed back
+ * pointers into corrupt memory -> garbage ShaderProgram bindings -> surfaces
+ * rendered with the wrong combiner entirely (white tunic persisting, wrong
+ * scene textures, scene-dependent glitches). */
+#define COLOR_COMBINER_POOL_CAP 512
+static struct ColorCombiner color_combiner_pool[COLOR_COMBINER_POOL_CAP];
+static uint16_t color_combiner_pool_size;
 
 static struct RSP {
     float modelview_matrix_stack[11][4][4];
@@ -131,7 +160,14 @@ static struct RDP {
     
     uint32_t other_mode_l, other_mode_h;
     uint32_t combine_mode;
-    
+    /* PORT two-cycle fold: when the N64 combiner's CYCLE 1 is the common OoT tint
+     * form (COMBINED-0)*X+0 with X in {PRIM,SHADE,ENV}, this holds X as a CC_*
+     * value (else CC_0). Cycle 1 was previously dropped entirely, which lost e.g.
+     * the tunic's ENV tint (cycle0 TEX*SHADE, cycle1 COMBINED*ENV -> white tunic)
+     * and terrain's cycle-1 SHADE lighting. Folded into cc_id bits 27-29 when the
+     * cycle type is G_CYC_2CYCLE. */
+    uint8_t c1_postmul;
+
     struct RGBA env_color, prim_color, fog_color, fill_color;
     struct XYWidthHeight viewport, scissor;
     bool viewport_or_scissor_changed;
@@ -233,6 +269,37 @@ static void gfx_generate_cc(struct ColorCombiner *comb, uint32_t cc_id) {
             shader_id |= val << (i * 12 + j * 3);
         }
     }
+    /* PORT two-cycle fold: route the cycle-1 multiplier colour (cc_id bits 27-29)
+     * through the existing per-vertex colour-input mechanism — reuse its slot if
+     * cycle 0 already references the same colour, else append it as the last
+     * input. Encode (slot-1) in shader_id bits 30-31 so the backend knows which
+     * input to multiply PREVIOUS by in TEV stage 1. If it would need a third
+     * colour input (backend carries max 2), drop the fold (= old behavior). */
+    {
+        uint8_t postmul = (cc_id >> 27) & 7;
+        if (postmul != CC_0) {
+            int slot = 0;
+            int used = 0;
+            for (int j = 0; j < 4; j++) {
+                if (shader_input_mapping[0][j] != 0) {
+                    used = j + 1;
+                    if (shader_input_mapping[0][j] == postmul) {
+                        slot = j + 1;
+                    }
+                }
+            }
+            if (slot == 0 && used < 2) {
+                shader_input_mapping[0][used] = postmul;
+                slot = used + 1;
+            }
+            if (slot != 0) {
+                shader_id |= (uint32_t)(slot - 1) << 30;
+            } else {
+                shader_id &= ~(7u << 27);
+            }
+        }
+    }
+
     comb->cc_id = cc_id;
     comb->prg = gfx_lookup_or_create_shader_program(shader_id);
     memcpy(comb->shader_input_mapping, shader_input_mapping, sizeof(shader_input_mapping));
@@ -250,6 +317,13 @@ static struct ColorCombiner *gfx_lookup_or_create_color_combiner(uint32_t cc_id)
         }
     }
     gfx_flush();
+    if (color_combiner_pool_size >= COLOR_COMBINER_POOL_CAP) {
+        /* Pool full: reuse the last slot (wrong-but-safe) instead of writing past
+         * the array. Only reachable if the game exceeds CAP distinct combiners. */
+        struct ColorCombiner *last = &color_combiner_pool[COLOR_COMBINER_POOL_CAP - 1];
+        gfx_generate_cc(last, cc_id);
+        return prev_combiner = last;
+    }
     struct ColorCombiner *comb = &color_combiner_pool[color_combiner_pool_size++];
     gfx_generate_cc(comb, cc_id);
     return prev_combiner = comb;
@@ -296,7 +370,7 @@ static uint8_t rgba32_buf[65536] __attribute__((aligned(32)));
 
 static void import_texture_rgba16(int tile) {
     for (uint32_t i = 0; i < rdp.loaded_texture[tile].size_bytes / 2; i++) {
-        uint16_t col16 = (rdp.loaded_texture[tile].addr[2 * i] << 8) | rdp.loaded_texture[tile].addr[2 * i + 1];
+        uint16_t col16 = (TEXB(rdp.loaded_texture[tile].addr, 2 * i) << 8) | TEXB(rdp.loaded_texture[tile].addr, 2 * i + 1);
         uint8_t a = col16 & 1;
         uint8_t r = col16 >> 11;
         uint8_t g = (col16 >> 6) & 0x1f;
@@ -315,7 +389,7 @@ static void import_texture_rgba16(int tile) {
 
 static void import_texture_ia4(int tile) {
     for (uint32_t i = 0; i < rdp.loaded_texture[tile].size_bytes * 2; i++) {
-        uint8_t byte = rdp.loaded_texture[tile].addr[i / 2];
+        uint8_t byte = TEXB(rdp.loaded_texture[tile].addr, i / 2);
         uint8_t part = (byte >> (4 - (i % 2) * 4)) & 0xf;
         uint8_t intensity = part >> 1;
         uint8_t alpha = part & 1;
@@ -336,8 +410,8 @@ static void import_texture_ia4(int tile) {
 
 static void import_texture_ia8(int tile) {
     for (uint32_t i = 0; i < rdp.loaded_texture[tile].size_bytes; i++) {
-        uint8_t intensity = rdp.loaded_texture[tile].addr[i] >> 4;
-        uint8_t alpha = rdp.loaded_texture[tile].addr[i] & 0xf;
+        uint8_t intensity = TEXB(rdp.loaded_texture[tile].addr, i) >> 4;
+        uint8_t alpha = TEXB(rdp.loaded_texture[tile].addr, i) & 0xf;
         uint8_t r = intensity;
         uint8_t g = intensity;
         uint8_t b = intensity;
@@ -355,8 +429,8 @@ static void import_texture_ia8(int tile) {
 
 static void import_texture_ia16(int tile) {
     for (uint32_t i = 0; i < rdp.loaded_texture[tile].size_bytes / 2; i++) {
-        uint8_t intensity = rdp.loaded_texture[tile].addr[2 * i];
-        uint8_t alpha = rdp.loaded_texture[tile].addr[2 * i + 1];
+        uint8_t intensity = TEXB(rdp.loaded_texture[tile].addr, 2 * i);
+        uint8_t alpha = TEXB(rdp.loaded_texture[tile].addr, 2 * i + 1);
         uint8_t r = intensity;
         uint8_t g = intensity;
         uint8_t b = intensity;
@@ -374,9 +448,9 @@ static void import_texture_ia16(int tile) {
 
 static void import_texture_ci4(int tile) {
     for (uint32_t i = 0; i < rdp.loaded_texture[tile].size_bytes * 2; i++) {
-        uint8_t byte = rdp.loaded_texture[tile].addr[i / 2];
+        uint8_t byte = TEXB(rdp.loaded_texture[tile].addr, i / 2);
         uint8_t idx = (byte >> (4 - (i % 2) * 4)) & 0xf;
-        uint16_t col16 = (rdp.palette[idx * 2] << 8) | rdp.palette[idx * 2 + 1]; // Big endian load
+        uint16_t col16 = (TEXB(rdp.palette, idx * 2) << 8) | TEXB(rdp.palette, idx * 2 + 1); // Big endian load
         uint8_t a = col16 & 1;
         uint8_t r = col16 >> 11;
         uint8_t g = (col16 >> 6) & 0x1f;
@@ -395,8 +469,8 @@ static void import_texture_ci4(int tile) {
 
 static void import_texture_ci8(int tile) {
     for (uint32_t i = 0; i < rdp.loaded_texture[tile].size_bytes; i++) {
-        uint8_t idx = rdp.loaded_texture[tile].addr[i];
-        uint16_t col16 = (rdp.palette[idx * 2] << 8) | rdp.palette[idx * 2 + 1]; // Big endian load
+        uint8_t idx = TEXB(rdp.loaded_texture[tile].addr, i);
+        uint16_t col16 = (TEXB(rdp.palette, idx * 2) << 8) | TEXB(rdp.palette, idx * 2 + 1); // Big endian load
         uint8_t a = col16 & 1;
         uint8_t r = col16 >> 11;
         uint8_t g = (col16 >> 6) & 0x1f;
@@ -416,7 +490,7 @@ static void import_texture_ci8(int tile) {
 static void import_texture_i4(int tile) {
     /* uses module-static rgba32_buf (3DS stack is tiny; no 32KB stack local) */
     for (uint32_t i = 0; i < rdp.loaded_texture[tile].size_bytes * 2; i++) {
-        uint8_t byte = rdp.loaded_texture[tile].addr[i / 2];
+        uint8_t byte = TEXB(rdp.loaded_texture[tile].addr, i / 2);
         uint8_t part = (byte >> (4 - (i % 2) * 4)) & 0xf;
         uint8_t intensity = part << 4 | part;
         rgba32_buf[4*i + 0] = intensity;
@@ -432,7 +506,7 @@ static void import_texture_i4(int tile) {
 static void import_texture_i8(int tile) {
     /* uses module-static rgba32_buf (3DS stack is tiny; no 64KB stack local) */
     for (uint32_t i = 0; i < rdp.loaded_texture[tile].size_bytes; i++) {
-        uint8_t intensity = rdp.loaded_texture[tile].addr[i];
+        uint8_t intensity = TEXB(rdp.loaded_texture[tile].addr, i);
         rgba32_buf[4*i + 0] = intensity;
         rgba32_buf[4*i + 1] = intensity;
         rgba32_buf[4*i + 2] = intensity;
@@ -444,19 +518,38 @@ static void import_texture_i8(int tile) {
 }
 
 static void import_texture_rgba32(int tile) {
+    /* Reorder bytes (TEXB) into the staging buffer rather than uploading the u64
+     * blob directly, so the LE 8-byte reversal is corrected like the other formats. */
+    for (uint32_t i = 0; i < rdp.loaded_texture[tile].size_bytes; i++) {
+        rgba32_buf[i] = TEXB(rdp.loaded_texture[tile].addr, i);
+    }
     uint32_t width = rdp.texture_tile.line_size_bytes / 2;
     uint32_t height = (rdp.loaded_texture[tile].size_bytes / 2) / rdp.texture_tile.line_size_bytes;
-    gfx_rapi->upload_texture((uint8_t*)rdp.loaded_texture[tile].addr, width, height);
+    gfx_rapi->upload_texture(rgba32_buf, width, height);
 }
 
 static void import_texture(int tile) {
     uint8_t fmt = rdp.texture_tile.fmt;
     uint8_t siz = rdp.texture_tile.siz;
-    
+
     if (gfx_texture_cache_lookup(tile, &rendering_state.textures[tile], rdp.loaded_texture[tile].addr, fmt, siz)) {
         return;
     }
-    
+#ifdef __3DS__
+    /* Crash-proof the texel read: a bad segment/asset pointer can leave a texture
+     * address in unmapped memory (the gap above the loaded image). Reading it in
+     * the import loop would data-abort. Verify the whole texture is inside a mapped
+     * block; if not, skip the upload (the previously-bound texture stays) rather
+     * than crash — same philosophy as the DL-walk guard. */
+    { extern unsigned PortMem_ReadableEnd(unsigned addr);
+      uintptr_t a = (uintptr_t)rdp.loaded_texture[tile].addr;
+      unsigned e = PortMem_ReadableEnd((unsigned)a);
+      if (e == 0 || a + rdp.loaded_texture[tile].size_bytes > (uintptr_t)e) {
+          PortLogFastX("[TEX] skip unmapped tex", (unsigned)a);
+          return;
+      } }
+#endif
+
     int t0 = get_time();
     if (fmt == G_IM_FMT_RGBA) {
         if (siz == G_IM_SIZ_16b) {
@@ -838,7 +931,30 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
     }
     
     uint32_t cc_id = rdp.combine_mode;
-    
+
+    /* PORT two-cycle fold: only meaningful when the RDP is actually in 2-cycle
+     * mode (1-cycle DLs duplicate cycle 0 into the cycle-1 fields). */
+    if (rdp.c1_postmul != CC_0 &&
+        (rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == (uint32_t)G_CYC_2CYCLE) {
+        cc_id |= (uint32_t)rdp.c1_postmul << 27; /* bits 27-29 */
+#ifdef __3DS__
+        { /* diag (self-limiting): prove the fold fires on HW; remove once tunic verified */
+            static int _n2c = 0;
+            if (_n2c < 8) { extern void PortDbgX(const char* s, unsigned v);
+                PortDbgX("[2CYC] fold cc", cc_id); _n2c++; }
+        }
+#endif
+    }
+#ifdef __3DS__
+    else if (rdp.c1_postmul != CC_0) {
+        /* diag: fold suppressed by cycle-type gate — if this fires for the tunic
+         * the gate is wrong (othermode not 2CYCLE when expected). */
+        static int _n1c = 0;
+        if (_n1c < 4) { extern void PortDbgX(const char* s, unsigned v);
+            PortDbgX("[2CYC] gated omh", rdp.other_mode_h); _n1c++; }
+    }
+#endif
+
     bool use_alpha = (rdp.other_mode_l & (G_BL_A_MEM << 18)) == 0;
     bool use_fog = (rdp.other_mode_l >> 30) == G_BL_CLR_FOG;
     bool texture_edge = (rdp.other_mode_l & CVG_X_ALPHA) == CVG_X_ALPHA;
@@ -850,7 +966,7 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
     if (use_alpha) cc_id |= SHADER_OPT_ALPHA;
     if (use_fog) cc_id |= SHADER_OPT_FOG;
     if (texture_edge) cc_id |= SHADER_OPT_TEXTURE_EDGE;
-    
+
     if (!use_alpha) {
         cc_id &= ~0xfff000;
     }
@@ -871,7 +987,7 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
     uint8_t num_inputs;
     bool used_textures[2];
     gfx_rapi->shader_get_info(prg, &num_inputs, used_textures);
-    
+
     for (int i = 0; i < 2; i++) {
         if (used_textures[i]) {
             if (rdp.textures_changed[i]) {
@@ -1175,6 +1291,7 @@ static inline uint32_t color_comb(uint32_t a, uint32_t b, uint32_t c, uint32_t d
 
 static void gfx_dp_set_combine_mode(uint32_t rgb, uint32_t alpha) {
     rdp.combine_mode = rgb | (alpha << 12);
+    rdp.c1_postmul = CC_0; /* G_SETCOMBINE sets the real value after this call */
 }
 
 static void gfx_dp_set_env_color(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
@@ -1280,6 +1397,7 @@ static void gfx_draw_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lr
 
 static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint8_t tile, int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy, bool flip) {
     uint32_t saved_combine_mode = rdp.combine_mode;
+    uint8_t saved_c1_postmul = rdp.c1_postmul;
     if ((rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_COPY) {
         // Per RDP Command Summary Set Tile's shift s and this dsdx should be set to 4 texels
         // Divide by 4 to get 1 instead
@@ -1328,6 +1446,7 @@ static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int3
     
     gfx_draw_rectangle(ulx, uly, lrx, lry);
     rdp.combine_mode = saved_combine_mode;
+    rdp.c1_postmul = saved_c1_postmul;
 }
 
 static void gfx_dp_fill_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry) {
@@ -1349,9 +1468,11 @@ static void gfx_dp_fill_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t
     }
     
     uint32_t saved_combine_mode = rdp.combine_mode;
+    uint8_t saved_c1_postmul = rdp.c1_postmul;
     gfx_dp_set_combine_mode(color_comb(0, 0, 0, G_CCMUX_SHADE), color_comb(0, 0, 0, G_ACMUX_SHADE));
     gfx_draw_rectangle(ulx, uly, lrx, lry);
     rdp.combine_mode = saved_combine_mode;
+    rdp.c1_postmul = saved_c1_postmul;
 }
 
 static void gfx_dp_set_z_image(void *z_buf_address) {
@@ -1385,11 +1506,41 @@ static inline void *seg_addr(uintptr_t w1) {
     if (w1 == 0) {
         return NULL;
     }
+    /* NOTE (2026-07-31): a "D7 part 2" that resolved SMALL-offset seg refs into heap-loaded
+     * segments (to fix the file-select's seg-1 title_static file slots) was tried and
+     * REVERTED — it garbled gameplay scene geometry (scene seg-2 small-offset refs are a
+     * mix of genuine refs AND native relocated pointers, indistinguishable by offset size).
+     * The file-select's black file slots need a narrower fix (only its specific UI segments)
+     * that does not touch scene resolution. See roadmap §5.2d. */
+    /* Any pointer INTO the loaded binary image [0x00100000, __end__) is a native
+     * relocated pointer (a gGfxPools master-DL branch, or a DL/vertex/texture
+     * pointer baked into a native-compiled asset), NOT an N64 segment offset. It
+     * must pass through even when its high nibble collides with a SET segment —
+     * e.g. asset DL pointers relocated to 0x01ffxxxx (nibble 1) vs a loaded
+     * segment 1. Segment-translating them sends the interpreter into the unmapped
+     * gap above the image. Genuine segment refs to DMA'd room/object data are
+     * >= 0x03000000 (> __end__) and still translate below. Mirror of
+     * PortSegmentedToVirtual; subsumes the old gGfxPools-only special case. */
+    if (w1 >= 0x00100000u && w1 < (uintptr_t)__end__) {
+        return (void *) w1;
+    }
     if (w1 >= 0x80000000u) {
         return (void *) (w1 & 0x1FFFFFFFu); /* KSEG0/KSEG1 -> physical/host */
     }
     if (w1 >= 0x10000000u) {
         return (void *) w1; /* native host pointer */
+    }
+    /* D7 fix (2026-07-31): the 3DS app heap (newlib malloc, where DMA'd assets + the
+     * game arena live) is at 0x08000000-0x0FFFFFFF, colliding with OoT segment numbers
+     * 8-0xF. A native heap pointer in DL data (e.g. a sub-DL the file-select built in a
+     * heap buffer, w1=0x08243670) carries its FULL heap address, so its low 24 bits are
+     * large (>= 0x100000, since arena allocations start at ~0x0824xxxx); a genuine
+     * seg-8..F reference has a SMALL offset (< 1MB) into its UI/keep asset. Treat the
+     * large-offset case as a native pointer BEFORE segment translation — otherwise
+     * seg_addr did gfx_port_segments[8]+0x243670 = out-of-bounds garbage -> file-select
+     * DL runaways. Small-offset (< 0x100000) values still translate as real seg refs. */
+    if (w1 >= 0x08000000u && (w1 & 0x00FFFFFFu) >= 0x00100000u) {
+        return (void *) w1;
     }
     {
         uintptr_t base = gfx_port_segments[(w1 << 4) >> 28];
@@ -1419,7 +1570,34 @@ static inline void *seg_addr(uintptr_t w1) {
 
 static void gfx_run_dl(Gfx* cmd) {
     int dummy = 0;
+#ifdef __3DS__
+    extern unsigned PortMem_ReadableEnd(unsigned addr);
+    unsigned long steps = 0;
+    uintptr_t valid_until = 0; /* cmd reads are safe below this mapped-block end */
+#endif
     for (;;) {
+#ifdef __3DS__
+        /* Crash-proof the walk: an un-terminated or garbage DL (bad seg_addr,
+         * missing G_ENDDL, or garbage bytes decoded as a G_DL branch) would read
+         * off its buffer into unmapped memory and data-abort. Before reading a
+         * command, make sure both of its 8 bytes are inside a mapped block; if
+         * cmd has crossed out of the last known-good block, re-probe. One
+         * svcQueryMemory per 4KB is negligible. */
+        if ((uintptr_t)cmd + sizeof(Gfx) > valid_until) {
+            unsigned end = PortMem_ReadableEnd((unsigned)(uintptr_t)cmd);
+            if (end == 0 || (uintptr_t)cmd + sizeof(Gfx) > (uintptr_t)end) {
+                PortLogFastX("[GFX] stop unmapped DL cmd", (unsigned)(uintptr_t)cmd);
+                return;
+            }
+            valid_until = end;
+        }
+        /* A single linear DL is at most a few thousand commands; a huge count
+         * means a runaway that happens to stay in mapped memory. Bail. */
+        if (++steps > 2000000UL) {
+            PortLogFastX("[GFX] RUNAWAY stop cmd", (unsigned)(uintptr_t)cmd);
+            return;
+        }
+#endif
         uint32_t opcode = cmd->words.w0 >> 24;
         
         switch (opcode) {
@@ -1553,8 +1731,20 @@ static void gfx_run_dl(Gfx* cmd) {
                 gfx_dp_set_combine_mode(
                     color_comb(C0(20, 4), C1(28, 4), C0(15, 5), C1(15, 3)),
                     color_comb(C0(12, 3), C1(12, 3), C0(9, 3), C1(9, 3)));
-                    /*color_comb(C0(5, 4), C1(24, 4), C0(0, 5), C1(6, 3)),
-                    color_comb(C1(21, 3), C1(3, 3), C1(18, 3), C1(0, 3)));*/
+                /* PORT: decode CYCLE 1 RGB (a1,b1,c1,d1) instead of dropping it.
+                 * Fold the common OoT tint form (COMBINED-0)*X+0 into rdp.c1_postmul
+                 * (backend applies it as a 2nd TEV stage: PREVIOUS * X). Field "0"
+                 * encodings are width-truncated G_CCMUX_0 (b:4bit->15, d:3bit->7).
+                 * Anything else keeps the old cycle-0-only behavior. */
+                {
+                    uint32_t a1 = C0(5, 4), b1 = C1(24, 4), c1 = C0(0, 5), d1 = C1(6, 3);
+                    if (a1 == G_CCMUX_COMBINED && b1 == (G_CCMUX_0 & 0xF) && d1 == (G_CCMUX_0 & 0x7)) {
+                        uint8_t m = color_comb_component(c1);
+                        if (m == CC_PRIM || m == CC_SHADE || m == CC_ENV) {
+                            rdp.c1_postmul = m;
+                        }
+                    }
+                }
                 break;
             // G_SETPRIMCOLOR, G_CCMUX_PRIMITIVE, G_ACMUX_PRIMITIVE, is used by Goddard
             // G_CCMUX_TEXEL1, LOD_FRACTION is used in Bowser room 1

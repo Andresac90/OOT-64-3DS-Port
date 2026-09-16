@@ -4146,6 +4146,14 @@ void KaleidoScope_Update(PlayState* play) {
 
                 case PAUSE_MAIN_STATE_SONG_PLAYBACK:
                     pauseCtx->ocarinaStaff = AudioOcarina_GetPlaybackStaff();
+#ifdef __3DS__
+                    /* Audio engine is stubbed: AudioOcarina_Update never runs, so the
+                     * playback staff stays frozen at state 0xFE and this state has no
+                     * manual exit -> hard lock (Quest Status -> song -> A). Treat the
+                     * demo as finished immediately; SONG_PROMPT_INIT->SONG_PROMPT is
+                     * B/START-escapable. REMOVE when real audio lands (M3e). */
+                    pauseCtx->ocarinaStaff->state = 0;
+#endif
                     if (pauseCtx->ocarinaStaff->state == 0) {
                         // Song playback is finished
                         pauseCtx->mainState = PAUSE_MAIN_STATE_SONG_PROMPT_INIT;
