@@ -531,4 +531,12 @@ void Cutscene_HandleEntranceTriggers(struct PlayState* play);
 void Cutscene_HandleConditionalTriggers(struct PlayState* play);
 void Cutscene_SetScript(struct PlayState* play, void* script);
 
+#ifdef __3DS__
+/* PORT: cutscene packed-field byte-order normalization (see z_demo.c). */
+extern void* gCsSceneNormalized;
+void Cutscene_NormalizePackedFields(void* script);
+void Cutscene_NormalizeSceneScript(void* script);       /* scene cutscenes (single-slot guard) */
+void Cutscene_NormalizePackedFieldsOnce(void* script);  /* static native arrays (persistent set) */
+#endif
+
 #endif

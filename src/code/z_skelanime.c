@@ -885,10 +885,25 @@ void AnimTaskQueue_AddLoadPlayerFrame(PlayState* play, LinkAnimationHeader* anim
         s32 pad;
 
         osCreateMesgQueue(&task->data.loadPlayerFrame.msgQueue, &task->data.loadPlayerFrame.msg, 1);
+#ifdef __3DS__
+        /* PORT: on the N64 the animation header's `segment` field is a segment-07
+         * VROM offset that gets DMA'd from link_animetion. On this port the decomp's
+         * asset relocation rewrites it to a *native little-endian pointer* to the
+         * frame data (verified: header->segment == &gPlayerAnim_..._Data). The N64
+         * LINK_ANIMATION_OFFSET math (RomStart + (addr & 0xFFFFFF)) then produced a
+         * garbage VROM address, so every player animation frame loaded junk -> Link's
+         * skeleton exploded. Read the frame directly from the native pointer instead. */
+        {
+            u32 frameSize = sizeof(Vec3s) * limbCount + 2;
+            memcpy(frameTable, (void*)((uintptr_t)linkAnimHeader->segment + frameSize * frame), frameSize);
+            osSendMesg(&task->data.loadPlayerFrame.msgQueue, NULL, OS_MESG_NOBLOCK);
+        }
+#else
         DMA_REQUEST_ASYNC(&task->data.loadPlayerFrame.req, frameTable,
                           LINK_ANIMATION_OFFSET(linkAnimHeader->segment, ((sizeof(Vec3s) * limbCount + 2) * frame)),
                           sizeof(Vec3s) * limbCount + 2, 0, &task->data.loadPlayerFrame.msgQueue, NULL,
                           "../z_skelanime.c", 2004);
+#endif
     }
 }
 

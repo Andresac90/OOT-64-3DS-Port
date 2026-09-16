@@ -2334,10 +2334,18 @@ void Audio_UpdateFanfare(void);
  * This is Audio_Update for the graph thread
  */
 void Audio_Update(void) {
+    /* __3DS__ bring-up stub removed: the audio pipeline (heap, synthesis, C
+     * microcode) is now wired, so Audio_Update must run to process sequence
+     * commands and activate notes. */
 #ifdef __3DS__
-    return; /* audio not implemented yet (bring-up) */
+    { extern void PortDbgX(const char*, unsigned); static unsigned au = 0;
+      if ((++au & 255) == 1) PortDbgX("AU gate func_800FAD34", (unsigned)func_800FAD34()); }
 #endif
     if (func_800FAD34() == 0) {
+#ifdef __3DS__
+        { extern void PortDbgX(const char*, unsigned); static unsigned ab = 0;
+          if ((++ab & 255) == 1) PortDbgX("AU body RUNS seqCmdWr", (unsigned)gAudioCtx.audioBufferParameters.specUnk4); }
+#endif
 #if DEBUG_FEATURES
         sAudioUpdateTaskStart = gAudioCtx.totalTaskCount;
         sAudioUpdateStartTime = osGetTime();
@@ -3145,6 +3153,48 @@ void Audio_ClearSariaBgmAtPos(Vec3f* pos) {
         sSariaBgmPtr = NULL;
     }
 }
+
+#ifdef __3DS__
+/**
+ * PORT bring-up: the audio thread never runs, so gAudioCtx.seqPlayers[].channels[]
+ * are left NULL. Real OoT points them at the zeroed &gAudioCtx.sequenceChannelNone
+ * sentinel, which is why game code derefs channels directly (e.g. Audio_SplitBgmChannels,
+ * Audio_UpdateReverbSetting) without NULL checks. Game logic still calls those audio
+ * functions directly (SFX, seq-mode changes), bypassing the stubbed Audio_Update, so
+ * those direct derefs crash on NULL. Patch any NULL channel to the sentinel once per
+ * frame: idempotent, only touches NULLs, so it stays correct if real audio (M3) later
+ * allocates genuine channels. Called from the port frame loop (3ds_main.c).
+ */
+void Audio_PortEnsureNullChannels(void) {
+    s32 i, j;
+    for (i = 0; i < (s32)ARRAY_COUNT(gAudioCtx.seqPlayers); i++) {
+        for (j = 0; j < (s32)ARRAY_COUNT(gAudioCtx.seqPlayers[i].channels); j++) {
+            if (gAudioCtx.seqPlayers[i].channels[j] == NULL) {
+                gAudioCtx.seqPlayers[i].channels[j] = &gAudioCtx.sequenceChannelNone;
+            }
+        }
+    }
+}
+
+/**
+ * PORT bring-up: AudioLoad_Init never runs, so the gAudioCtx table POINTERS stay
+ * NULL while game code reads them directly — e.g. grabbing an item plays the
+ * item-get fanfare: Audio_PlayFanfare -> AudioLoad_GetFontsForSequence ->
+ * gAudioCtx.sequenceFontTable[seqId] -> NULL deref crash. The tables themselves
+ * are native C data already linked into the build (src/audio/tables/*.c +
+ * src_gen/sequence_font_table_data.c), so point at them once at boot — mirrors
+ * AudioLoad_Init load.c:1372-1377 (pointer assignments only; no
+ * AudioLoad_InitTable, which mutates entries and belongs to real init/M3b).
+ * Called from 3ds_main.c. Remove when real AudioLoad_Init runs (M3b).
+ */
+void Audio_PortInitTables(void) {
+    gAudioCtx.sequenceTable = &gSequenceTable;
+    gAudioCtx.soundFontTable = &gSoundFontTable;
+    gAudioCtx.sampleBankTable = &gSampleBankTable;
+    gAudioCtx.sequenceFontTable = gSequenceFontTable;
+    gAudioCtx.numSequences = gAudioCtx.sequenceTable->header.numEntries;
+}
+#endif
 
 /**
  * Turns on and off channels from both bgm players in a way that splits

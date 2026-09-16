@@ -227,11 +227,22 @@ void EffectSs_Spawn(PlayState* play, s32 type, s32 priority, void* initParams) {
             PRINTF_RST();
         }
 
+#ifdef __3DS__
+        /* PORT: effect-ss overlays are statically linked, so overlayEntry->profile
+         * is already a native pointer. Unlike the other overlay loaders (z_DLF.c),
+         * this one mallocs loadedRamAddr directly instead of using the port's
+         * Overlay_AllocateAndLoad (which returns vramStart), so the N64 relocation
+         * delta (vramStart - loadedRamAddr) is NOT zero and would offset the native
+         * profile into a KSEG0 address -> crash in EffectSs_Spawn. Use it as-is,
+         * same as z_actor.c Actor_Spawn. */
+        profile = overlayEntry->profile;
+#else
         profile = (void*)(uintptr_t)((overlayEntry->profile != NULL)
                                          ? (void*)((uintptr_t)overlayEntry->profile -
                                                    (intptr_t)((uintptr_t)overlayEntry->vramStart -
                                                               (uintptr_t)overlayEntry->loadedRamAddr))
                                          : NULL);
+#endif
     }
 
     if (profile->init == NULL) {

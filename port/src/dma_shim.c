@@ -16,6 +16,7 @@
 #include "ultra64.h"
 extern int fprintf(); extern void* stderr;
 extern void* fopen(); extern int fseek(); extern long ftell(); extern u32 fread(); extern int fclose();
+extern u32 fwrite();
 extern void* malloc(); extern void exit(); extern void* memcpy(); extern void* memset();
 #define SEEK_SET 0
 #define SEEK_END 2
@@ -173,3 +174,44 @@ s32 DmaMgr_AudioDmaHandler(OSPiHandle* pihandle, OSIoMesg* mb, s32 direction) {
     }
     return 0;
 }
+
+#ifdef __3DS__
+/* --- SRAM save persistence ---------------------------------------------
+ * The game's SsSram driver DMAs save data to/from cart address 0x08000000
+ * (32KB). On N64 that's battery-backed cartridge SRAM; here we back it with a
+ * file on the SD card so saves survive power-off. Called from the osEPiStartDma
+ * shim (ultra_shims2.c) for any DMA in the [0x08000000, 0x08008000) window —
+ * that shim is the only place that still has the read/write `direction`. */
+#define SRAM_FILE      "sdmc:/3ds/oot/save.bin"
+#define PORT_SRAM_SIZE 0x8000u
+static u8 sSram[PORT_SRAM_SIZE];
+static int sSramLoaded = 0;
+
+static void SramLoad(void) {
+    void* f = fopen(SRAM_FILE, "rb");
+    if (f != NULL) { fread(sSram, 1, PORT_SRAM_SIZE, f); fclose(f); }
+    else { memset(sSram, 0, PORT_SRAM_SIZE); } /* no file -> blank cart; game re-inits */
+    sSramLoaded = 1;
+}
+static void SramFlush(void) {
+    void* f = fopen(SRAM_FILE, "wb");
+    if (f != NULL) { fwrite(sSram, 1, PORT_SRAM_SIZE, f); fclose(f); }
+}
+
+s32 PortSram_Dma(OSIoMesg* mb, s32 direction) {
+    u32 off = (u32)mb->devAddr - 0x08000000u;
+    if (!sSramLoaded) SramLoad();
+    if (off < PORT_SRAM_SIZE && off + mb->size <= PORT_SRAM_SIZE) {
+        if (direction == OS_WRITE) {
+            memcpy(sSram + off, mb->dramAddr, mb->size);
+            SramFlush(); /* durable: flush the full buffer per save write */
+        } else {
+            memcpy(mb->dramAddr, sSram + off, mb->size);
+        }
+    }
+    if (mb->hdr.retQueue != NULL) {
+        osSendMesg(mb->hdr.retQueue, NULL, OS_MESG_NOBLOCK);
+    }
+    return 0;
+}
+#endif

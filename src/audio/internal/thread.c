@@ -389,6 +389,13 @@ void AudioThread_InitMesgQueuesImpl(void) {
 void AudioThread_QueueCmd(u32 opArgs, void** data) {
     AudioCmd* cmd = &gAudioCtx.threadCmdBuf[gAudioCtx.threadCmdWritePos & 0xFF];
 
+#ifdef __3DS__
+    /* AUDIO_MK_CMD packs op into the HIGH byte (N64 big-endian). The AudioCmd
+     * union reads op/arg0/arg1/arg2 from bytes 0..3, so on the little-endian
+     * 3DS the op ends up in byte 3 and dispatch sees garbage. Byte-swap so op
+     * lands in byte 0. Single fix point for every AUDIOCMD_* command. */
+    opArgs = __builtin_bswap32(opArgs);
+#endif
     cmd->opArgs = opArgs;
     cmd->data = *data;
 
@@ -523,7 +530,14 @@ void AudioThread_ProcessCmds(u32 msg) {
         }
 
         cmd = &gAudioCtx.threadCmdBuf[sCurCmdRdPos++ & 0xFF];
+#ifdef __3DS__
+        { extern void PortDbgX(const char*, unsigned); static unsigned pcc = 0;
+          if (pcc < 48) { PortDbgX("PCmds op", (unsigned)cmd->op); pcc++; } }
+#endif
         if (cmd->op == AUDIOCMD_OP_GLOBAL_STOP_AUDIOCMDS) {
+#ifdef __3DS__
+            { extern void PortDbgX(const char*, unsigned); PortDbgX("PCmds hit STOP at", (unsigned)sCurCmdRdPos); }
+#endif
             gAudioCtx.threadCmdQueueFinished = true;
             return;
         }

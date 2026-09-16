@@ -36,7 +36,11 @@ static void Sched_RunTask(OSScTask* task) {
             osViSwapBuffer(task->framebuffer->swapBuffer);
         }
     }
-    /* audio tasks: nothing to run — synthesis is CPU-side later */
+    /* audio tasks: execute the Acmd list on the CPU (C reimpl of aspMain). */
+    if (task->list.t.type == M_AUDTASK) {
+        extern void PortAudio_RunTask(OSTask * task);
+        PortAudio_RunTask(&task->list);
+    }
     if (task->msgQueue != NULL) {
         osSendMesg(task->msgQueue, task->msg, OS_MESG_NOBLOCK);
     }

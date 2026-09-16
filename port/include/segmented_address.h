@@ -12,6 +12,9 @@
 #include "stdint.h"
 
 extern uintptr_t gSegments[NUM_SEGMENTS];
+#ifdef __3DS__
+extern char __end__[]; /* top of the loaded binary image (3dsx linker symbol) */
+#endif
 
 static inline void* PortSegmentedToVirtual(uintptr_t addr) {
     uintptr_t v;
@@ -25,6 +28,26 @@ static inline void* PortSegmentedToVirtual(uintptr_t addr) {
     }
     if (addr >= 0x10000000u) {
         return (void*)addr; /* native host pointer */
+    }
+    /* D7 fix (2026-07-31): the 3DS app heap (newlib malloc, where DMA'd assets + the game
+     * arena live) is at 0x08000000-0x0FFFFFFF, colliding with OoT segment numbers 8-0xF.
+     * A native heap pointer (arena allocations start ~0x0824xxxx) has large low-24-bits
+     * (>= 0x100000); a genuine seg-8..F reference has a small offset (< 1MB) into its
+     * asset. Treat the large-offset case as native BEFORE gSegments translation. Mirror of
+     * gfx_pc.c seg_addr. Fixes the file-select (seg 8 UI assets) reading garbage. */
+    if (addr >= 0x08000000u && (addr & 0x00FFFFFFu) >= 0x00100000u) {
+        return (void*)addr;
+    }
+    /* A pointer INTO the loaded binary image [0x00100000, __end__) is a relocated
+     * native asset pointer, not a raw segment offset — native-compiled asset data
+     * stores real pointers, never N64 segment addresses. It must pass through even
+     * when its high nibble happens to match a SET segment (e.g. a scene-data list
+     * pointer relocated to 0x0200xxxx, whose nibble 2 collides with the loaded
+     * scene segment): translating it would corrupt the pointer. This is the crux
+     * that broke Scene_CommandPlayerEntryList once the binary grew past 0x02000000.
+     * Must be checked BEFORE the gSegments logic. */
+    if (addr >= 0x00100000u && addr < (uintptr_t)__end__) {
+        return (void*)addr;
     }
     /* If this "segment" slot is unset, `addr` is NOT a segment offset — it is a
      * real pointer baked into the native asset that just happens to land below

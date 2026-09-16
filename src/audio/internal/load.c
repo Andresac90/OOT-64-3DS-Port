@@ -617,6 +617,11 @@ s32 AudioLoad_SyncInitSeqPlayerInternal(s32 playerIdx, s32 seqId, s32 arg2) {
     s32 numFonts;
     s32 fontId;
 
+#ifdef __3DS__
+    { extern void PortDbgX(const char*, unsigned);
+      PortDbgX("SISPI enter seqId", (unsigned)seqId);
+      PortDbgX("SISPI numSequences", (unsigned)gAudioCtx.numSequences); }
+#endif
     if (seqId >= gAudioCtx.numSequences) {
         return 0;
     }
@@ -634,6 +639,12 @@ s32 AudioLoad_SyncInitSeqPlayerInternal(s32 playerIdx, s32 seqId, s32 arg2) {
     }
 
     seqData = AudioLoad_SyncLoadSeq(seqId);
+#ifdef __3DS__
+    { extern void PortDbgX(const char*, unsigned);
+      PortDbgX("SeqInit seqId", (unsigned)seqId);
+      PortDbgX("SeqInit fontId", (unsigned)fontId);
+      PortDbgX("SeqInit seqData", (unsigned)(uintptr_t)seqData); }
+#endif
     if (seqData == NULL) {
         return 0;
     }
@@ -711,19 +722,122 @@ u32 AudioLoad_TrySyncLoadSampleBank(u32 sampleBankId, u32* outMedium, s32 noLoad
 /**
  * original name: __Load_Ctrl
  */
+#ifdef __3DS__
+/* ---- Soundfont endianness fix -----------------------------------------------
+ * Soundfont data is big-endian (N64 ROM). Byteswap all multi-byte fields to
+ * native LE once, after DMA, before relocation. Offsets stay offsets (the
+ * relocation converts them to pointers). A visited set (tagged by type) avoids
+ * double-swapping shared samples/loops/books/envelopes. */
+static u32 sPbswSeen[1024];
+static s32 sPbswSeenN;
+static s32 pbsw_seen(u32 tag) {
+    s32 i;
+    for (i = 0; i < sPbswSeenN; i++) if (sPbswSeen[i] == tag) return 1;
+    if (sPbswSeenN < 1024) sPbswSeen[sPbswSeenN++] = tag;
+    return 0;
+}
+static void pbsw32(void* p) { u32* q = (u32*)p; *q = __builtin_bswap32(*q); }
+
+static void pbsw_sample(u8* base, u32 sampleOff) {
+    u8* s;
+    u32 raw, V, W, loopOff, bookOff;
+    if (sampleOff == 0 || pbsw_seen(sampleOff | 0x10000000u)) return;
+    s = base + sampleOff;
+    raw = *(u32*)(s + 0);
+    V = __builtin_bswap32(raw); /* logical N64 value: codec31-28 medium27-26 unk26:25 reloc:24 size23-0 */
+    W = (((V >> 28) & 0xF)) | (((V >> 26) & 3) << 4) | (((V >> 25) & 1) << 6) | (((V >> 24) & 1) << 7) |
+        ((V & 0xFFFFFF) << 8); /* -> LE bitfield: codec0-3 medium4-5 unk26:6 reloc:7 size8-31 */
+    *(u32*)(s + 0) = W;
+    pbsw32(s + 4); /* sampleAddr */
+    loopOff = __builtin_bswap32(*(u32*)(s + 8));  *(u32*)(s + 8) = loopOff;
+    bookOff = __builtin_bswap32(*(u32*)(s + 12)); *(u32*)(s + 12) = bookOff;
+    if (loopOff != 0 && !pbsw_seen(loopOff | 0x20000000u)) {
+        u8* lp = base + loopOff; u32 count; s32 k;
+        pbsw32(lp + 0); pbsw32(lp + 4);
+        count = __builtin_bswap32(*(u32*)(lp + 8)); *(u32*)(lp + 8) = count;
+        if (count != 0) { s16* st = (s16*)(lp + 16); for (k = 0; k < 16; k++) st[k] = __builtin_bswap16((u16)st[k]); }
+    }
+    if (bookOff != 0 && !pbsw_seen(bookOff | 0x30000000u)) {
+        u8* bp = base + bookOff; s32 order, npred, n, k;
+        order = __builtin_bswap32(*(u32*)(bp + 0)); *(u32*)(bp + 0) = order;
+        npred = __builtin_bswap32(*(u32*)(bp + 4)); *(u32*)(bp + 4) = npred;
+        n = 8 * order * npred;
+        if (n > 0 && n < 4096) { s16* bk = (s16*)(bp + 8); for (k = 0; k < n; k++) bk[k] = __builtin_bswap16((u16)bk[k]); }
+    }
+}
+static void pbsw_env(u8* base, u32 envOff) {
+    s16* e; s32 k; s16 delay;
+    if (envOff == 0 || pbsw_seen(envOff | 0x40000000u)) return;
+    e = (s16*)(base + envOff);
+    for (k = 0; k < 128; k++) {
+        delay = __builtin_bswap16((u16)e[k * 2]); e[k * 2] = delay;
+        e[k * 2 + 1] = __builtin_bswap16((u16)e[k * 2 + 1]);
+        if (delay == 0 || delay == -1 || delay == -2) break; /* ADSR_DISABLE/HANG/GOTO */
+    }
+}
+static void pbsw_ts(u8* base, u8* ts) { /* TunedSample {u32 sampleOff, f32 tuning} */
+    u32 sampOff = __builtin_bswap32(*(u32*)(ts + 0)); *(u32*)(ts + 0) = sampOff;
+    pbsw32(ts + 4);
+    pbsw_sample(base, sampOff);
+}
+static void AudioLoad_ByteswapFont(u8* fontData, s32 fontId) {
+    s32 numDrums = gAudioCtx.soundFontList[fontId].numDrums;
+    s32 numInst = gAudioCtx.soundFontList[fontId].numInstruments;
+    s32 numSfx = gAudioCtx.soundFontList[fontId].numSfx;
+    u32 drumListOff, sfxListOff, instOff, envOff, drumOff;
+    u32* fd = (u32*)fontData;
+    s32 i;
+    sPbswSeenN = 0;
+    drumListOff = __builtin_bswap32(fd[0]); fd[0] = drumListOff;
+    sfxListOff = __builtin_bswap32(fd[1]); fd[1] = sfxListOff;
+    if (numInst > 126) numInst = 126;
+    for (i = 2; i < 2 + numInst; i++) {
+        instOff = __builtin_bswap32(fd[i]); fd[i] = instOff;
+        if (instOff != 0) {
+            u8* inst = fontData + instOff;
+            envOff = __builtin_bswap32(*(u32*)(inst + 4)); *(u32*)(inst + 4) = envOff;
+            pbsw_env(fontData, envOff);
+            if (inst[1] != 0) pbsw_ts(fontData, inst + 0x08);      /* low, if normalRangeLo != 0 */
+            pbsw_ts(fontData, inst + 0x10);                        /* normal (always) */
+            if (inst[2] != 0x7F) pbsw_ts(fontData, inst + 0x18);   /* high, if normalRangeHi != 0x7F */
+        }
+    }
+    if (drumListOff != 0 && numDrums != 0) {
+        u32* dl = (u32*)(fontData + drumListOff);
+        for (i = 0; i < numDrums; i++) {
+            drumOff = __builtin_bswap32(dl[i]); dl[i] = drumOff;
+            if (drumOff != 0) {
+                u8* drum = fontData + drumOff;
+                pbsw_ts(fontData, drum + 0x04);
+                envOff = __builtin_bswap32(*(u32*)(drum + 0x0C)); *(u32*)(drum + 0x0C) = envOff;
+                pbsw_env(fontData, envOff);
+            }
+        }
+    }
+    if (sfxListOff != 0 && numSfx != 0) {
+        u8* sfx = fontData + sfxListOff;
+        for (i = 0; i < numSfx; i++) pbsw_ts(fontData, sfx + i * 0x08);
+    }
+}
+#endif
+
 SoundFontData* AudioLoad_SyncLoadFont(u32 fontId) {
     SoundFontData* fontData;
     s32 sampleBankId1;
     s32 sampleBankId2;
     s32 didAllocate;
     SampleBankRelocInfo sampleBankReloc;
-    s32 realFontId = AudioLoad_GetRealTableIndex(FONT_TABLE, fontId);
-
+    s32 realFontId;
+#define FLOG(s, v) ((void)0)  /* byteswap validated; FONT-step logging off */
+    realFontId = AudioLoad_GetRealTableIndex(FONT_TABLE, fontId);
+    FLOG("FONT realId", realFontId);
     if (gAudioCtx.fontLoadStatus[realFontId] == LOAD_STATUS_IN_PROGRESS) {
         return NULL;
     }
     sampleBankId1 = gAudioCtx.soundFontList[realFontId].sampleBankId1;
     sampleBankId2 = gAudioCtx.soundFontList[realFontId].sampleBankId2;
+    FLOG("FONT sbId1", sampleBankId1);
+    FLOG("FONT sbId2", sampleBankId2);
 
     sampleBankReloc.sampleBankId1 = sampleBankId1;
     sampleBankReloc.sampleBankId2 = sampleBankId2;
@@ -738,13 +852,20 @@ SoundFontData* AudioLoad_SyncLoadFont(u32 fontId) {
     } else {
         sampleBankReloc.baseAddr2 = 0;
     }
+    FLOG("FONT sbanks loaded base1", (unsigned)(uintptr_t)sampleBankReloc.baseAddr1);
 
     fontData = AudioLoad_SyncLoad(FONT_TABLE, fontId, &didAllocate);
+    FLOG("FONT fontData", (unsigned)(uintptr_t)fontData);
     if (fontData == NULL) {
         return NULL;
     }
     if (didAllocate == true) {
+#ifdef __3DS__
+        AudioLoad_ByteswapFont((u8*)fontData, realFontId); /* BE soundfont -> native LE before reloc */
+#endif
+        FLOG("FONT reloc START", realFontId);
         AudioLoad_RelocateFontAndPreloadSamples(realFontId, fontData, &sampleBankReloc, false);
+        FLOG("FONT reloc DONE", realFontId);
     }
 
     return fontData;
@@ -773,6 +894,17 @@ void* AudioLoad_SyncLoad(u32 tableType, u32 id, s32* didAllocate) {
         table = AudioLoad_GetLoadTable(tableType);
         size = table->entries[realId].size;
         size = ALIGN16(size);
+#ifdef __3DS__
+        /* Guard: a garbage table entry (bad harvested symbol) with an absurd size
+         * would alloc/DMA gigabytes and hang boot. Skip it instead. */
+        if (size > 0x400000) {
+            { extern void PortDbgX(const char*, unsigned);
+              PortDbgX("SL SKIP huge size type", (unsigned)tableType);
+              PortDbgX("SL SKIP realId", (unsigned)realId); }
+            *didAllocate = false;
+            return NULL;
+        }
+#endif
         medium = table->entries[id].medium;
         cachePolicy = table->entries[id].cachePolicy;
         romAddr = table->entries[realId].romAddr;

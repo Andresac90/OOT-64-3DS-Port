@@ -543,6 +543,19 @@ void Matrix_SetTranslateRotateYXZ(f32 translateX, f32 translateY, f32 translateZ
 }
 
 Mtx* Matrix_MtxFToMtx(MtxF* src, Mtx* dest) {
+#ifdef __3DS__
+    /* PORT: match the libultra Mtx packing (guMtxF2L), which is exactly what the
+       fast3d matrix reader (gfx_sp_matrix) decodes on this little-endian host. The
+       stock element-at-halfword-k layout below is pairwise byte-swapped relative to
+       fast3d, so every Matrix_*-built (actor/skeleton/billboard) matrix decoded as
+       garbage -> all animated actors invisible, and viewProjectionMtxF (culling +
+       projectedPos) came out degenerate (projZ~=-1). guMtxF2L/guMtxL2F are the same
+       path guPerspective/guLookAt use (why the static scene rendered fine), so
+       delegating keeps the whole matrix pipeline consistent. */
+    extern void guMtxF2L(float mf[4][4], Mtx* m);
+    guMtxF2L(src->mf, dest);
+    return dest;
+#else
     s32 temp;
     u16* m1 = (u16*)&dest->m[0][0];
     u16* m2 = (u16*)&dest->m[2][0];
@@ -611,6 +624,7 @@ Mtx* Matrix_MtxFToMtx(MtxF* src, Mtx* dest) {
     m1[15] = (temp >> 0x10);
     m2[15] = temp & 0xFFFF;
     return dest;
+#endif
 }
 
 #if DEBUG_FEATURES
@@ -683,6 +697,14 @@ void Matrix_MtxFCopy(MtxF* dest, MtxF* src) {
 }
 
 void Matrix_MtxToMtxF(Mtx* src, MtxF* dest) {
+#ifdef __3DS__
+    /* PORT: inverse of the guMtxF2L packing used everywhere else (see
+       Matrix_MtxFToMtx above). Reading with the stock no-swap layout corrupted
+       viewProjectionMtxF (built from guPerspective/guLookAt output in z_play.c),
+       giving wrong actor culling / projectedPos. */
+    extern void guMtxL2F(float mf[4][4], Mtx* m);
+    guMtxL2F(dest->mf, src);
+#else
     u16* m1 = (u16*)&src->m[0][0];
     u16* m2 = (u16*)&src->m[2][0];
 
@@ -702,6 +724,7 @@ void Matrix_MtxToMtxF(Mtx* src, MtxF* dest) {
     dest->yw = ((m1[13] << 0x10) | m2[13]) * (1 / 65536.0f);
     dest->zw = ((m1[14] << 0x10) | m2[14]) * (1 / 65536.0f);
     dest->ww = ((m1[15] << 0x10) | m2[15]) * (1 / 65536.0f);
+#endif
 }
 
 void Matrix_MultVec3fExt(Vec3f* src, Vec3f* dest, MtxF* mf) {

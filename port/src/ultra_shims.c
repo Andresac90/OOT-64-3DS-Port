@@ -204,6 +204,93 @@ s32 osContStartQuery(OSMesgQueue* mq) { (void)mq; return 0; }
 void osContGetQuery(OSContStatus* status) { memset(status, 0, 4 * sizeof(OSContStatus)); }
 s32 osContSetCh(u8 ch) { (void)ch; return 0; }
 
+/* Pump the game's PadMgr from live 3DS buttons once per frame. Normally a
+ * dedicated controller thread runs PadMgr_HandleRetrace on each VI retrace, but
+ * in the synchronous model that thread never executes, so gPadMgr.inputs[] stays
+ * zero and the game ignores input. We drive it cooperatively here. We call the
+ * two inner steps directly rather than PadMgr_HandleRetrace: the latter's
+ * osContGetQuery path would zero validCtrlrsMask and mark controller 1 absent.
+ * Called from PortGfx_RunTask (3ds_main.c) after the hardware poll. */
+#include "padmgr.h"
+extern void PadMgr_UpdateInputs(PadMgr* padMgr); /* global in padmgr.c, not in the header */
+void Port3ds_PumpInput(void) {
+    osContGetReadData(gPadMgr.pads); /* pads[0] <- live 3DS buttons via the shim above */
+    PadMgr_UpdateInputs(&gPadMgr);   /* fills inputs[] incl. press/release edges */
+}
+
+/* Pump the audio driver once per frame. AudioMgr_ThreadEntry never runs
+ * (osStartThread is a no-op), so AudioThread_Update is never called and no audio
+ * RSP task is ever built or dispatched. Drive the per-retrace handler directly:
+ * it forwards the previous frame's Acmd task to the scheduler (-> the C audio
+ * microcode in audio_microcode.c) and builds the next one. Mirrors the PadMgr
+ * pattern above. Called from PortGfx_RunTask (3ds_main.c). */
+#include "audiomgr.h"
+#include "regs.h"
+#include "audio.h"
+extern AudioMgr sAudioMgr;                         /* global instance in main.c */
+extern void AudioMgr_HandleRetrace(AudioMgr* audioMgr);
+extern void PortDbgX(const char* label, unsigned val);
+void Port3ds_PumpAudio(void) {
+    static unsigned c = 0;
+    if ((++c & 127) == 1) {
+        PortDbgX("apump actLvl", (unsigned)R_AUDIOMGR_ACTIVITY_LEVEL);
+        PortDbgX("apump rspTask", (unsigned)(uintptr_t)sAudioMgr.rspTask);
+        PortDbgX("apump specUnk4", (unsigned)gAudioCtx.audioBufferParameters.specUnk4);
+        PortDbgX("apump totalTask", (unsigned)gAudioCtx.totalTaskCount);
+        PortDbgX("apump seq0en", (unsigned)gAudioCtx.seqPlayers[0].enabled);
+        PortDbgX("apump seq2en", (unsigned)gAudioCtx.seqPlayers[2].enabled);
+        PortDbgX("apump numNotes", (unsigned)gAudioCtx.numNotes);
+        PortDbgX("apump resetStatus", (unsigned)gAudioCtx.resetStatus);
+        PortDbgX("apump cmdWr", (unsigned)gAudioCtx.threadCmdWritePos);
+        PortDbgX("apump cmdRd", (unsigned)gAudioCtx.threadCmdReadPos);
+        PortDbgX("apump numSeqPlayers", (unsigned)gAudioCtx.audioBufferParameters.numSequencePlayers);
+        PortDbgX("seqTbl addr", (unsigned)(uintptr_t)gAudioCtx.sequenceTable);
+        PortDbgX("seqTbl numEnt", (unsigned)gAudioCtx.sequenceTable->header.numEntries);
+        PortDbgX("fontTbl addr", (unsigned)(uintptr_t)gAudioCtx.soundFontTable);
+        PortDbgX("fontTbl numEnt", (unsigned)gAudioCtx.soundFontTable->header.numEntries);
+        PortDbgX("sampTbl addr", (unsigned)(uintptr_t)gAudioCtx.sampleBankTable);
+        PortDbgX("sampTbl numEnt", (unsigned)gAudioCtx.sampleBankTable->header.numEntries);
+    }
+    /* DIAGNOSTIC: force-start field BGM (seqId 2) and retry every 256 frames until
+     * seq player 0 is enabled, to test whether soundfonts+synthesis produce PCM
+     * (fonts relocate post-byteswap; sample data validated). */
+    if (c >= 16 && (c & 0xF) == 0 && !gAudioCtx.seqPlayers[0].enabled) {
+        extern void Audio_StartSequence(unsigned char, unsigned char, unsigned char, unsigned short);
+        Audio_StartSequence(0, 2, 0, 10);
+        if ((c & 0x3F) == 0) PortDbgX("FORCED field BGM retry c", c);
+    }
+    if ((c & 0x3F) == 0) {
+        s32 an = 0, i2;
+        for (i2 = 0; i2 < gAudioCtx.numNotes; i2++) {
+            if (gAudioCtx.sampleStates[i2].bitField0.enabled) an++;
+        }
+        PortDbgX("active notes", (unsigned)an);
+        PortDbgX("an seq0en", (unsigned)gAudioCtx.seqPlayers[0].enabled);
+    }
+    /* The threadless port never runs cic6105/AudioMgr_ThreadEntry which set this
+     * to ALL, so it can be stuck inhibiting audio updates. Force ALL each frame. */
+    R_AUDIOMGR_ACTIVITY_LEVEL = AUDIOMGR_ACTIVITY_LEVEL_ALL;
+    /* Flush the game's queued audio commands to the audio thread each frame.
+     * Normally Audio_Update does this, but a scene audio-reset sets D_80133418=1
+     * which blocks Audio_Update's body -> the reset command never flushes ->
+     * never acks -> deadlock. Flushing here lets AudioThread_Update process the
+     * reset so it acks (func_800E5EDC) and clears D_80133418, unblocking audio. */
+    /* Break the spec-reset handshake deadlock: func_800F71BC (scene audio reset)
+     * sets D_80133418=1 and waits for func_800E5EDC's ack (a message on
+     * audioResetQueueP with the matching specId), which the free-running audio
+     * thread would post on reset completion. The synchronous port's reset already
+     * completed (resetStatus=0), so post the ack ourselves when a wait is pending.
+     * This lets func_800FAD34 clear the flag AND run func_800F7170 (restart SFX +
+     * unmute), which force-clearing the flag would skip. */
+    { extern unsigned char D_80133418;
+      if (D_80133418 != 0) {
+          osSendMesg(gAudioCtx.audioResetQueueP, (OSMesg)(unsigned)gAudioCtx.specId, OS_MESG_NOBLOCK);
+      } }
+    /* NOTE: do NOT flush cmds here - Audio_Update (now unblocked) owns the
+     * ScheduleProcessCmds flush; a second flush corrupts the read-pos/STOP state. */
+    AudioMgr_HandleRetrace(&sAudioMgr);
+}
+
 /* Rumble + Controller Pak: absent hardware */
 s32 osMotorInit(OSMesgQueue* mq, OSPfs* pfs, s32 channel) { (void)mq; (void)pfs; (void)channel; return 1; }
 s32 __osMotorAccess(OSPfs* pfs, s32 flag) { (void)pfs; (void)flag; return 1; }

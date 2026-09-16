@@ -57,8 +57,14 @@ struct ShaderProgram {
     uint8_t num_attribs;
 };
 
-static struct ShaderProgram sShaderProgramPool[64];
-static uint8_t sShaderProgramPoolSize;
+/* PORT: OoT uses many more distinct color-combiner configs than sm64 did. The
+ * old [64] pool + uint8_t size overflowed once the game encountered >64 combiners
+ * (writing past the array corrupted the adjacent sCurShader global -> OOB index ->
+ * crash in updateShader, e.g. after using an item). Enlarge the pool and widen the
+ * counter, and hard-guard allocation in gfx_citro3d_create_and_load_new_shader. */
+#define SHADER_POOL_CAP 1024
+static struct ShaderProgram sShaderProgramPool[SHADER_POOL_CAP];
+static uint16_t sShaderProgramPoolSize;
 
 static int sCurShader = 0;
 
@@ -96,16 +102,21 @@ static void gfx_citro3d_unload_shader(struct ShaderProgram *old_prg) {
 
 }
 
+/* Map an N64 combiner colour input to a PICA TEV source. The N64 combiner has up
+ * to two per-vertex colour inputs (SHADER_INPUT_1/_2 — resolved by gfx_pc.c from
+ * shade/prim/env). The port carries ONE of them per vertex (GPU_PRIMARY_COLOR) and,
+ * when a draw needs two (renderTwoColorTris), puts the other in the TEV CONSTANT.
+ * `swapInput01` selects which of the pair is the varying (vertex) one. */
 static GPU_TEVSRC getTevSrc(int input, bool swapInput01)
 {
     switch(input)
     {
-        case SHADER_0: 
-            return GPU_CONSTANT;
-        case SHADER_INPUT_1: 
-            return swapInput01 ? GPU_PREVIOUS : GPU_PRIMARY_COLOR;
+        case SHADER_0:
+            return GPU_CONSTANT; /* only referenced by funcs that ignore it */
+        case SHADER_INPUT_1:
+            return swapInput01 ? GPU_CONSTANT : GPU_PRIMARY_COLOR;
         case SHADER_INPUT_2:
-            return swapInput01 ? GPU_PRIMARY_COLOR : GPU_PREVIOUS;
+            return swapInput01 ? GPU_PRIMARY_COLOR : GPU_CONSTANT;
         case SHADER_INPUT_3:
             return GPU_CONSTANT;
         case SHADER_INPUT_4:
@@ -121,6 +132,11 @@ static GPU_TEVSRC getTevSrc(int input, bool swapInput01)
 
 static void updateShader(bool swapInput01)
 {
+    /* Defensive: never index the pool out of range (a corrupt sCurShader must
+     * degrade to a wrong-but-safe shader, not crash). */
+    if (sCurShader < 0 || sCurShader >= SHADER_POOL_CAP) {
+        sCurShader = 0;
+    }
     struct ShaderProgram* new_prg = &sShaderProgramPool[sCurShader];
 
     u32 shader_id = new_prg->shader_id;
@@ -158,114 +174,120 @@ static void updateShader(bool swapInput01)
     if(num_inputs >= 3)
         printf("more than 2!\n");
 
-    C3D_TexEnv* env = C3D_GetTexEnv(0);
-    if(num_inputs >= 2)
+    /* PORT: minimal, correct colour combiner (TEV). OoT scene/actor geometry
+     * reduces to "texture modulated by a per-vertex colour" (shade/prim/env — the
+     * N64 combiner's colour source, resolved and packed into PRIMARY_COLOR by
+     * gfx_pc.c), or a flat colour where there is no texture. The former hand-rolled
+     * do_single/multiply/mix + two-colour TEV path mis-programmed the PICA TEV and
+     * tinted grayscale surfaces wrong (grass rendered pink); this mapping renders
+     * them correctly. Texture-only combiners get PRIMARY_COLOR = white (gfx_pc.c
+     * writes 1,1,1,1 when there is no colour input) so TEXEL0 * white == TEXEL0. */
     {
-        C3D_TexEnvInit(env);
-        C3D_TexEnvColor(env, 0);
-        C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
-        C3D_TexEnvSrc(env, C3D_Both, GPU_CONSTANT, 0, 0);
-        C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
-        C3D_TexEnvOpAlpha(env, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
-        env = C3D_GetTexEnv(1);
-    }
-    else
-        C3D_TexEnvInit(C3D_GetTexEnv(1));
-	C3D_TexEnvInit(env);
-    C3D_TexEnvColor(env, 0);
-    if(!color_alpha_same && opt_alpha)
-    {
-        if(do_single[0])
-        {
-	        C3D_TexEnvFunc(env, C3D_RGB, GPU_REPLACE);
-            C3D_TexEnvSrc(env, C3D_RGB, getTevSrc(c[0][3], swapInput01), 0, 0);
-            if(c[0][3] == SHADER_TEXEL0A)
-                C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_ALPHA, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
-            else
-                C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
+        C3D_TexEnv* e0 = C3D_GetTexEnv(0);
+        C3D_TexEnvInit(e0);
+        /* Reset the TEV CONSTANT to 0 every shader setup. It is the 2nd colour input
+         * for two-colour combiners (overwritten per-draw by renderTwoColorTris) and
+         * the value of SHADER_0. Without this reset a shader inherits the CONSTANT the
+         * *previous* scene left behind -> the same combiner renders differently in
+         * different scenes (e.g. HUD icons correct in town but boxes in Hyrule Field). */
+        C3D_TexEnvColor(e0, 0);
+
+        bool has_tex = used_textures[0] || used_textures[1];
+
+        /* --- RGB: map the N64 colour combiner (A-B)*C+D onto one PICA TEV stage. ---
+         * A=c[0][0] B=c[0][1] C=c[0][2] D=c[0][3]. Sources resolve via getTevSrc to
+         * TEXEL0/1, the varying vertex colour (PRIMARY_COLOR) and a per-draw CONSTANT
+         * (the 2nd colour, set by renderTwoColorTris). The func is chosen so that
+         * zero terms are never referenced (PICA has no true zero source). TEXEL0A
+         * uses the texture's ALPHA as an RGB source. */
+        if (has_tex || num_inputs > 0) {
+            uint8_t a = c[0][0], b = c[0][1], cc = c[0][2], d = c[0][3];
+            GPU_TEVSRC sa = getTevSrc(a, swapInput01), sb = getTevSrc(b, swapInput01),
+                       sc = getTevSrc(cc, swapInput01), sd = getTevSrc(d, swapInput01);
+            GPU_TEVOP_RGB opa = (a == SHADER_TEXEL0A) ? GPU_TEVOP_RGB_SRC_ALPHA : GPU_TEVOP_RGB_SRC_COLOR;
+            GPU_TEVOP_RGB opb = (b == SHADER_TEXEL0A) ? GPU_TEVOP_RGB_SRC_ALPHA : GPU_TEVOP_RGB_SRC_COLOR;
+            GPU_TEVOP_RGB opc = (cc == SHADER_TEXEL0A) ? GPU_TEVOP_RGB_SRC_ALPHA : GPU_TEVOP_RGB_SRC_COLOR;
+            GPU_TEVOP_RGB opd = (d == SHADER_TEXEL0A) ? GPU_TEVOP_RGB_SRC_ALPHA : GPU_TEVOP_RGB_SRC_COLOR;
+            if (cc == SHADER_0) {
+                /* (A-B)*0 + D  ==  D */
+                C3D_TexEnvSrc(e0, C3D_RGB, sd, 0, 0);
+                C3D_TexEnvOpRgb(e0, opd, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
+                C3D_TexEnvFunc(e0, C3D_RGB, GPU_REPLACE);
+            } else if (b == SHADER_0 && d == SHADER_0) {
+                /* A * C  (the common "texture modulated by colour") */
+                C3D_TexEnvSrc(e0, C3D_RGB, sa, sc, 0);
+                C3D_TexEnvOpRgb(e0, opa, opc, GPU_TEVOP_RGB_SRC_COLOR);
+                C3D_TexEnvFunc(e0, C3D_RGB, GPU_MODULATE);
+            } else if (b == SHADER_0) {
+                /* A * C + D */
+                C3D_TexEnvSrc(e0, C3D_RGB, sa, sc, sd);
+                C3D_TexEnvOpRgb(e0, opa, opc, opd);
+                C3D_TexEnvFunc(e0, C3D_RGB, GPU_MULTIPLY_ADD);
+            } else if (d == b) {
+                /* (A-B)*C + B  ==  interpolate(A,B,C) = A*C + B*(1-C).
+                 * This is the two-colour "mix" (e.g. tunic (PRIM-ENV)*TEXEL0+ENV). */
+                C3D_TexEnvSrc(e0, C3D_RGB, sa, sb, sc);
+                C3D_TexEnvOpRgb(e0, opa, opb, opc);
+                C3D_TexEnvFunc(e0, C3D_RGB, GPU_INTERPOLATE);
+            } else {
+                /* fallback: A * C */
+                C3D_TexEnvSrc(e0, C3D_RGB, sa, sc, 0);
+                C3D_TexEnvOpRgb(e0, opa, opc, GPU_TEVOP_RGB_SRC_COLOR);
+                C3D_TexEnvFunc(e0, C3D_RGB, GPU_MODULATE);
+            }
+        } else {
+            /* No texture and no colour input — pass the (white) vertex colour. */
+            C3D_TexEnvSrc(e0, C3D_RGB, GPU_PRIMARY_COLOR, 0, 0);
+            C3D_TexEnvOpRgb(e0, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
+            C3D_TexEnvFunc(e0, C3D_RGB, GPU_REPLACE);
         }
-        else if(do_multiply[0])
-        {
-            C3D_TexEnvFunc(env, C3D_RGB, GPU_MODULATE);
-            C3D_TexEnvSrc(env, C3D_RGB, getTevSrc(c[0][0], swapInput01), getTevSrc(c[0][2], swapInput01), 0);
-            C3D_TexEnvOpRgb(env,
-                c[0][0] == SHADER_TEXEL0A ? GPU_TEVOP_RGB_SRC_ALPHA : GPU_TEVOP_RGB_SRC_COLOR,
-                c[0][2] == SHADER_TEXEL0A ? GPU_TEVOP_RGB_SRC_ALPHA : GPU_TEVOP_RGB_SRC_COLOR,
-                GPU_TEVOP_RGB_SRC_COLOR);
+
+        /* --- ALPHA: take alpha from the texture when textured (matches OoT opaque &
+         * cutout surfaces and keeps Link visible — modulating by the packed shade
+         * alpha wrongly zeroed him); else from the vertex colour. ---
+         * NOTE: an earlier attempt to drive this from the decoded alpha mux
+         * (build 7E39522E) regressed HW — surfaces whose alpha mux resolved to a
+         * zero/CONSTANT source got alpha 0 and were discarded by the alpha test
+         * (Link's sword vanished). Reverted to this proven behaviour. A correct
+         * alpha combiner needs per-surface validation, not a blanket ladder. */
+        if (has_tex) {
+            C3D_TexEnvSrc(e0, C3D_Alpha, GPU_TEXTURE0, 0, 0);
+        } else {
+            C3D_TexEnvSrc(e0, C3D_Alpha, GPU_PRIMARY_COLOR, 0, 0);
         }
-        else if(do_mix[0])
-        {
-            C3D_TexEnvFunc(env, C3D_RGB, GPU_INTERPOLATE);
-            C3D_TexEnvSrc(env, C3D_RGB, getTevSrc(c[0][0], swapInput01), getTevSrc(c[0][1], swapInput01), getTevSrc(c[0][2], swapInput01));
-            C3D_TexEnvOpRgb(env,
-                c[0][0] == SHADER_TEXEL0A ? GPU_TEVOP_RGB_SRC_ALPHA : GPU_TEVOP_RGB_SRC_COLOR,
-                c[0][1] == SHADER_TEXEL0A ? GPU_TEVOP_RGB_SRC_ALPHA : GPU_TEVOP_RGB_SRC_COLOR,
-                c[0][2] == SHADER_TEXEL0A ? GPU_TEVOP_RGB_SRC_ALPHA : GPU_TEVOP_RGB_SRC_COLOR);
+        C3D_TexEnvOpAlpha(e0, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
+        C3D_TexEnvFunc(e0, C3D_Alpha, GPU_REPLACE);
+
+        /* --- TEV stage 1: N64 combiner CYCLE 1 fold (see gfx_pc.c). When the DL's
+         * cycle 1 is (COMBINED-0)*X+0, gfx_pc routes X through a colour-input slot
+         * and encodes: bits 27-29 = X's CC source (nonzero = active), bits 30-31 =
+         * input slot - 1. RGB1 = PREVIOUS * srcof(slot); alpha passes through.
+         * This restores e.g. the tunic's ENV tint (cycle0 TEX*SHADE was rendering
+         * untinted -> white tunic) and terrain's cycle-1 SHADE/PRIM lighting. */
+        if ((shader_id >> 27) & 7) {
+            int pslot = (int)((shader_id >> 30) & 3) + 1;
+            C3D_TexEnv* e1 = C3D_GetTexEnv(1);
+            C3D_TexEnvInit(e1);
+            C3D_TexEnvColor(e1, 0); /* renderTwoColorTris overwrites per-draw */
+            C3D_TexEnvSrc(e1, C3D_RGB, GPU_PREVIOUS, getTevSrc(pslot, swapInput01), 0);
+            C3D_TexEnvOpRgb(e1, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
+            C3D_TexEnvFunc(e1, C3D_RGB, GPU_MODULATE);
+            C3D_TexEnvSrc(e1, C3D_Alpha, GPU_PREVIOUS, 0, 0);
+            C3D_TexEnvOpAlpha(e1, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
+            C3D_TexEnvFunc(e1, C3D_Alpha, GPU_REPLACE);
+        } else {
+            C3D_TexEnvInit(C3D_GetTexEnv(1));
         }
+        C3D_TexEnvInit(C3D_GetTexEnv(2));
+        /* Alpha test discards fully-transparent texels: opaque surfaces have alpha 1
+         * and survive `> 0`; transparent parts of HUD icons/sprites get cut out
+         * (without this they draw as solid boxes). Cutout foliage uses a higher
+         * threshold. */
+        if (opt_texture_edge)
+            C3D_AlphaTest(true, GPU_GREATER, 77);
         else
-            printf("complex\n");
-        C3D_TexEnvOpAlpha(env,  GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
-        if(do_single[1])
-        {
-            C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
-            C3D_TexEnvSrc(env, C3D_Alpha, getTevSrc(c[1][3], swapInput01), 0, 0);
-        }
-        else if(do_multiply[1])
-        {
-            C3D_TexEnvFunc(env, C3D_Alpha, GPU_MODULATE);
-            C3D_TexEnvSrc(env, C3D_Alpha, getTevSrc(c[1][0], swapInput01), getTevSrc(c[1][2], swapInput01), 0);
-        }
-        else if(do_mix[1])
-        {
-            C3D_TexEnvFunc(env, C3D_Alpha, GPU_INTERPOLATE);
-            C3D_TexEnvSrc(env, C3D_Alpha, getTevSrc(c[1][0], swapInput01), getTevSrc(c[1][1], swapInput01), getTevSrc(c[1][2], swapInput01));
-        }
-        else
-            printf("complex\n");
+            C3D_AlphaTest(true, GPU_GREATER, 0);
     }
-    else
-    {
-        C3D_TexEnvOpAlpha(env, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
-        if(do_single[0])
-        {
-	        C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
-            C3D_TexEnvSrc(env, C3D_Both, getTevSrc(c[0][3], swapInput01), 0, 0);
-            if(c[0][3] == SHADER_TEXEL0A)
-                C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_ALPHA, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
-            else
-                C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
-        }
-        else if(do_multiply[0])
-        {
-            C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
-            C3D_TexEnvSrc(env, C3D_Both, getTevSrc(c[0][0], swapInput01), getTevSrc(c[0][2], swapInput01), 0);
-            C3D_TexEnvOpRgb(env,
-                c[0][0] == SHADER_TEXEL0A ? GPU_TEVOP_RGB_SRC_ALPHA : GPU_TEVOP_RGB_SRC_COLOR,
-                c[0][2] == SHADER_TEXEL0A ? GPU_TEVOP_RGB_SRC_ALPHA : GPU_TEVOP_RGB_SRC_COLOR,
-                GPU_TEVOP_RGB_SRC_COLOR);
-        }
-        else if(do_mix[0])
-        {
-            C3D_TexEnvFunc(env, C3D_Both, GPU_INTERPOLATE);
-            C3D_TexEnvSrc(env, C3D_Both, getTevSrc(c[0][0], swapInput01), getTevSrc(c[0][1], swapInput01), getTevSrc(c[0][2], swapInput01));
-            C3D_TexEnvOpRgb(env,
-                c[0][0] == SHADER_TEXEL0A ? GPU_TEVOP_RGB_SRC_ALPHA : GPU_TEVOP_RGB_SRC_COLOR,
-                c[0][1] == SHADER_TEXEL0A ? GPU_TEVOP_RGB_SRC_ALPHA : GPU_TEVOP_RGB_SRC_COLOR,
-                c[0][2] == SHADER_TEXEL0A ? GPU_TEVOP_RGB_SRC_ALPHA : GPU_TEVOP_RGB_SRC_COLOR);
-        }
-        else
-            printf("complex\n");
-    }
-    if(!opt_alpha)
-    {
-        C3D_TexEnvColor(env, 0xFF000000);
-        C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
-        C3D_TexEnvSrc(env, C3D_Alpha, GPU_CONSTANT, 0, 0);
-    }
-    if (opt_texture_edge && opt_alpha)
-        C3D_AlphaTest(true, GPU_GREATER, 77);
-    else
-        C3D_AlphaTest(true, GPU_GREATER, 0);
 }
 
 static void gfx_citro3d_load_shader(struct ShaderProgram *new_prg) {
@@ -305,13 +327,29 @@ static struct ShaderProgram *gfx_citro3d_create_and_load_new_shader(uint32_t sha
     bool do_multiply[2] = {c[0][1] == 0 && c[0][3] == 0, c[1][1] == 0 && c[1][3] == 0};
     bool do_mix[2] = {c[0][1] == c[0][3], c[1][1] == c[1][3]};
     bool color_alpha_same = (shader_id & 0xfff) == ((shader_id >> 12) & 0xfff);
-    
+
+    /* two-cycle postmul input (see gfx_pc.c fold): its colour rides an extra
+     * vertex-colour slot that the mux bits don't reference — count it so the
+     * vertex layout and gfx_pc's packing agree. */
+    if ((shader_id >> 27) & 7) {
+        int pslot = (int)((shader_id >> 30) & 3) + 1;
+        if (pslot > num_inputs) {
+            num_inputs = pslot;
+        }
+    }
+
     size_t vs_len = 0;
     size_t fs_len = 0;
     size_t num_floats = 4;
     
     size_t cnt = 0;
     
+    if (sShaderProgramPoolSize >= SHADER_POOL_CAP) {
+        /* Pool full: reuse the last slot instead of overflowing into adjacent
+         * globals. Returns an already-loaded, valid shader — no crash. Only hit
+         * if the game uses more than SHADER_POOL_CAP distinct combiner configs. */
+        return &sShaderProgramPool[SHADER_POOL_CAP - 1];
+    }
     int id = sShaderProgramPoolSize;
     struct ShaderProgram *prg = &sShaderProgramPool[sShaderProgramPoolSize++];
     prg->attrib_sizes[cnt] = 4;
@@ -455,7 +493,17 @@ static void gfx_citro3d_upload_texture(uint8_t *rgba32_buf, int width, int heigh
         sTexturePoolScaleT[sCurTex] = 1.f;
         performTexSwizzle(rgba32_buf, sTexBuf, width, height);
     }
-    C3D_TexInit(&sTexturePool[sCurTex], width, height, GPU_RGBA8);
+    /* Cache slots get recycled (gfx_pc pool wraps at 512); C3D_TexInit on an
+     * already-initialized tex leaks its previous linear buffer. Free it first,
+     * or reuse the buffer when the dimensions match. */
+    if (sTexturePool[sCurTex].data != NULL &&
+        (sTexturePool[sCurTex].width != width || sTexturePool[sCurTex].height != height)) {
+        C3D_TexDelete(&sTexturePool[sCurTex]);
+        sTexturePool[sCurTex].data = NULL;
+    }
+    if (sTexturePool[sCurTex].data == NULL) {
+        C3D_TexInit(&sTexturePool[sCurTex], width, height, GPU_RGBA8);
+    }
     C3D_TexUpload(&sTexturePool[sCurTex], sTexBuf);
     C3D_TexFlush(&sTexturePool[sCurTex]);
 }
@@ -637,8 +685,19 @@ static void renderTwoColorTris(float buf_vbo[], size_t buf_vbo_len, size_t buf_v
         offset += sVtxUnitSize;
     }
     offset = 0;
-    updateShader(!color1Constant);
-    C3D_TexEnvColor(C3D_GetTexEnv(0), color1Constant ? firstColor1 : firstColor0);
+    /* The vertex loop below SKIPS colour0 iff color0Constant — so PRIMARY_COLOR
+     * carries colour1 in that case and the TEV CONSTANT must be colour0 (and the
+     * inputs swap). The old code keyed both choices on color1Constant, so when
+     * BOTH colours were constant (every HUD texrect: PRIM+ENV fixed) the CONSTANT
+     * was set to colour1 while PRIMARY also carried colour1 — colour0 (e.g. the
+     * hearts' PRIM red) was dropped entirely and the interpolation degenerated to
+     * the flat ENV tint. Key on which colour is actually packed per-vertex. */
+    updateShader(color0Constant);
+    {
+        u32 constCol = color0Constant ? firstColor0 : firstColor1;
+        C3D_TexEnvColor(C3D_GetTexEnv(0), constCol);
+        C3D_TexEnvColor(C3D_GetTexEnv(1), constCol); /* cycle-1 postmul stage reads it too */
+    }
     for(int i = 0; i < 3 * buf_vbo_num_tris; i++)
     {
         *dst++ = buf_vbo[offset + 1];
