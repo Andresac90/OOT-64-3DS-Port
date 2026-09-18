@@ -9,12 +9,21 @@
 #define OS_CYCLES_TO_NSEC(c)    (((u64)(c)*(1000000000LL/15625000LL))/(OS_CPU_COUNTER/15625000LL))
 #define OS_CYCLES_TO_USEC(c)    (((u64)(c)*(1000000LL/15625LL))/(OS_CPU_COUNTER/15625LL))
 
-/* PORT native guard */
+/* PORT native guard: 3DS host pointers pass through; N64/GC/iQue keep the stock
+ * macros so the ROM byte-matches. */
+#ifdef __3DS__
 #define OS_K0_TO_PHYSICAL(x)    ((u32)(x) >= 0x80000000u ? (u32)((char*)(x)-0x80000000) : (u32)(x))
 #define OS_K1_TO_PHYSICAL(x)    ((u32)(x) >= 0xA0000000u ? (u32)((char*)(x)-0xA0000000) : (u32)(x))
 
 #define OS_PHYSICAL_TO_K0(x)    ((u32)(x) >= 0x10000000u ? (void*)(u32)(x) : (void*)((u32)(x)+0x80000000))
 #define OS_PHYSICAL_TO_K1(x)    ((u32)(x) >= 0x10000000u ? (void*)(u32)(x) : (void*)((u32)(x)+0xA0000000))
+#else
+#define OS_K0_TO_PHYSICAL(x)    (u32)(((char*)(x)-0x80000000))
+#define OS_K1_TO_PHYSICAL(x)    (u32)(((char*)(x)-0xA0000000))
+
+#define OS_PHYSICAL_TO_K0(x)    (void*)(((u32)(x)+0x80000000))
+#define OS_PHYSICAL_TO_K1(x)    (void*)(((u32)(x)+0xA0000000))
+#endif
 
 u32 osVirtualToPhysical(void* vaddr);
 

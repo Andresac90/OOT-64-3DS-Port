@@ -3256,9 +3256,17 @@ Actor* Actor_Spawn(ActorContext* actorCtx, PlayState* play, s16 actorId, f32 pos
         }
 
         /* PORT: actor overlays are statically linked native; the profile is a
-         * real pointer, no N64 vram->ram relocation. (Restored after a stray
-         * `git checkout` reverted this uncommitted change.) */
+         * real pointer, no N64 vram->ram relocation. N64/GC/iQue keep the stock
+         * relocation math so the ROM byte-matches. */
+#ifdef __3DS__
         profile = overlayEntry->profile;
+#else
+        profile = (void*)(uintptr_t)((overlayEntry->profile != NULL)
+                                         ? (void*)((uintptr_t)overlayEntry->profile -
+                                                   (intptr_t)((uintptr_t)overlayEntry->vramStart -
+                                                              (uintptr_t)overlayEntry->loadedRamAddr))
+                                         : NULL);
+#endif
     }
 
     objectSlot = Object_GetSlot(&play->objectCtx, profile->objectId);

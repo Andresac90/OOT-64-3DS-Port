@@ -827,9 +827,8 @@ SoundFontData* AudioLoad_SyncLoadFont(u32 fontId) {
     s32 sampleBankId2;
     s32 didAllocate;
     SampleBankRelocInfo sampleBankReloc;
-    s32 realFontId;
+    s32 realFontId = AudioLoad_GetRealTableIndex(FONT_TABLE, fontId);
 #define FLOG(s, v) ((void)0)  /* byteswap validated; FONT-step logging off */
-    realFontId = AudioLoad_GetRealTableIndex(FONT_TABLE, fontId);
     FLOG("FONT realId", realFontId);
     if (gAudioCtx.fontLoadStatus[realFontId] == LOAD_STATUS_IN_PROGRESS) {
         return NULL;

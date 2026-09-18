@@ -2103,7 +2103,9 @@ void Cutscene_ProcessScript(PlayState* play, CutsceneContext* csCtx, u8* script)
     s32 csFrameCount;
     s16 j;
 
+#ifdef __3DS__
     u8* csScriptStart = script; /* PORT_CS_BOUNDS */
+#endif
     MemCpy(&totalEntries, script, sizeof(totalEntries));
     script += sizeof(totalEntries);
 
@@ -2115,9 +2117,11 @@ void Cutscene_ProcessScript(PlayState* play, CutsceneContext* csCtx, u8* script)
         return;
     }
 
+#ifdef __3DS__
     if (totalEntries < 0 || totalEntries > 100000) { /* PORT: garbage script -> stop safely */
         csCtx->state = CS_STATE_STOP; return;
     }
+#endif
 
 #if DEBUG_FEATURES
     if (CHECK_BTN_ALL(play->state.input[0].press.button, BTN_DRIGHT)) {
@@ -2127,10 +2131,12 @@ void Cutscene_ProcessScript(PlayState* play, CutsceneContext* csCtx, u8* script)
 #endif
 
     for (i = 0; i < totalEntries; i++) {
+#ifdef __3DS__
         if (script < csScriptStart || (script - csScriptStart) > 0x40000) {
             /* PORT: safety guard against a runaway script pointer (desync) */
             csCtx->state = CS_STATE_STOP; return;
         }
+#endif
         MemCpy(&cmdType, script, sizeof(cmdType));
         script += sizeof(cmdType);
 
@@ -2526,9 +2532,11 @@ void Cutscene_ProcessScript(PlayState* play, CutsceneContext* csCtx, u8* script)
                 MemCpy(&cmdEntries, script, 4);
                 script += sizeof(cmdEntries);
 
+#ifdef __3DS__
                 if (cmdEntries < 0 || cmdEntries > 1000) { /* PORT: garbage -> stop safely */
                     csCtx->state = CS_STATE_STOP; return;
                 }
+#endif
                 for (j = 0; j < cmdEntries; j++) {
                     script += 0x30;
                 }
