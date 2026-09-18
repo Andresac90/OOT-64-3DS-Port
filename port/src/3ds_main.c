@@ -218,10 +218,17 @@ static void WipeCrashDumps(void) {
 }
 
 /* full boot path — the real entry point */
+/* PORT DEBUG: svcOutputDebugString markers show up in Azahar's log with timestamps —
+ * reliable boot-progress tracing before the SD boot.log is even open. */
+#define DBG(s) svcOutputDebugString((s), sizeof(s) - 1)
+
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
+    DBG("PORT: main() entered");
     gfxInitDefault();
+    DBG("PORT: gfxInitDefault done");
     consoleInit(GFX_BOTTOM, NULL);
+    DBG("PORT: consoleInit done");
     { extern void PortCompat_InitStreams(void); PortCompat_InitStreams(); }
     WipeCrashDumps(); /* keep only this run's crash dump, named crash_dump_00000000.dmp */
     { extern void Port3ds_AudioInit(void); Port3ds_AudioInit(); } /* M3a ndsp plumbing; no-op without dspfirm.cdc */

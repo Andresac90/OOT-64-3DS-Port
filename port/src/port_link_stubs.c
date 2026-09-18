@@ -15,3 +15,11 @@ void n64dd_SetDiskVersion() {}
  * via PortDbg, so a no-op formatter is enough to link and boot silently. Revisit if any
  * gameplay path needs real sprintf output. */
 int _Printf() { return 0; }
+
+/* PORT DEBUG (2026-09-17): the 42MB resident .data (CodeSet) leaves little app memory.
+ * If the CCI ExHeader only grants O3DS 64MB, the default 24MB heap + 32MB linear heap
+ * won't fit and gfxInitDefault's framebuffer lands on unmapped linear memory (the
+ * 0x10000000 crash). Shrink the heaps to fit-test the OOM theory (override libctru's
+ * weak __ctru_*_size). Restore/raise once the memory grant is confirmed. */
+unsigned __ctru_heap_size = 6u * 1024 * 1024;
+unsigned __ctru_linear_heap_size = 8u * 1024 * 1024;

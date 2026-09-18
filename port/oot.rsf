@@ -15,7 +15,7 @@ Option:
   FreeProductCode         : true
   MediaFootPadding        : false
   EnableCrypt             : false
-  EnableCompress          : true
+  EnableCompress          : false
 
 AccessControlInfo:
   CoreVersion                   : 2
