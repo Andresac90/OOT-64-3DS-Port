@@ -91,6 +91,17 @@ static void Dma_Copy(void* ram, uintptr_t vrom, u32 size) {
         fprintf(stderr, "[dma] request before init (vrom %08x)\n", (u32)vrom);
         exit(1);
     }
+    /* PORT: guard against a corrupt DMA request. During Hyrule Field load the game issues a
+     * garbage request (vrom 0xf8d44728, size 0xfffffffc == -4). The OOB path below then did
+     * memset(ram, 0, size) — a ~4GB clear that floods the heap with unmapped writes and hangs
+     * Play_Init. No real asset exceeds the ROM, so a size past the ROM (or a vrom past it) is
+     * bogus; skip it instead of running wild. (Root cause of the bad request is a separate
+     * scene/segment bug to chase, but the shim must never 4GB-memset.) */
+    if (size > sRomSize || vrom > (uintptr_t)sRomSize) {
+        PortDbgX("dma bogus vrom", (unsigned)vrom);
+        PortDbgX("  bogus size", size);
+        return;
+    }
     for (i = 0; i < gVromMapCount; i++) {
         uintptr_t start = (uintptr_t)gVromMap[i].romStart;
         uintptr_t end = (uintptr_t)gVromMap[i].romEnd;

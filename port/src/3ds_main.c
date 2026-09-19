@@ -114,15 +114,17 @@ static void boot_flush(void) {
     gspWaitForVBlank();
 }
 
-/* Log to BOTH the bottom-screen console and a file on the SD. The file copy
- * survives an ErrDisp/crash that wipes the screen, so after a failed boot we
- * can read sdmc:/3ds/oot/boot.log to see exactly the last checkpoint reached.
- * Each call reopens+closes so the line is guaranteed flushed to disk. */
+/* PORT PERF (2026-09-18): logging must be CHEAP — it is called from engine paths that run
+ * every frame. The old Log() did gspWaitForVBlank() (a ~16ms hardware wait) AND fopen/fclose
+ * on the SD on EVERY call, so per-frame logging stalled the game to ~1fps (the roadmap's
+ * "never ship per-frame logging" trap). Now: keep one file handle open, fwrite+fflush the
+ * line (crash still leaves the last line on the card), and print to the console — no vblank
+ * wait, no reopen. The bottom-screen console updates on the graph loop's own swap. */
+static FILE* sLogFile = NULL;
 static void Log(const char* s) {
     printf("%s\n", s);
-    boot_flush();
-    FILE* f = fopen(LOG_PATH, "a");
-    if (f) { fputs(s, f); fputc('\n', f); fflush(f); fclose(f); }
+    if (!sLogFile) sLogFile = fopen(LOG_PATH, "a");
+    if (sLogFile) { fputs(s, sLogFile); fputc('\n', sLogFile); fflush(sLogFile); }
 }
 
 /* checkpoint logger called from engine init (main.c) */
@@ -135,13 +137,10 @@ void PortDbgX(const char* label, unsigned val) {
     Log(buf);
 }
 
-/* Fast file-only loggers for high-volume renderer tracing. Unlike Log(), these
- * skip the screen print + full-vblank wait (boot_flush), so thousands of lines
- * cost SD I/O only. fopen/fputs/fclose per line still durably syncs each line to
- * the card, so the last line survives a hard crash for post-mortem. */
+/* Fast file-only loggers for high-volume renderer tracing (no console print). */
 void PortLogFast(const char* s) {
-    FILE* f = fopen(LOG_PATH, "a");
-    if (f) { fputs(s, f); fputc('\n', f); fclose(f); }
+    if (!sLogFile) sLogFile = fopen(LOG_PATH, "a");
+    if (sLogFile) { fputs(s, sLogFile); fputc('\n', sLogFile); }
 }
 void PortLogFastX(const char* label, unsigned val) {
     char buf[96];
@@ -238,6 +237,16 @@ int main(int argc, char** argv) {
       if (f) { fputs("=== OoT 3DS boot log ===\n", f); fclose(f); } }
 
     Log("OoT 3DS-Port booting...");
+
+    /* PORT DEBUG: the port assumes the linear heap is at 0x08000000 (segment-8 collision
+     * handling). Log where libctru's linear heap actually lands on this Azahar/firmware. */
+    { void* _lp = linearAlloc(0x1000);
+      void* _lp2 = linearAlloc(0x100000);
+      char _b[128];
+      snprintf(_b, sizeof(_b), "MEM: linear base=%08x  +1MB=%08x  (24MB set)",
+               (unsigned)(uintptr_t)_lp, (unsigned)(uintptr_t)_lp2);
+      Log(_b);
+      if (_lp) linearFree(_lp); if (_lp2) linearFree(_lp2); }
 
     FILE* rf = fopen(ROM_PATH, "rb");
     if (rf == NULL) { boot_halt("ROM not found at " ROM_PATH); gfxExit(); return 0; }

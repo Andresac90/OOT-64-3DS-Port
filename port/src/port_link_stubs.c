@@ -16,10 +16,11 @@ void n64dd_SetDiskVersion() {}
  * gameplay path needs real sprintf output. */
 int _Printf() { return 0; }
 
-/* PORT DEBUG (2026-09-17): the 42MB resident .data (CodeSet) leaves little app memory.
- * If the CCI ExHeader only grants O3DS 64MB, the default 24MB heap + 32MB linear heap
- * won't fit and gfxInitDefault's framebuffer lands on unmapped linear memory (the
- * 0x10000000 crash). Shrink the heaps to fit-test the OOM theory (override libctru's
- * weak __ctru_*_size). Restore/raise once the memory grant is confirmed. */
-unsigned __ctru_heap_size = 6u * 1024 * 1024;
-unsigned __ctru_linear_heap_size = 8u * 1024 * 1024;
+/* PORT (2026-09-18): heap sizing. The APP heap (newlib malloc, at 0x08000000) holds the
+ * game's DMA'd scene/object assets — Hyrule Field fills it well past 8MB, so a too-small
+ * app heap makes those writes land on unmapped memory (the 831K-write flood at ~0x08B2xxxx
+ * that tanked emulation to 1% and crashed Azahar). Give it real room. The LINEAR heap
+ * (linearAlloc, ~0x14000000) is only gfx (VBO 2MB + framebuffers + ~8MB textures).
+ * Total resident: 42MB .data + these must fit the New-3DS 124MB grant. */
+unsigned __ctru_heap_size = 40u * 1024 * 1024;
+unsigned __ctru_linear_heap_size = 24u * 1024 * 1024;

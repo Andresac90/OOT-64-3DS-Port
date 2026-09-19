@@ -868,7 +868,11 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
         return;
     }
     
-    if (getenv("PORT_NOCULL")) { /* skip */ } else
+    /* PORT PERF: cache the debug env lookup — this is per-triangle; an uncached getenv()
+     * here scans the environment for every tri (thousands/frame) and crushes emulated fps. */
+    static int nocull = -2;
+    if (nocull == -2) nocull = getenv("PORT_NOCULL") ? 1 : 0;
+    if (nocull) { /* skip */ } else
     if ((rsp.geometry_mode & G_CULL_BOTH) != 0) {
         float dx1 = v1->x / (v1->w) - v2->x / (v2->w);
         float dy1 = v1->y / (v1->w) - v2->y / (v2->w);
@@ -1115,7 +1119,7 @@ static void gfx_calc_and_set_viewport(const Vp_t *viewport) {
     rdp.viewport.y = y;
     rdp.viewport.width = width;
     rdp.viewport.height = height;
-    
+
     rdp.viewport_or_scissor_changed = true;
 }
 
@@ -1599,7 +1603,7 @@ static void gfx_run_dl(Gfx* cmd) {
         }
 #endif
         uint32_t opcode = cmd->words.w0 >> 24;
-        
+
         switch (opcode) {
             // RSP commands:
             case G_MTX:
