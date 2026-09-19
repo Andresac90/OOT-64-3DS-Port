@@ -315,6 +315,7 @@ void Play_Init(GameState* thisx) {
 #endif
 
     GameState_Realloc(&this->state, 0x1D4790);
+    PortDbg("Play: realloc ok");
 
 #if PLATFORM_N64
     if ((B_80121220 != NULL) && (B_80121220->unk_10 != NULL)) {
@@ -345,16 +346,21 @@ void Play_Init(GameState* thisx) {
     Camera_OverwriteStateFlags(&this->mainCamera, CAM_STATE_CHECK_BG_ALT | CAM_STATE_CHECK_WATER | CAM_STATE_CHECK_BG |
                                                       CAM_STATE_EXTERNAL_FINISHED | CAM_STATE_CAM_FUNC_FINISH |
                                                       CAM_STATE_LOCK_MODE | CAM_STATE_DISTORTION | CAM_STATE_PLAY_INIT);
+    PortDbg("Play: cameras ok");
     Sram_Init(&this->state, &this->sramCtx);
+    PortDbg("Play: sram ok");
     Regs_InitData(this);
     Message_Init(this);
+    PortDbg("Play: msg ok");
     GameOver_Init(this);
     SfxSource_InitAll(this);
     Effect_InitContext(this);
     EffectSs_InitInfo(this, 0x55);
+    PortDbg("Play: effss ok");
     CollisionCheck_InitContext(this, &this->colChkCtx);
     AnimTaskQueue_Reset(&this->animTaskQueue);
     Cutscene_InitContext(this, &this->csCtx);
+    PortDbg("Play: initctx ok");
 
     if (gSaveContext.nextCutsceneIndex != NEXT_CS_INDEX_NONE) {
         gSaveContext.save.cutsceneIndex = gSaveContext.nextCutsceneIndex;
@@ -408,9 +414,11 @@ void Play_Init(GameState* thisx) {
         gSaveContext.sceneLayer = GET_EVENTCHKINF(EVENTCHKINF_48) ? 3 : 2;
     }
 
+    PortDbg("Play: -> SpawnScene");
     Play_SpawnScene(
         this, gEntranceTable[((void)0, gSaveContext.save.entranceIndex) + ((void)0, gSaveContext.sceneLayer)].sceneId,
         gEntranceTable[((void)0, gSaveContext.save.entranceIndex) + ((void)0, gSaveContext.sceneLayer)].spawn);
+    PortDbg("Play: <- SpawnScene");
 
     PRINTF("\nSCENE_NO=%d COUNTER=%d\n", ((void)0, gSaveContext.save.entranceIndex), gSaveContext.sceneLayer);
 

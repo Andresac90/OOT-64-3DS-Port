@@ -66,12 +66,42 @@ void Font_LoadOrderedFont(Font* font) {
     u16* msgBufWide;
 
 #if OOT_NTSC && !PLATFORM_IQUE
+#ifdef __3DS__
+    /* PORT: On N64 the _message_0xXXXX_jpn markers are contiguous, in message-index
+     * order, inside one ROM segment, so `_message_0xFFFD_jpn - _message_0xFFFC_jpn`
+     * is message 0xFFFC's byte length and a single segment-offset DMA loads it.
+     * In this native little-endian build each _message_*_jpn[] is a separately
+     * linked, scattered array, which breaks that in two ways:
+     *   (1) the marker subtraction is meaningless (here it comes out to -4, i.e.
+     *       size 0xfffffffc -> a ~4GB DMA), and
+     *   (2) wide chars are stored big-endian (ARG2 emits hi,lo), so reading them
+     *       as native u16 byteswaps every value, including the 0x8170 terminator,
+     *       and the glyph loop never ends -> fontBuf overrun / crash.
+     * Read message 0xFFFC straight from its native array, byteswapping BE->native
+     * and bounding to msgBufWide. */
+    {
+        const u8* p = (const u8*)_message_0xFFFC_jpn;
+        s32 n;
+        for (n = 0; n < (s32)(sizeof(font->msgBufWide) / sizeof(font->msgBufWide[0])) - 1; n++) {
+            u16 w = (u16)((p[n * 2] << 8) | p[n * 2 + 1]);
+            font->msgBufWide[n] = w;
+            if (w == MESSAGE_WIDE_END) {
+                break;
+            }
+        }
+        font->msgBufWide[n] = MESSAGE_WIDE_END;
+        font->msgOffset = 0;
+        size = font->msgLength = n * 2;
+        len = n;
+    }
+#else
     messageDataStart = (const char*)_jpn_message_data_staticSegmentStart;
     font->msgOffset = _message_0xFFFC_jpn - messageDataStart;
     size = font->msgLength = _message_0xFFFD_jpn - _message_0xFFFC_jpn;
     len = (u32)size / 2;
     DMA_REQUEST_SYNC(font->msgBufWide, (uintptr_t)_jpn_message_data_staticSegmentRomStart + font->msgOffset, size,
                      "../z_kanfont.c", UNK_LINE);
+#endif
 
     PRINTF("msg_data=%x,  msg_data0=%x   jj=%x\n", font->msgOffset, font->msgLength, len);
 
@@ -83,6 +113,12 @@ void Font_LoadOrderedFont(Font* font) {
         }
 
         if (font->msgBufWide[codePointIndex] != MESSAGE_WIDE_NEWLINE) {
+#ifdef __3DS__
+            /* never let the glyph loop run past fontBuf (320 chars) */
+            if ((u32)(fontBufIndex * 8) + FONT_CHAR_TEX_SIZE > sizeof(font->fontBuf)) {
+                break;
+            }
+#endif
             offset = Kanji_OffsetFromShiftJIS(font->msgBufWide[codePointIndex]);
             DMA_REQUEST_SYNC(&font->fontBuf[fontBufIndex * 8], (uintptr_t)_kanjiSegmentRomStart + offset,
                              FONT_CHAR_TEX_SIZE, "../z_kanfont.c", UNK_LINE);
