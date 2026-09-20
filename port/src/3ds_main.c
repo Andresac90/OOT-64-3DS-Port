@@ -122,6 +122,11 @@ static void boot_flush(void) {
  * wait, no reopen. The bottom-screen console updates on the graph loop's own swap. */
 static FILE* sLogFile = NULL;
 static void Log(const char* s) {
+    /* PORT (2026-09-20): an engine path calls the logger with an empty string ~15x/frame,
+     * which flooded boot.log with bare '\n' (millions of lines / ~18 MB per session — real
+     * SD-write load on hardware, the roadmap's "never ship per-frame logging" trap). Empty
+     * lines carry no information, so drop them here at the chokepoint. */
+    if (s == NULL || s[0] == '\0') return;
     printf("%s\n", s);
     if (!sLogFile) sLogFile = fopen(LOG_PATH, "a");
     if (sLogFile) { fputs(s, sLogFile); fputc('\n', sLogFile); fflush(sLogFile); }
@@ -139,6 +144,7 @@ void PortDbgX(const char* label, unsigned val) {
 
 /* Fast file-only loggers for high-volume renderer tracing (no console print). */
 void PortLogFast(const char* s) {
+    if (s == NULL || s[0] == '\0') return;
     if (!sLogFile) sLogFile = fopen(LOG_PATH, "a");
     if (sLogFile) { fputs(s, sLogFile); fputc('\n', sLogFile); }
 }
