@@ -1261,7 +1261,25 @@ void* AudioLoad_AsyncLoadInner(s32 tableType, s32 id, s32 nChunks, s32 retData, 
     u32 devAddr;
     s32 loadStatus;
     s32 pad;
-    u32 realId = AudioLoad_GetRealTableIndex(tableType, id);
+    u32 realId;
+#ifdef __3DS__
+    /* PORT (2026-09-21): fail-safe for a corrupt sequence-script load request. The AudioSeq
+     * bytecode interpreter (ASEQ_OP_SEQ_LDRES, seqplayer.c:2130) reads `tableType` as a raw
+     * byte straight out of the sequence data. When the loaded sequence blob is not valid
+     * bytecode (garbage seqData -> the interpreter walks arbitrary memory), that byte is out
+     * of range -- observed 0xDE -- and AudioLoad_GetRealTableIndex + the switch below, which
+     * the compiler treats as exhaustive over {SEQUENCE,FONT,SAMPLE}, fall through to a
+     * `udf #0` trap ("Undefined Instruction" crash at AudioLoad_AsyncLoadInner+0x2c). Reject
+     * the request instead of trapping so the game survives; the underlying garbage-seqData
+     * load is tracked separately (see PORT_ROADMAP audio). */
+    if (tableType != SEQUENCE_TABLE && tableType != FONT_TABLE && tableType != SAMPLE_TABLE) {
+        extern void PortDbgX(const char*, unsigned);
+        PortDbgX("audio: skip invalid seq-load tableType", (unsigned)tableType);
+        PortDbgX("audio:   id", (unsigned)id);
+        return NULL;
+    }
+#endif
+    realId = AudioLoad_GetRealTableIndex(tableType, id);
 
     switch (tableType) {
         case SEQUENCE_TABLE:
