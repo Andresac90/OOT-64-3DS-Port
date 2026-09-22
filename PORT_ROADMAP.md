@@ -215,27 +215,32 @@ Each cost a hardware test cycle. Do not reintroduce.
    (gfx_citro3d.c:193, stage-1 at :266). Keep.
 8. **Diagnostics discipline.** Never ship per-frame logging (one 40-minute frame taught
    this). Probes self-limiting + removed once answered. Full strip list in §9.
-9. **Seq player runs on uninitialized seqData → `udf #0` "Undefined Instruction" crash.**
+9. **Audio seq-load `udf #0` "Undefined Instruction" crash — mechanism proven, real fix = Audioseq load.**
    ROOT-CAUSED 2026-09-21 (evidence-driven, not guessed). Symptom: hard crash, R0=0xDE,
    PC in `AudioLoad_AsyncLoadInner+0x2c` (`0019bc44: e7f000f0 udf #0`). Mechanism: the crash
    PC is the compiler's exhaustive-switch trap for `tableType ∉ {SEQUENCE,FONT,SAMPLE}=0/1/2`.
    `tableType` arrives = 0xDE via AudioSeq interpreter opcode `ASEQ_OP_SEQ_LDRES`
-   (seqplayer.c:2130) which reads it as a **raw byte of sequence bytecode**. Upstream:
-   `AudioLoad_SyncInitSeqPlayerInternal` (SISPI, load.c:613 — its unconditional PortDbgX
-   NEVER logs before the crash) never ran, so `seqPlayer->{enabled,seqData,scriptState.pc}`
-   (set only at load.c:655-657) are stale/garbage — the interpreter walks arbitrary memory
-   and eventually decodes a bogus LDRES. Script-read fns (seqplayer.c:569-581) are byte-safe
-   BE, so NOT an endianness desync. **Layout-sensitive** (any code/link shift changes what the
-   garbage pc reads → crash appears/disappears), which is why it looked like a phantom /
+   (seqplayer.c:2130) which reads it as a **raw byte of sequence data** → ScriptLoad → AsyncLoad
+   → AsyncLoadInner. Script-read fns (seqplayer.c:569-581) are byte-safe BE, so NOT an
+   endianness desync. **Upstream (REFINED, second pass — NOT an init/zeroing bug):** `gAudioCtx`
+   IS fully zeroed at `Audio_Init`→`AudioLoad_Init` (load.c:1436-1438), `seqPlayers[4]` is an
+   inline array (audio.h:988), so every `enabled` starts false; `enabled=true` comes ONLY from
+   SISPI (load.c:656) after a non-NULL seqData check. In NORMAL operation the interpreter is
+   fully IDLE — probes proved `AudioSeq_ProcessSequences` (seqplayer.c:2150) is never called and
+   SISPI never runs (synthesis gated off, §8.3). The crash needs a sequence to ACTUALLY START:
+   SISPI → `AudioSeq_SkipForwardSequence` (load.c:662) runs the interpreter immediately on the
+   just-loaded `seqData`, whose CONTENT is garbage (bad Audioseq DMA/relocation/load) → pc walks
+   it → bogus LDRES 0xDE. **Layout-sensitive, razor's edge:** any code/link shift moves off the
+   fatal layout into a benign one, so it's NOT reliably reproducible; looked like a phantom /
    "stack overflow" — DISPROVEN: bumping the CCI main stack (RSF `StackSize` 0x40000→0x100000,
    the real knob; `__stacksize__` is 3dsx-only and ignored by makerom) did NOT stop it.
-   DEFENSE IN PLACE: fail-safe guard at top of `AudioLoad_AsyncLoadInner` (load.c, `#ifdef
-   __3DS__`) rejects invalid tableType → returns NULL instead of trapping (provably prevents
-   the udf by construction). This is a SAFETY NET, not the real fix. **Real fix (M3 follow-up):
-   ensure no seq player runs the interpreter until SISPI has loaded a valid sequence** — i.e.
-   audio context / seqPlayers must be fully zero-inited (enabled=false) and stay so until a
-   real `AudioLoad_SyncInitSeqPlayer`; relates to item 5 (NULL channels) and the audio arena
-   (§8.3). Reproduce/verify with `tools/regress.sh`.
+   DEFENSE SHIPPED (committed): fail-safe guard at top of `AudioLoad_AsyncLoadInner` (load.c,
+   `#ifdef __3DS__`) rejects invalid tableType → returns NULL instead of trapping (provably
+   prevents the udf by construction). With it the port is STABLE regardless of layout (guard
+   neutralizes the trap; normal op never runs the interpreter). **Real fix (M3): fix the
+   Audioseq sequence-load path so a started sequence's seqData is valid bytecode** — force a real
+   sequence start (don't chase the layout) and verify seqData content; relates to item 5 (NULL
+   channels) and the audio arena (§8.3). Verify with `tools/regress.sh`.
 
 ---
 
