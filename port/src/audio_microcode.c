@@ -11,7 +11,9 @@
 
 extern void PortDbgX(const char* label, unsigned val);
 
-int sPortAudioUcodeEnable = 0;
+int sPortAudioUcodeEnable = 1; /* PORT (2026-09-21): audio data tables + seq->font map fixed;
+                                * engine now produces real PCM (nonzero/full-scale verified),
+                                * so submit mixed frames to ndsp. */
 extern void Port3ds_AudioSubmitFrame(const s16* be_stereo, int nsamples);
 
 #define DMEM_BYTES 0x2000

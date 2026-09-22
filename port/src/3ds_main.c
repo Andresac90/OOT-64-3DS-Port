@@ -137,8 +137,15 @@ void PortDbg(const char* s) { Log(s); }
 
 /* hex value logger for diagnostics (e.g. scene-data dump) */
 void PortDbgX(const char* label, unsigned val) {
-    char buf[96];
-    sprintf(buf, "%s=%08x", label, val);
+    /* PORT (2026-09-21): format hex MANUALLY — sprintf("%s=%08x") is broken in the port's
+     * libc (produces an empty buffer, which Log()'s empty-string guard then drops), so every
+     * PortDbgX diagnostic was silently invisible. Manual formatting fixes all value-logging. */
+    char buf[128]; int n = 0; int i;
+    static const char hx[] = "0123456789abcdef";
+    if (label) { while (label[n] != '\0' && n < 100) { buf[n] = label[n]; n++; } }
+    buf[n++] = '='; buf[n++] = '0'; buf[n++] = 'x';
+    for (i = 28; i >= 0; i -= 4) buf[n++] = hx[(val >> i) & 0xF];
+    buf[n] = '\0';
     Log(buf);
 }
 
@@ -236,13 +243,15 @@ int main(int argc, char** argv) {
     DBG("PORT: consoleInit done");
     { extern void PortCompat_InitStreams(void); PortCompat_InitStreams(); }
     WipeCrashDumps(); /* keep only this run's crash dump, named crash_dump_00000000.dmp */
-    { extern void Port3ds_AudioInit(void); Port3ds_AudioInit(); } /* M3a ndsp plumbing; no-op without dspfirm.cdc */
 
     /* Truncate the log file at the start of every boot. */
     { FILE* f = fopen(LOG_PATH, "w");
       if (f) { fputs("=== OoT 3DS boot log ===\n", f); fclose(f); } }
 
     Log("OoT 3DS-Port booting...");
+    /* ndsp plumbing AFTER the log is set up so its init status is visible (was before the
+     * truncation above, which wiped its logs). Tries HLE even without dspfirm.cdc. */
+    { extern void Port3ds_AudioInit(void); Port3ds_AudioInit(); }
 
     /* PORT DEBUG: the port assumes the linear heap is at 0x08000000 (segment-8 collision
      * handling). Log where libctru's linear heap actually lands on this Azahar/firmware. */

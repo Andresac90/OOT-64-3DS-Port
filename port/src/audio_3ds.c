@@ -28,18 +28,19 @@ static ndspWaveBuf sBeepBuf;
 static s16* sBeepData;
 
 void Port3ds_AudioInit(void) {
-    /* Guard: without the DSP firmware dump, do not even attempt ndspInit. */
-    FILE* f = fopen("sdmc:/3ds/dspfirm.cdc", "rb");
-    if (f == NULL) {
-        printf("[audio] no sdmc:/3ds/dspfirm.cdc - audio disabled\n");
-        return;
-    }
-    fclose(f);
+    extern void PortDbg(const char*);
+    /* PORT (2026-09-21): try ndspInit even without sdmc:/3ds/dspfirm.cdc — Azahar/Citra
+     * HLE-emulate the DSP and do not need the firmware dump. If ndspInit fails we still
+     * disable gracefully (never break boot). On real hardware the dump is required. */
+    { FILE* f = fopen("sdmc:/3ds/dspfirm.cdc", "rb");
+      if (f) { fclose(f); PortDbg("[audio] dspfirm.cdc present"); }
+      else PortDbg("[audio] no dspfirm.cdc - trying ndsp HLE anyway"); }
 
     if (R_FAILED(ndspInit())) {
-        printf("[audio] ndspInit failed - audio disabled\n");
+        PortDbg("[audio] ndspInit FAILED - audio disabled");
         return;
     }
+    PortDbg("[audio] ndspInit OK - ndsp up");
     sNdspOk = true;
     ndspSetOutputMode(NDSP_OUTPUT_STEREO);
     ndspChnReset(0);
@@ -100,14 +101,47 @@ void Port3ds_AudioSubmit(const s16* samples, int nsamples) {
     sNextBuf = (sNextBuf + 1) % PORT_AUDIO_NBUFS;
 }
 
+/* PORT (2026-09-21): capture the engine's mixed PCM to a WAV on the SD card, so the audio
+ * can be VERIFIED/heard even when ndsp is unavailable (Azahar needs dspfirm.cdc, which ndspInit
+ * requires). Writes ~6 s of 32 kHz stereo s16 to sdmc:/3ds/oot/oot_audio.wav then stops. */
+static void wav_put32(FILE* f, unsigned v) { fputc(v&0xFF,f);fputc((v>>8)&0xFF,f);fputc((v>>16)&0xFF,f);fputc((v>>24)&0xFF,f); }
+static void wav_put16(FILE* f, unsigned v) { fputc(v&0xFF,f);fputc((v>>8)&0xFF,f); }
+static FILE* sWavFile = NULL;
+static unsigned sWavSamples = 0;
+static int sWavDone = 0;
+#define WAV_MAX_SAMPLES (32000u * 6u)
+static void Port3ds_AudioDumpWav(const s16* le_stereo, int nsamples) {
+    extern void PortDbg(const char*);
+    int i;
+    if (sWavDone) return;
+    if (sWavFile == NULL) {
+        sWavFile = fopen("sdmc:/3ds/oot/oot_audio.wav", "wb");
+        if (sWavFile == NULL) { sWavDone = 1; return; }
+        for (i = 0; i < 44; i++) fputc(0, sWavFile); /* header placeholder */
+        PortDbg("[audio] WAV capture started -> sdmc:/3ds/oot/oot_audio.wav");
+    }
+    for (i = 0; i < nsamples * 2; i++) wav_put16(sWavFile, (unsigned)(le_stereo[i] & 0xFFFF));
+    sWavSamples += (unsigned)nsamples;
+    if (sWavSamples >= WAV_MAX_SAMPLES) {
+        unsigned dataBytes = sWavSamples * 4;
+        fseek(sWavFile, 0, SEEK_SET);
+        fputs("RIFF", sWavFile); wav_put32(sWavFile, 36 + dataBytes); fputs("WAVE", sWavFile);
+        fputs("fmt ", sWavFile); wav_put32(sWavFile, 16); wav_put16(sWavFile, 1); wav_put16(sWavFile, 2);
+        wav_put32(sWavFile, 32000); wav_put32(sWavFile, 32000 * 4); wav_put16(sWavFile, 4); wav_put16(sWavFile, 16);
+        fputs("data", sWavFile); wav_put32(sWavFile, dataBytes);
+        fclose(sWavFile); sWavFile = NULL; sWavDone = 1;
+        PortDbg("[audio] WAV capture COMPLETE (~6s) -> sdmc:/3ds/oot/oot_audio.wav");
+    }
+}
+
 /* Microcode sink: the interpreter produces big-endian interleaved stereo s16
- * (the N64 DMEM representation). Byte-swap to little-endian for ndsp, then reuse
- * the wave-buf submit path above. */
+ * (the N64 DMEM representation). Byte-swap to little-endian, capture to WAV, then
+ * (if ndsp is up) submit to the wave-buf path above. */
 void Port3ds_AudioSubmitFrame(const s16* be_stereo, int nsamples) {
     static s16 le[PORT_AUDIO_MAXSAMPLES * 2];
     const u8* src;
     int n2, i;
-    if (!sNdspOk || be_stereo == NULL || nsamples <= 0) {
+    if (be_stereo == NULL || nsamples <= 0) {
         return;
     }
     if (nsamples > PORT_AUDIO_MAXSAMPLES) {
@@ -117,6 +151,10 @@ void Port3ds_AudioSubmitFrame(const s16* be_stereo, int nsamples) {
     n2 = nsamples * 2; /* L+R */
     for (i = 0; i < n2; i++) {
         le[i] = (s16)((src[i * 2] << 8) | src[i * 2 + 1]);
+    }
+    Port3ds_AudioDumpWav(le, nsamples); /* capture regardless of ndsp availability */
+    if (!sNdspOk) {
+        return;
     }
     Port3ds_AudioSubmit(le, nsamples);
 }
