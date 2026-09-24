@@ -184,6 +184,7 @@ static struct RDP {
     bool viewport_or_scissor_changed;
     void *z_buf_address;
     void *color_image_address;
+    bool alpha_one; /* combiner alpha is the constant 1 (see G_SETCOMBINE) */
 } rdp;
 
 static struct RenderingState {
@@ -1079,17 +1080,28 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
     }
 #endif
 
-    bool use_alpha = (rdp.other_mode_l & (G_BL_A_MEM << 18)) == 0;
+    /* PORT (2026-09-24): alpha semantics follow libultraship's Interpreter::GfxSpTri1 (MIT):
+     *  - blend: a blender cycle mixes with memory via (1 - A)  [was: "A_MEM not selected"];
+     *  - use_alpha (alpha combiner active, alpha components packed) = blend || texture_edge;
+     *  - cutout: texture_edge, or G_AC_THRESHOLD on a blended draw. The backend picks the alpha
+     *    test from these + the blend state (edge: keep a>0.19, drawn opaque; threshold: a>=8/256).
+     * Opaque draws keep blending AND alpha test off, so their (unpacked) alpha is irrelevant. */
+    bool blend = (((rdp.other_mode_l & (3U << 20)) == (G_BL_CLR_MEM << 20)) && ((rdp.other_mode_l & (3U << 16)) == (G_BL_1MA << 16))) ||
+                 (((rdp.other_mode_l & (3U << 22)) == (G_BL_CLR_MEM << 22)) && ((rdp.other_mode_l & (3U << 18)) == (G_BL_1MA << 18)));
     bool use_fog = (rdp.other_mode_l >> 30) == G_BL_CLR_FOG;
     bool texture_edge = (rdp.other_mode_l & CVG_X_ALPHA) == CVG_X_ALPHA;
-    
-    if (texture_edge) {
-        use_alpha = true;
+    bool alpha_threshold = (rdp.other_mode_l & (3U << G_MDSFT_ALPHACOMPARE)) == G_AC_THRESHOLD;
+    if (rdp.alpha_one) { /* alpha == 1: blending yields CLR_IN and coverage stays full -> opaque */
+        blend = false;
+        texture_edge = false;
+        alpha_threshold = false;
     }
+    bool use_alpha = blend || texture_edge;
+    bool cutout = texture_edge || (alpha_threshold && blend);
     
     if (use_alpha) cc_id |= SHADER_OPT_ALPHA;
     if (use_fog) cc_id |= SHADER_OPT_FOG;
-    if (texture_edge) cc_id |= SHADER_OPT_TEXTURE_EDGE;
+    if (cutout) cc_id |= SHADER_OPT_TEXTURE_EDGE;
 
     if (!use_alpha) {
         cc_id &= ~0xfff000;
@@ -1103,10 +1115,10 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
         gfx_rapi->load_shader(prg);
         rendering_state.shader_program = prg;
     }
-    if (use_alpha != rendering_state.alpha_blend) {
+    if (blend != rendering_state.alpha_blend) {
         gfx_flush();
-        gfx_rapi->set_use_alpha(use_alpha);
-        rendering_state.alpha_blend = use_alpha;
+        gfx_rapi->set_use_alpha(blend); /* blending on/off; alpha combiner is a shader option */
+        rendering_state.alpha_blend = blend;
     }
     uint8_t num_inputs;
     bool used_textures[2];
@@ -1437,6 +1449,26 @@ static uint8_t color_comb_component(uint32_t v) {
     }
 }
 
+/* PORT (2026-09-24): the ALPHA combiner uses its own mux encoding (RDP spec / gbi G_ACMUX_*):
+ * A,B,D: 0 COMBINED, 1 TEXEL0, 2 TEXEL1, 3 PRIMITIVE, 4 SHADE, 5 ENVIRONMENT, 6 ONE, 7 ZERO;
+ * C:     0 LOD_FRACTION, 1..5 as above, 6 PRIM_LOD_FRAC, 7 ZERO.
+ * It was decoded with the COLOR table, which turned "6 = one" into zero (alpha "0,0,0,1" -> 0). */
+static uint8_t alpha_comb_component(uint32_t v, bool is_c) {
+    switch (v) {
+        case 1: return CC_TEXEL0;
+        case 2: return CC_TEXEL1;
+        case 3: return CC_PRIM;
+        case 4: return CC_SHADE;
+        case 5: return CC_ENV;
+        case 0: return is_c ? CC_LOD : CC_0;
+        default: return CC_0; /* ONE has no 3-bit code: the common alpha==1 form is handled via rdp.alpha_one */
+    }
+}
+static inline uint32_t alpha_comb(uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
+    return alpha_comb_component(a, false) | (alpha_comb_component(b, false) << 3) |
+           (alpha_comb_component(c, true) << 6) | (alpha_comb_component(d, false) << 9);
+}
+
 static inline uint32_t color_comb(uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
     return color_comb_component(a) |
            (color_comb_component(b) << 3) |
@@ -1447,6 +1479,7 @@ static inline uint32_t color_comb(uint32_t a, uint32_t b, uint32_t c, uint32_t d
 static void gfx_dp_set_combine_mode(uint32_t rgb, uint32_t alpha) {
     rdp.combine_mode = rgb | (alpha << 12);
     rdp.c1_postmul = CC_0; /* G_SETCOMBINE sets the real value after this call */
+    rdp.alpha_one = false; /* likewise */
 }
 
 static void gfx_dp_set_env_color(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
@@ -1554,6 +1587,7 @@ static void gfx_draw_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lr
 static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint8_t tile, int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy, bool flip) {
     uint32_t saved_combine_mode = rdp.combine_mode;
     uint8_t saved_c1_postmul = rdp.c1_postmul;
+    bool saved_alpha_one = rdp.alpha_one;
     if ((rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_COPY) {
         // Per RDP Command Summary Set Tile's shift s and this dsdx should be set to 4 texels
         // Divide by 4 to get 1 instead
@@ -1603,6 +1637,7 @@ static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int3
     gfx_draw_rectangle(ulx, uly, lrx, lry);
     rdp.combine_mode = saved_combine_mode;
     rdp.c1_postmul = saved_c1_postmul;
+    rdp.alpha_one = saved_alpha_one;
 }
 
 static void gfx_dp_fill_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry) {
@@ -1625,10 +1660,12 @@ static void gfx_dp_fill_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t
     
     uint32_t saved_combine_mode = rdp.combine_mode;
     uint8_t saved_c1_postmul = rdp.c1_postmul;
+    bool saved_alpha_one = rdp.alpha_one;
     gfx_dp_set_combine_mode(color_comb(0, 0, 0, G_CCMUX_SHADE), color_comb(0, 0, 0, G_ACMUX_SHADE));
     gfx_draw_rectangle(ulx, uly, lrx, lry);
     rdp.combine_mode = saved_combine_mode;
     rdp.c1_postmul = saved_c1_postmul;
+    rdp.alpha_one = saved_alpha_one;
 }
 
 static void gfx_dp_set_z_image(void *z_buf_address) {
@@ -1906,7 +1943,9 @@ static void gfx_run_dl(Gfx* cmd) {
             case G_SETCOMBINE:
                 gfx_dp_set_combine_mode(
                     color_comb(C0(20, 4), C1(28, 4), C0(15, 5), C1(15, 3)),
-                    color_comb(C0(12, 3), C1(12, 3), C0(9, 3), C1(9, 3)));
+                    alpha_comb(C0(12, 3), C1(12, 3), C0(9, 3), C1(9, 3)));
+                /* cycle-0 alpha == 1 exactly: D = ONE and (A-B)*C == 0 (C = ZERO, or A == B) */
+                rdp.alpha_one = (C1(9, 3) == 6) && (C0(9, 3) == 7 || C0(12, 3) == C1(12, 3));
                 /* PORT: decode CYCLE 1 RGB (a1,b1,c1,d1) instead of dropping it.
                  * Fold the common OoT tint form (COMBINED-0)*X+0 into rdp.c1_postmul
                  * (backend applies it as a 2nd TEV stage: PREVIOUS * X). Field "0"

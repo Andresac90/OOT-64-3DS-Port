@@ -250,13 +250,35 @@ static void updateShader(bool swapInput01)
          * zero/CONSTANT source got alpha 0 and were discarded by the alpha test
          * (Link's sword vanished). Reverted to this proven behaviour. A correct
          * alpha combiner needs per-surface validation, not a blanket ladder. */
-        if (has_tex) {
-            C3D_TexEnvSrc(e0, C3D_Alpha, GPU_TEXTURE0, 0, 0);
+        /* PORT (2026-09-24): the N64 ALPHA combiner (A-B)*C+D, mapped like the RGB ladder above.
+         * Only for draws with the alpha option (translucent / cutout). Opaque draws have blending
+         * and alpha test OFF (applyAlphaTest), so their alpha -- whose mux gfx_pc zeroes -- can no
+         * longer discard them (the failure mode of the earlier attempt: Link's sword vanished). */
+        if (opt_alpha) {
+            uint8_t a = c[1][0], b = c[1][1], cc = c[1][2], d = c[1][3];
+            GPU_TEVSRC sa = getTevSrc(a, swapInput01), sb = getTevSrc(b, swapInput01),
+                       sc = getTevSrc(cc, swapInput01), sd = getTevSrc(d, swapInput01);
+            if (cc == SHADER_0 || (a == SHADER_0 && b == SHADER_0)) {
+                C3D_TexEnvSrc(e0, C3D_Alpha, sd, 0, 0);                /* D */
+                C3D_TexEnvFunc(e0, C3D_Alpha, GPU_REPLACE);
+            } else if (b == SHADER_0 && d == SHADER_0) {
+                C3D_TexEnvSrc(e0, C3D_Alpha, sa, sc, 0);               /* A*C */
+                C3D_TexEnvFunc(e0, C3D_Alpha, GPU_MODULATE);
+            } else if (b == SHADER_0) {
+                C3D_TexEnvSrc(e0, C3D_Alpha, sa, sc, sd);              /* A*C + D */
+                C3D_TexEnvFunc(e0, C3D_Alpha, GPU_MULTIPLY_ADD);
+            } else if (b == d) {
+                C3D_TexEnvSrc(e0, C3D_Alpha, sa, sb, sc);              /* (A-B)*C + B = lerp */
+                C3D_TexEnvFunc(e0, C3D_Alpha, GPU_INTERPOLATE);
+            } else {
+                C3D_TexEnvSrc(e0, C3D_Alpha, sa, sc, 0);               /* fallback: A*C */
+                C3D_TexEnvFunc(e0, C3D_Alpha, GPU_MODULATE);
+            }
         } else {
-            C3D_TexEnvSrc(e0, C3D_Alpha, GPU_PRIMARY_COLOR, 0, 0);
+            C3D_TexEnvSrc(e0, C3D_Alpha, has_tex ? GPU_TEXTURE0 : GPU_PRIMARY_COLOR, 0, 0);
+            C3D_TexEnvFunc(e0, C3D_Alpha, GPU_REPLACE);
         }
         C3D_TexEnvOpAlpha(e0, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
-        C3D_TexEnvFunc(e0, C3D_Alpha, GPU_REPLACE);
 
         /* --- TEV stage 1: N64 combiner CYCLE 1 fold (see gfx_pc.c). When the DL's
          * cycle 1 is (COMBINED-0)*X+0, gfx_pc routes X through a colour-input slot
@@ -283,10 +305,7 @@ static void updateShader(bool swapInput01)
          * and survive `> 0`; transparent parts of HUD icons/sprites get cut out
          * (without this they draw as solid boxes). Cutout foliage uses a higher
          * threshold. */
-        if (opt_texture_edge)
-            C3D_AlphaTest(true, GPU_GREATER, 77);
-        else
-            C3D_AlphaTest(true, GPU_GREATER, 0);
+        /* alpha test is per draw (depends on blend state): see applyAlphaTest() */
     }
 }
 
@@ -563,6 +582,20 @@ static void gfx_citro3d_set_scissor(int x, int y, int width, int height)
         C3D_SetScissor(GPU_SCISSOR_NORMAL, y, x * 2, y + height, (x + width) * 2);
 }
 
+/* PORT (2026-09-24): alpha test per draw, libultraship semantics. Opaque: off. Cutout without
+ * blending (texture edge): keep alpha > 0.19 and draw opaque. Cutout with blending (threshold):
+ * discard alpha < 8/256. Other translucent draws: discard alpha 0 only (keeps depth clean). */
+static void applyAlphaTest(void)
+{
+    u32 id = sShaderProgramPool[sCurShader].shader_id;
+    if (!(id & SHADER_OPT_ALPHA))
+        C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    else if (id & SHADER_OPT_TEXTURE_EDGE)
+        C3D_AlphaTest(true, GPU_GREATER, sUseBlend ? 7 : 48);
+    else
+        C3D_AlphaTest(true, GPU_GREATER, 0);
+}
+
 static void applyBlend()
 {
     if (sUseBlend)
@@ -764,6 +797,7 @@ static void gfx_citro3d_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size
         return;
     }
 
+    applyAlphaTest();
     if(sShaderProgramPool[sCurShader].num_inputs >= 2)
     {
         renderTwoColorTris(buf_vbo, buf_vbo_len, buf_vbo_num_tris);
