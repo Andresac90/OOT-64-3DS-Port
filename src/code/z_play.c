@@ -1167,6 +1167,7 @@ void Play_Draw(PlayState* this) {
 
     OPEN_DISPS(gfxCtx, "../z_play.c", 3907);
 
+
     gSegments[4] = OS_K0_TO_PHYSICAL(this->objectCtx.slots[this->objectCtx.mainKeepSlot].segment);
     gSegments[5] = OS_K0_TO_PHYSICAL(this->objectCtx.slots[this->objectCtx.subKeepSlot].segment);
     gSegments[2] = OS_K0_TO_PHYSICAL(this->sceneSegment);
@@ -1275,7 +1276,20 @@ void Play_Draw(PlayState* this) {
         if (R_PAUSE_BG_PRERENDER_STATE == PAUSE_BG_PRERENDER_READY) {
             Gfx* gfxP = POLY_OPA_DISP;
 
+#ifndef __3DS__
             PreRender_RestoreFramebuffer(&this->pauseBgPreRender, &gfxP);
+#else
+            /* PORT (2026-09-24): the port has no framebuffer capture (roadmap G10), so the
+             * saved pause background is empty; copying it paints 40 full-width strips over
+             * the whole screen and hides the menu. Emit only the state the copy leaves behind
+             * (render target = framebuffer, full-screen scissor) -- Player_DrawPause narrowed
+             * the scissor to its 64x112 preview, and the menu relies on this reset. */
+            gDPPipeSync(gfxP++);
+            gDPSetColorImage(gfxP++, G_IM_FMT_RGBA, G_IM_SIZ_16b, this->pauseBgPreRender.width,
+                             this->pauseBgPreRender.fbuf);
+            gDPSetScissor(gfxP++, G_SC_NON_INTERLACE, 0, 0, this->pauseBgPreRender.width,
+                          this->pauseBgPreRender.height);
+#endif
             POLY_OPA_DISP = gfxP;
 
             goto Play_Draw_DrawOverlayElements;

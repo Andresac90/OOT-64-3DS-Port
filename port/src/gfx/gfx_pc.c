@@ -203,6 +203,22 @@ static unsigned long get_time(void) {
     return (unsigned long)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
 }
 
+#ifdef __3DS__
+/* PORT (2026-09-24): minimal render-target routing. The citro3d backend has ONE target (the
+ * screen), but OoT renders into other color images too: the pause menu's Link preview
+ * (Player_DrawPause -> its own color/depth buffers), PreRender framebuffer save/copy/filter
+ * passes, transition tiles. Painting those onto the screen covered the pause menu with
+ * their full-rect clears. Only draws whose color image is a real framebuffer (SysCfb) reach
+ * the screen; other targets are dropped until real render-to-texture exists (roadmap G10). */
+extern uintptr_t sSysCfbFbPtr[2];
+static inline int gfx_cimg_is_screen(void) {
+    uintptr_t a = (uintptr_t)rdp.color_image_address;
+    return a == 0 || a == sSysCfbFbPtr[0] || a == sSysCfbFbPtr[1];
+}
+#else
+static inline int gfx_cimg_is_screen(void) { return 1; }
+#endif
+
 static void gfx_flush(void) {
     if (buf_vbo_len > 0) {
         int num = buf_vbo_num_tris;
@@ -528,6 +544,37 @@ static void import_texture_rgba32(int tile) {
     gfx_rapi->upload_texture(rgba32_buf, width, height);
 }
 
+#ifdef PORT_TEXDUMP
+/* DEBUG TOOL (opt-in, build with PORT_EXTRA=-DPORT_TEXDUMP): write every uniquely-addressed
+ * texture the port decodes (source address, N64 fmt/siz, decoded RGBA8) to
+ * sdmc:/3ds/oot/texdump.bin, for diffing against the decomp's golden PNGs
+ * (tools/texdiff.py). Record: "TEXD" u32 addr, u8 fmt, u8 siz, u16 0, u32 w, u32 h, w*h*4 RGBA. */
+static void texdump_record(const uint8_t* addr, uint8_t fmt, uint8_t siz, uint32_t size_bytes, uint32_t line_bytes) {
+    static FILE* f = NULL;
+    static const uint8_t* seen[512];
+    static int nseen = 0, dead = 0;
+    uint32_t bits, w, h, hdr[4];
+    int i;
+    if (dead || line_bytes == 0) return;
+    for (i = 0; i < nseen; i++) if (seen[i] == addr) return;
+    if (nseen >= 512) { if (f) { fclose(f); f = NULL; } dead = 1; return; }
+    seen[nseen++] = addr;
+    bits = (siz == G_IM_SIZ_4b) ? 4 : (siz == G_IM_SIZ_8b) ? 8 : (siz == G_IM_SIZ_16b) ? 16 : 32;
+    w = line_bytes * 8 / bits;
+    h = size_bytes / line_bytes;
+    if (w == 0 || h == 0 || w * h * 4 > sizeof(rgba32_buf)) return;
+    if (f == NULL) { f = fopen("sdmc:/3ds/oot/texdump.bin", "wb"); if (f == NULL) { dead = 1; return; } }
+    hdr[0] = 0x44584554u; /* "TEXD" */
+    hdr[1] = (uint32_t)(uintptr_t)addr;
+    hdr[2] = (uint32_t)fmt | ((uint32_t)siz << 8);
+    hdr[3] = w;
+    fwrite(hdr, 4, 4, f);
+    fwrite(&h, 4, 1, f);
+    fwrite(rgba32_buf, 1, w * h * 4, f);
+    fflush(f);
+}
+#endif
+
 static void import_texture(int tile) {
     uint8_t fmt = rdp.texture_tile.fmt;
     uint8_t siz = rdp.texture_tile.siz;
@@ -591,6 +638,10 @@ static void import_texture(int tile) {
     }
     int t1 = get_time();
     //printf("Time diff: %d\n", t1 - t0);
+#ifdef PORT_TEXDUMP
+    texdump_record(rdp.loaded_texture[tile].addr, fmt, siz, rdp.loaded_texture[tile].size_bytes,
+                   rdp.texture_tile.line_size_bytes);
+#endif
 }
 
 static void gfx_normalize_vector(float v[3]) {
@@ -830,6 +881,7 @@ static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
 }
 
 static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
+    if (!gfx_cimg_is_screen()) return;
     gfx_port_tri_count++;
     struct LoadedVertex *v1 = &rsp.loaded_vertices[vtx1_idx];
     struct LoadedVertex *v2 = &rsp.loaded_vertices[vtx2_idx];
@@ -1332,6 +1384,7 @@ static void gfx_dp_set_fill_color(uint32_t packed_color) {
 }
 
 static void gfx_draw_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry) {
+    if (!gfx_cimg_is_screen()) return;
     uint32_t saved_other_mode_h = rdp.other_mode_h;
     uint32_t cycle_type = (rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE));
     
@@ -1603,6 +1656,9 @@ static void gfx_run_dl(Gfx* cmd) {
         }
 #endif
         uint32_t opcode = cmd->words.w0 >> 24;
+#ifdef PORT_GBIAUDIT
+        { extern unsigned gPortGbiCounts[256]; gPortGbiCounts[opcode & 0xFF]++; }
+#endif
 
         switch (opcode) {
             // RSP commands:
@@ -1684,6 +1740,12 @@ static void gfx_run_dl(Gfx* cmd) {
                 break;
 #if defined(F3DEX_GBI) || defined(F3DLP_GBI)
             case (uint8_t)G_TRI2:
+#ifdef F3DEX_GBI_2
+            /* PORT (2026-09-24): F3DEX2 G_QUAD (gSP1Quadrangle, 411 sites incl. the pause-menu
+             * pages) packs two triangles exactly like G_TRI2 and the microcode draws it the same
+             * way. It had no case, so every quad was silently skipped (found by tools/gbi_audit.py). */
+            case (uint8_t)G_QUAD:
+#endif
                 gfx_sp_tri1(C0(16, 8) / 2, C0(8, 8) / 2, C0(0, 8) / 2);
                 gfx_sp_tri1(C1(16, 8) / 2, C1(8, 8) / 2, C1(0, 8) / 2);
                 break;
@@ -1701,6 +1763,14 @@ static void gfx_run_dl(Gfx* cmd) {
 #else
                 gfx_sp_set_other_mode(C0(8, 8) + 32, C0(0, 8), (uint64_t) cmd->words.w1 << 32);
 #endif
+                break;
+            case (uint8_t)G_RDPSETOTHERMODE:
+                /* PORT (2026-09-24): gDPSetOtherMode sets the WHOLE other mode in one command
+                 * (hi 24 bits in w0, lo word in w1). OoT's Gfx_SetupDL_* presets (z_rcp.c, 72
+                 * uses) rely on it; unhandled, every draw after a preset inherited stale state
+                 * (e.g. the HUD drew in FILL cycle with the scene's FOG blender -> flat dark boxes). */
+                rdp.other_mode_h = cmd->words.w0 & 0x00FFFFFFu;
+                rdp.other_mode_l = cmd->words.w1;
                 break;
             
             // RDP Commands:
@@ -1871,8 +1941,22 @@ void gfx_start_frame(void) {
     gfx_current_dimensions.aspect_ratio = (float)gfx_current_dimensions.width / (float)gfx_current_dimensions.height;
 }
 
+#ifdef PORT_GBIAUDIT
+/* DEBUG TOOL (opt-in, PORT_EXTRA=-DPORT_GBIAUDIT): runtime opcode histogram, dumped at frames
+ * 600 and 1500 as "GBI op=XX n=count" so tools/gbi_audit.py's static list can be confirmed. */
+unsigned gPortGbiCounts[256];
+static void gbi_audit_dump(unsigned frame) {
+    extern void PortDbgX(const char*, unsigned);
+    int i;
+    PortDbgX("GBI dump at frame", frame);
+    for (i = 0; i < 256; i++) if (gPortGbiCounts[i]) { PortDbgX("GBI op", (unsigned)i); PortDbgX("GBI   n", gPortGbiCounts[i]); }
+}
+#endif
 void gfx_run(Gfx *commands) {
     gfx_port_frame_index++;
+#ifdef PORT_GBIAUDIT
+    if (gfx_port_frame_index == 600 || gfx_port_frame_index == 1500) gbi_audit_dump(gfx_port_frame_index);
+#endif
     {
         int i;
         for (i = 0; i < 16; i++) gfx_port_segments[i] = gSegments[i];

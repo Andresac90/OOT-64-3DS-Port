@@ -13,6 +13,27 @@ extern void free();
 extern int fprintf();
 extern void* stderr;
 extern void* memset();
+extern void* memcpy();
+
+/* PORT (2026-09-23): the game arena lives in the 3DS LINEAR heap, not newlib's app heap.
+ * The app heap sits at 0x08000000-0x0FFFFFFF, which is byte-for-byte the same encoding as
+ * OoT segment numbers 8-0xF: a runtime-built vertex buffer or display list at 0x0804xxxx is
+ * indistinguishable from a "segment 8, offset 0x04xxxx" reference (the pause menu sets
+ * segment 8 = its icon buffer). Linear memory is at 0x14000000 (Azahar/old kernels) or
+ * 0x30000000 (current N3DS firmware) -- always >= 0x10000000, which both address resolvers
+ * treat as native unconditionally. So every game allocation (display-list pools, DMA'd
+ * scenes/objects, pause/UI segments, vertex buffers) becomes unambiguous by construction.
+ * All game memory funnels through SystemArena, so this is the single chokepoint. */
+#ifdef __3DS__
+extern void* linearAlloc(unsigned int size);
+extern void linearFree(void* mem);
+extern unsigned int linearGetSize(void* mem);
+#define ARENA_ALLOC(n)  linearAlloc(n)
+#define ARENA_FREE(p)   linearFree(p)
+#else
+#define ARENA_ALLOC(n)  malloc(n)
+#define ARENA_FREE(p)   free(p)
+#endif
 
 #define REG_BITS 16
 #define REG_SIZE (1 << REG_BITS)
@@ -51,7 +72,7 @@ static s32 RegRemove(void* p) {
 }
 
 void* SystemArena_Malloc(u32 size) {
-    void* p = malloc(size ? size : 1);
+    void* p = ARENA_ALLOC(size ? size : 1);
     if (p != 0) RegInsert(p);
     return p;
 }
@@ -74,7 +95,21 @@ void* SystemArena_Realloc(void* ptr, u32 newSize) {
         fprintf(stderr, "[arena] realloc of foreign ptr %p — fresh alloc\n", ptr);
         return SystemArena_Malloc(newSize);
     }
+#ifdef __3DS__
+    /* libctru's linearRealloc is unreliable; do alloc + copy + free explicitly. */
+    {
+        u32 oldSize = linearGetSize(ptr);
+        q = linearAlloc(newSize ? newSize : 1);
+        if (q == 0) {
+            RegInsert(ptr); /* keep the old block live on failure, like realloc */
+            return 0;
+        }
+        memcpy(q, ptr, oldSize < newSize ? oldSize : newSize);
+        linearFree(ptr);
+    }
+#else
     q = realloc(ptr, newSize ? newSize : 1);
+#endif
     if (q != 0) RegInsert(q);
     return q;
 }
@@ -86,7 +121,7 @@ void* SystemArena_ReallocDebug(void* ptr, u32 newSize, const char* file, int lin
 void SystemArena_Free(void* ptr) {
     if (ptr == 0) return;
     if (RegRemove(ptr)) {
-        free(ptr);
+        ARENA_FREE(ptr);
     } else {
         fprintf(stderr, "[arena] free of foreign ptr %p ignored\n", ptr);
     }
@@ -104,8 +139,16 @@ void* SystemArena_Calloc(u32 num, u32 size) {
 
 void SystemArena_Display(void) {}
 void SystemArena_GetSizes(u32* outMaxFree, u32* outFree, u32* outAlloc) {
+#ifdef __3DS__
+    /* Report the real linear-heap headroom so the game's own OOM guards can see it. */
+    { extern unsigned int linearSpaceFree(void);
+      u32 f = linearSpaceFree();
+      if (outMaxFree != 0) *outMaxFree = f;
+      if (outFree != 0) *outFree = f; }
+#else
     if (outMaxFree != 0) *outMaxFree = 64 * 1024 * 1024;
     if (outFree != 0) *outFree = 64 * 1024 * 1024;
+#endif
     if (outAlloc != 0) *outAlloc = sLiveCount * 16;
 }
 void SystemArena_Check(void) {}

@@ -84,6 +84,11 @@ extern void PortDbgX(const char* label, unsigned val);
 static u32 sDmaLogN = 0;
 #endif
 
+/* Raw cartridge read (no byte-order conversion) for the PI I/O shim: osEPiReadIo. */
+void PortDma_ReadRomRaw(void* dst, u32 offset, u32 n) {
+    if (ROM_READY()) ReadRom(dst, offset, n); else memset(dst, 0, n);
+}
+
 static void Dma_Copy(void* ram, uintptr_t vrom, u32 size) {
     u32 i;
 

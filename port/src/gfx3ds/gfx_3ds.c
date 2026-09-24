@@ -67,6 +67,16 @@ static void gfx_3ds_init(void)
     u8 model;
     CFGU_GetSystemModel(&model);
     useWide = model != 3; //wide is not possible on o2ds
+    /* PORT (2026-09-24): Citra-family emulators (Azahar) don't implement the 800px wide
+     * top-screen mode -- they show only the left 400 columns at 2x, which looked like an
+     * off-center camera and pushed centered UI (the pause menu) off-screen. Detect the
+     * emulator via its emulator-only system-info type (0x20000); real hardware returns an
+     * error there, so hardware keeps the sharper wide mode. */
+    {
+        s64 emu = 0;
+        if (R_SUCCEEDED(svcGetSystemInfo(&emu, 0x20000, 0)))
+            useWide = false;
+    }
 #endif
 
     u32 transferFlags = 

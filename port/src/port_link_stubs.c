@@ -22,5 +22,9 @@ int _Printf() { return 0; }
  * that tanked emulation to 1% and crashed Azahar). Give it real room. The LINEAR heap
  * (linearAlloc, ~0x14000000) is only gfx (VBO 2MB + framebuffers + ~8MB textures).
  * Total resident: 42MB .data + these must fit the New-3DS 124MB grant. */
-unsigned __ctru_heap_size = 40u * 1024 * 1024;
-unsigned __ctru_linear_heap_size = 24u * 1024 * 1024;
+/* PORT (2026-09-23): the game arena moved to the LINEAR heap (arena_shim.c) so its
+ * pointers can't collide with OoT segments 8-0xF. The app heap now only serves newlib/
+ * citro3d/libctru host allocations; linear holds gfx (VBO/framebuffers/textures ~12MB)
+ * plus the whole game arena (scenes, objects, display-list pools, UI segments). */
+unsigned __ctru_heap_size = 16u * 1024 * 1024;
+unsigned __ctru_linear_heap_size = 52u * 1024 * 1024;

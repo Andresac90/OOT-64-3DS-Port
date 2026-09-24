@@ -21,8 +21,18 @@ void SysCfb_Init(s32 n64dd) {
     (void)n64dd;
     /* one 16bpp-sized buffer is screenSize*2; allocate generously (32bpp) */
     u32 bytes = CFB_W * CFB_H * 4;
+#ifdef __3DS__
+    /* PORT (2026-09-24): framebuffers come from the LINEAR heap (>= 0x10000000), like the
+     * game arena. In the 0x08 app heap their addresses collided with OoT segment 8: the
+     * pause menu's "set color image = framebuffer" was misread as seg8+offset, so the
+     * renderer could not tell which draws target the real screen. */
+    { extern void* linearAlloc(unsigned int size);
+      sSysCfbFbPtr[0] = (uintptr_t)linearAlloc(bytes);
+      sSysCfbFbPtr[1] = (uintptr_t)linearAlloc(bytes); }
+#else
     sSysCfbFbPtr[0] = (uintptr_t)malloc(bytes);
     sSysCfbFbPtr[1] = (uintptr_t)malloc(bytes);
+#endif
     sSysCfbEnd = sSysCfbFbPtr[1] + bytes;
 }
 

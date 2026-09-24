@@ -270,6 +270,11 @@ int main(int argc, char** argv) {
 
     PortDma_Init(ROM_PATH);
     Log("DMA init OK.");
+    /* PORT (2026-09-24): bootproc() normally calls Locale_Init (cart header -> gCurrentRegion,
+     * which SaveContext_Init turns into the save language). The port enters Main() directly,
+     * so region stayed 0 and the US ROM showed Japanese text. Run it here, after the ROM opens. */
+    { extern void Locale_Init(void); extern int gCurrentRegion;
+      Locale_Init(); PortDbgX("region (1=JP 2=US 3=EU)", (unsigned)gCurrentRegion); }
 
     gViConfigModeType = 0;
 

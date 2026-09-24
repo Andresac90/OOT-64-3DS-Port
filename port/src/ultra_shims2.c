@@ -71,7 +71,16 @@ void osCreatePiManager(OSPri pri, OSMesgQueue* cmdQ, OSMesg* cmdBuf, s32 cmdMsgC
 OSMesgQueue* osPiGetCmdQueue(void) { return &sPiCmdQueue; }
 
 /* EPI raw IO: only the boot chain touches these. */
-s32 osEPiReadIo(OSPiHandle* h, u32 devAddr, u32* data) { (void)h; (void)devAddr; *data = 0; return 0; }
+/* PORT (2026-09-24): read the real cartridge word. Locale_Init reads the ROM header at 0x3C
+ * and indexes it as BYTES (regionInfo[2] = country code 'E' for US), so copy the 4 bytes in
+ * ROM memory order. It was stubbed to 0 -> region unknown -> save language JPN (Japanese
+ * pause-menu text on the US ROM). */
+extern void PortDma_ReadRomRaw(void* dst, u32 offset, u32 n);
+s32 osEPiReadIo(OSPiHandle* h, u32 devAddr, u32* data) {
+    (void)h;
+    PortDma_ReadRomRaw(data, devAddr & 0x0FFFFFFFu, 4);
+    return 0;
+}
 s32 osEPiWriteIo(OSPiHandle* h, u32 devAddr, u32 data) { (void)h; (void)devAddr; (void)data; return 0; }
 
 /* Cartridge DMA → ROM image (PortDma in dma_shim.c). */

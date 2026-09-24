@@ -541,7 +541,16 @@ static void gfx_citro3d_set_zmode_decal(bool zmode_decal) {
 }
 
 static void gfx_citro3d_set_viewport(int x, int y, int width, int height) {
-    C3D_SetViewport(x, y, width, height);
+    /* PORT (2026-09-24): the top-screen target is PORTRAIT (240x400, rotated), so x/y and
+     * width/height swap -- exactly like gfx_citro3d_set_scissor below and the sm64 3DS port
+     * this backend derives from. Passing them unswapped shifted the whole picture ~half a
+     * screen to the right ("camera off-center"), which also pushed the pause menu off-screen. */
+    if (gGfx3DSMode == GFX_3DS_MODE_AA_22 || gGfx3DSMode == GFX_3DS_MODE_WIDE_AA_12)
+        C3D_SetViewport(y * 2, x * 2, height * 2, width * 2);
+    else if (gGfx3DSMode == GFX_3DS_MODE_WIDE)
+        C3D_SetViewport(y, x * 2, height, width * 2);
+    else
+        C3D_SetViewport(y, x, height, width);
 }
 
 static void gfx_citro3d_set_scissor(int x, int y, int width, int height)

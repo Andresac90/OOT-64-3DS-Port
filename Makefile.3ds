@@ -68,7 +68,8 @@ PORT_DEFS := -D__3DS__ -DTARGET_N3DS -DARM11 -D_3DS -DF3DEX_GBI_2 -D_LANGUAGE_C 
 PORT_INC := -isystem $(GCC_INC) -Iport/include -Iport/src -Iport/src/gfx \
             -Iport/src/gfx/PR -Iport/src/gfx3ds -Iinclude -Isrc $(GEN_INC) \
             -I$(CTRULIB)/include -I$(PORTLIBS)/include
-PORT_CFLAGS := $(ARCH) -std=gnu11 $(OPT) $(WARN) $(PORT_DEFS) $(PORT_INC)
+# PORT_EXTRA: opt-in debug tools, e.g. `make -f Makefile.3ds cci PORT_EXTRA=-DPORT_TEXDUMP`
+PORT_CFLAGS := $(ARCH) -std=gnu11 $(OPT) $(WARN) $(PORT_DEFS) $(PORT_INC) $(PORT_EXTRA)
 
 # port/rom_symbols.ld defines the N64 VROM segment address symbols (_xxxSegmentRomStart/End,
 # 16k symbols) the game references for DMA. It's symbol-only (no SECTIONS), so it augments
