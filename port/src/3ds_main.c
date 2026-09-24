@@ -94,15 +94,62 @@ void PortGfx_Init(void) {
 
 void PortGfx_FrameReady(void) {}
 
+/* PORT (2026-09-24): N64-faithful pacing. OoT advances its logic once every R_UPDATE_RATE VI
+ * retraces (3 -> 20 updates/s) and the N64 AudioMgr runs on EVERY retrace (60/s), independent of
+ * the game. The port used to run one update per rendered frame (measured 26-29/s -> game ~1.4x too
+ * fast, speed varying with scene load) and pumped audio once per update. Here: after presenting,
+ * wait whole retraces until R_UPDATE_RATE retrace periods have passed since the previous update,
+ * pumping audio once per retrace. A frame that renders late simply runs late (like N64 lag). */
+static unsigned sPortAudioPumps = 0;
+static void Port3ds_PaceFrame(void) {
+    extern void* gRegEditor;
+    extern void Port3ds_PumpAudio(void);
+    static u64 sLast = 0;
+    const double kRetraceMs = 1000.0 / 59.83; /* 3DS LCD refresh */
+    int rate = 3;
+    if (gRegEditor) rate = *(short*)((char*)gRegEditor + 0x14 + 126 * 2); /* R_UPDATE_RATE = SREG(30) */
+    if (rate < 1) rate = 1;
+    if (rate > 6) rate = 6;
+    int pumped = 0;
+    u64 now;
+    for (;;) {
+        gspWaitForVBlank();
+        Port3ds_PumpAudio(); /* build+dispatch one audio RSP task per retrace, as on N64 */
+        pumped++;
+        if (sLast == 0 || (double)(osGetTime() - sLast) + 2.0 >= rate * kRetraceMs) break;
+    }
+    now = osGetTime();
+    /* Audio runs on wall-clock retraces, not on how many waits happened: if rendering ate most of
+     * the budget, catch up to one audio task per retrace actually elapsed (capped). */
+    if (sLast != 0) {
+        int due = (int)((double)(now - sLast) / kRetraceMs + 0.5);
+        if (due > 8) due = 8;
+        while (pumped < due) { Port3ds_PumpAudio(); pumped++; }
+    }
+    sPortAudioPumps += (unsigned)pumped;
+    sLast = now;
+}
+
 void PortGfx_RunTask(OSTask* task) {
     if (!sGfxInited) PortGfx_Init();
     Port3ds_PollInput();
     { extern void Port3ds_PumpInput(void); Port3ds_PumpInput(); } /* live buttons -> game PadMgr */
     { extern void Audio_PortEnsureNullChannels(void); Audio_PortEnsureNullChannels(); } /* keep uninit audio channels non-NULL so direct game audio calls don't crash */
-    { extern void Port3ds_PumpAudio(void); Port3ds_PumpAudio(); } /* build+dispatch audio RSP task -> C audio microcode */
     gfx_start_frame();
     gfx_run((Gfx*)task->t.data_ptr);
     gfx_end_frame();
+    Port3ds_PaceFrame();
+    /* Frame-rate log: game updates per second measured on the wall clock (x10), every 300 frames.
+     * OoT's logic is designed for 20/s (R_UPDATE_RATE=3 VI retraces per update at 60 Hz). */
+    { static u64 t0 = 0; static unsigned n = 0;
+      if (t0 == 0) t0 = osGetTime();
+      if (++n == 300) { u64 t1 = osGetTime();
+          extern void PortDbgX(const char*, unsigned); extern void* gRegEditor;
+          PortDbgX("perf updates/s x10", (unsigned)(3000000ull / (t1 - t0 ? t1 - t0 : 1)));
+          if (gRegEditor) PortDbgX("perf R_UPDATE_RATE", (unsigned)*(short*)((char*)gRegEditor + 0x14 + 126 * 2));
+          PortDbgX("perf audio pumps/s x10", (unsigned)((u64)sPortAudioPumps * 10000ull / (t1 - t0 ? t1 - t0 : 1)));
+          sPortAudioPumps = 0;
+          n = 0; t0 = t1; } }
 }
 
 #define ROM_PATH "sdmc:/3ds/oot/baserom-decompressed.z64"

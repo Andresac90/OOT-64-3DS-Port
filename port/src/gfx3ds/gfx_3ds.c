@@ -144,8 +144,8 @@ static bool gfx_3ds_start_frame(void)
 static void gfx_3ds_swap_buffers_begin(void) 
 {
     C3D_FrameEnd(0);
-    if(C3D_GetProcessingTime() < 1000.0f / 60.f)
-        gspWaitForVBlank();
+    /* PORT (2026-09-24): no vblank wait here -- Port3ds_PaceFrame (3ds_main.c) paces updates to the
+     * game's R_UPDATE_RATE retraces and pumps audio per retrace. */
 }
 
 static void gfx_3ds_swap_buffers_end(void) 

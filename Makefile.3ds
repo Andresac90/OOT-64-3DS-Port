@@ -149,7 +149,15 @@ cia: $(BUILD)/$(TARGET).cia
 compile: $(OBJS)                                       # compile everything, skip link
 code: $(GAME_OBJS) $(DEVKIT_OBJS) $(SHADER_OBJ)        # compile code only (no assets) — shakeout
 
-$(GAME_OBJS) $(ASSET_OBJS): CC_FLAGS := $(GAME_CFLAGS)
+$(GAME_OBJS): CC_FLAGS := $(GAME_CFLAGS)
+# PORT (2026-09-24): every native asset TU must keep its ROM (declaration) layout, because the
+# DMA shim serves ROM reads of natively-linked segments as native_base + rom_offset (gVromMap).
+# With GCC's default toplevel reordering, icon_item_static came out in REVERSE order (85/86 icons
+# misplaced -> garbage C-button icons). Same flags as the gameplay_keep blob below: keep
+# declaration order, and -Dconst= keeps const and non-const data in one contiguous .data run.
+# -fno-zero-initialized-in-bss: all-zero arrays (e.g. *_zeros_*, empty cam lists) otherwise go to
+# .bss, splitting a segment in two (tools/layout_audit.py flagged 138 segments before these flags).
+$(ASSET_OBJS): CC_FLAGS := $(GAME_CFLAGS) -fno-toplevel-reorder -fno-zero-initialized-in-bss -Dconst=
 $(DEVKIT_OBJS):             CC_FLAGS := $(PORT_CFLAGS)
 # gameplay_keep blob must be a VROM-exact contiguous native LE blob (see its header):
 # -O0 keeps order, -fno-toplevel-reorder keeps declaration order, -Dconst= forces data

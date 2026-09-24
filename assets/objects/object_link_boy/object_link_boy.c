@@ -907,7 +907,7 @@ Vtx gLinkAdultHookshotChainVtx[] = {
 
 #define gLinkAdultHookshotChainTex_WIDTH 16
 #define gLinkAdultHookshotChainTex_HEIGHT 32
-u64 gLinkAdultHookshotChainTex[TEX_LEN(u64, gLinkAdultHookshotChainTex_WIDTH, gLinkAdultHookshotChainTex_HEIGHT, 16)];
+extern u64 gLinkAdultHookshotChainTex[TEX_LEN(u64, gLinkAdultHookshotChainTex_WIDTH, gLinkAdultHookshotChainTex_HEIGHT, 16)];
 
 Gfx gLinkAdultHookshotChainDL[23] = {
 #include "assets/objects/object_link_boy/gLinkAdultHookshotChainDL.inc.c"

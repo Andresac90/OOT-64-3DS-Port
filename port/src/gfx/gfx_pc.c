@@ -44,9 +44,16 @@ extern char __end__[];
  * through this to recover N64 byte order. Geometry (Vtx/Gfx) is unaffected — it's
  * typed struct fields the compiler already lays out correctly for LE. */
 #ifdef __3DS__
-#define TEXB(base, k) ((base)[(uintptr_t)(k) ^ 7u])
+/* PORT (2026-09-24): texel reads (TEXB) now come from the logical-order staging buffer built by
+ * gfx_gather_texture(); palette reads (TEXP) still read memory in place, so they keep the
+ * per-8-byte swizzle of natively-compiled (u64-array) assets. */
+#define TEXB(base, k) ((base)[(k)])
+#define TEXP(base, k) ((base)[(uintptr_t)(k) ^ 7u])
+#define TEX_SRC_BYTE(p) (*(const uint8_t*)((uintptr_t)(p) ^ 7u)) /* absolute-address unswizzle */
 #else
 #define TEXB(base, k) ((base)[(k)])
+#define TEXP(base, k) ((base)[(k)])
+#define TEX_SRC_BYTE(p) (*(const uint8_t*)(p))
 #endif
 
 // SCALE_M_N: upscale/downscale M-bit integer to N-bit
@@ -87,6 +94,7 @@ struct TextureHashmapNode {
     
     const uint8_t *texture_addr;
     uint8_t fmt, siz;
+    uint32_t size_bytes; /* PORT: part of the key -- tile loads can share a start address */
     
     uint32_t texture_id;
     uint8_t cms, cmt;
@@ -144,10 +152,13 @@ static struct RDP {
         const uint8_t *addr;
         uint8_t siz;
         uint8_t tile_number;
+        uint32_t width; /* texture image width in texels (G_SETTIMG), needed by LOADTILE */
     } texture_to_load;
     struct {
         const uint8_t *addr;
         uint32_t size_bytes;
+        uint32_t line_size_bytes;            /* bytes loaded per row */
+        uint32_t full_image_line_size_bytes; /* source row stride (== line for LOADBLOCK) */
     } loaded_texture[2];
     struct {
         uint8_t fmt;
@@ -345,12 +356,29 @@ static struct ColorCombiner *gfx_lookup_or_create_color_combiner(uint32_t cc_id)
     return prev_combiner = comb;
 }
 
-static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, const uint8_t *orig_addr, uint32_t fmt, uint32_t siz) {
+/* PORT (2026-09-24): textures are cached by source address, which assumes texture memory never
+ * changes. DMA'd buffers are reused in place (e.g. the A/B/START action labels in doActionSegment):
+ * after a new label was DMA'd to the same address the cache kept returning the old one ("Attack"
+ * instead of "Decide" on the pause screen). dma_shim.c calls this for every DMA destination; any
+ * cached texture starting inside the written range is dropped (sentinel address never matches). */
+void gfx_texture_cache_invalidate_range(const void* start, uint32_t size) {
+    const uint8_t* s = (const uint8_t*)start;
+    const uint8_t* e = s + size;
+    size_t i;
+    for (i = 0; i < gfx_texture_cache.pool_pos; i++) {
+        struct TextureHashmapNode* n = &gfx_texture_cache.pool[i];
+        if (n->texture_addr >= s && n->texture_addr < e) {
+            n->texture_addr = (const uint8_t*)1;
+        }
+    }
+}
+
+static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, const uint8_t *orig_addr, uint32_t fmt, uint32_t siz, uint32_t size_bytes) {
     size_t hash = (uintptr_t)orig_addr;
     hash = (hash >> 5) & 0x3ff;
     struct TextureHashmapNode **node = &gfx_texture_cache.hashmap[hash];
     while (*node != NULL && *node - gfx_texture_cache.pool < gfx_texture_cache.pool_pos) {
-        if ((*node)->texture_addr == orig_addr && (*node)->fmt == fmt && (*node)->siz == siz) {
+        if ((*node)->texture_addr == orig_addr && (*node)->fmt == fmt && (*node)->siz == siz && (*node)->size_bytes == size_bytes) {
             gfx_rapi->select_texture(tile, (*node)->texture_id);
             *n = *node;
             return true;
@@ -376,6 +404,7 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
     (*node)->texture_addr = orig_addr;
     (*node)->fmt = fmt;
     (*node)->siz = siz;
+    (*node)->size_bytes = size_bytes;
     *n = *node;
     return false;
 }
@@ -466,7 +495,7 @@ static void import_texture_ci4(int tile) {
     for (uint32_t i = 0; i < rdp.loaded_texture[tile].size_bytes * 2; i++) {
         uint8_t byte = TEXB(rdp.loaded_texture[tile].addr, i / 2);
         uint8_t idx = (byte >> (4 - (i % 2) * 4)) & 0xf;
-        uint16_t col16 = (TEXB(rdp.palette, idx * 2) << 8) | TEXB(rdp.palette, idx * 2 + 1); // Big endian load
+        uint16_t col16 = (TEXP(rdp.palette, idx * 2) << 8) | TEXP(rdp.palette, idx * 2 + 1); // Big endian load
         uint8_t a = col16 & 1;
         uint8_t r = col16 >> 11;
         uint8_t g = (col16 >> 6) & 0x1f;
@@ -486,7 +515,7 @@ static void import_texture_ci4(int tile) {
 static void import_texture_ci8(int tile) {
     for (uint32_t i = 0; i < rdp.loaded_texture[tile].size_bytes; i++) {
         uint8_t idx = TEXB(rdp.loaded_texture[tile].addr, i);
-        uint16_t col16 = (TEXB(rdp.palette, idx * 2) << 8) | TEXB(rdp.palette, idx * 2 + 1); // Big endian load
+        uint16_t col16 = (TEXP(rdp.palette, idx * 2) << 8) | TEXP(rdp.palette, idx * 2 + 1); // Big endian load
         uint8_t a = col16 & 1;
         uint8_t r = col16 >> 11;
         uint8_t g = (col16 >> 6) & 0x1f;
@@ -544,6 +573,33 @@ static void import_texture_rgba32(int tile) {
     gfx_rapi->upload_texture(rgba32_buf, width, height);
 }
 
+/* PORT (2026-09-24): copy the loaded texture into a staging buffer laid out like TMEM (each loaded
+ * row at the render tile's line stride), in logical byte order. Handles LOADTILE sub-rects (source
+ * stride = full image width) and unswizzles natively-compiled assets by ABSOLUTE address, which is
+ * byte-identical to the old base-relative ^7 for 8-aligned bases. Returns staged size, 0 on overflow. */
+static uint8_t sTexStage[65536] __attribute__((aligned(32)));
+static uint32_t gfx_gather_texture(int tile) {
+    const uint8_t* src = rdp.loaded_texture[tile].addr;
+    uint32_t size = rdp.loaded_texture[tile].size_bytes;
+    uint32_t row = rdp.loaded_texture[tile].line_size_bytes;
+    uint32_t full = rdp.loaded_texture[tile].full_image_line_size_bytes;
+    uint32_t dst_stride, rows, x, y;
+    if (row == 0 || full == 0 || row == full) { /* contiguous (LOADBLOCK) */
+        if (size > sizeof(sTexStage)) return 0;
+        for (x = 0; x < size; x++) sTexStage[x] = TEX_SRC_BYTE(src + x);
+        return size;
+    }
+    rows = size / row;
+    dst_stride = rdp.texture_tile.line_size_bytes;
+    if (dst_stride < row) dst_stride = row;
+    if (rows * dst_stride > sizeof(sTexStage)) return 0;
+    for (y = 0; y < rows; y++) {
+        for (x = 0; x < row; x++) sTexStage[y * dst_stride + x] = TEX_SRC_BYTE(src + y * full + x);
+        for (; x < dst_stride; x++) sTexStage[y * dst_stride + x] = 0;
+    }
+    return rows * dst_stride;
+}
+
 #ifdef PORT_TEXDUMP
 /* DEBUG TOOL (opt-in, build with PORT_EXTRA=-DPORT_TEXDUMP): write every uniquely-addressed
  * texture the port decodes (source address, N64 fmt/siz, decoded RGBA8) to
@@ -560,8 +616,8 @@ static void texdump_record(const uint8_t* addr, uint8_t fmt, uint8_t siz, uint32
     if (nseen >= 512) { if (f) { fclose(f); f = NULL; } dead = 1; return; }
     seen[nseen++] = addr;
     bits = (siz == G_IM_SIZ_4b) ? 4 : (siz == G_IM_SIZ_8b) ? 8 : (siz == G_IM_SIZ_16b) ? 16 : 32;
-    w = line_bytes * 8 / bits;
-    h = size_bytes / line_bytes;
+    w = (siz == G_IM_SIZ_32b) ? line_bytes / 2 : line_bytes * 8 / bits; /* 32b: TMEM line counts 2 bytes/texel */
+    h = (siz == G_IM_SIZ_32b) ? (size_bytes / 2) / line_bytes : size_bytes / line_bytes;
     if (w == 0 || h == 0 || w * h * 4 > sizeof(rgba32_buf)) return;
     if (f == NULL) { f = fopen("sdmc:/3ds/oot/texdump.bin", "wb"); if (f == NULL) { dead = 1; return; } }
     hdr[0] = 0x44584554u; /* "TEXD" */
@@ -579,7 +635,7 @@ static void import_texture(int tile) {
     uint8_t fmt = rdp.texture_tile.fmt;
     uint8_t siz = rdp.texture_tile.siz;
 
-    if (gfx_texture_cache_lookup(tile, &rendering_state.textures[tile], rdp.loaded_texture[tile].addr, fmt, siz)) {
+    if (gfx_texture_cache_lookup(tile, &rendering_state.textures[tile], rdp.loaded_texture[tile].addr, fmt, siz, rdp.loaded_texture[tile].size_bytes)) {
         return;
     }
 #ifdef __3DS__
@@ -590,13 +646,23 @@ static void import_texture(int tile) {
      * than crash — same philosophy as the DL-walk guard. */
     { extern unsigned PortMem_ReadableEnd(unsigned addr);
       uintptr_t a = (uintptr_t)rdp.loaded_texture[tile].addr;
+      uint32_t _row = rdp.loaded_texture[tile].line_size_bytes, _full = rdp.loaded_texture[tile].full_image_line_size_bytes;
+      uint32_t _extent = (_row && _full && _row != _full)
+          ? (rdp.loaded_texture[tile].size_bytes / _row - 1) * _full + _row
+          : rdp.loaded_texture[tile].size_bytes;
       unsigned e = PortMem_ReadableEnd((unsigned)a);
-      if (e == 0 || a + rdp.loaded_texture[tile].size_bytes > (uintptr_t)e) {
+      if (e == 0 || a + _extent > (uintptr_t)e) {
           PortLogFastX("[TEX] skip unmapped tex", (unsigned)a);
           return;
       } }
 #endif
 
+    const uint8_t* orig_addr = rdp.loaded_texture[tile].addr;
+    uint32_t orig_size = rdp.loaded_texture[tile].size_bytes;
+    uint32_t staged = gfx_gather_texture(tile);
+    if (staged == 0) return;
+    rdp.loaded_texture[tile].addr = sTexStage; /* decoders read the logical-order staging copy */
+    rdp.loaded_texture[tile].size_bytes = staged;
     int t0 = get_time();
     if (fmt == G_IM_FMT_RGBA) {
         if (siz == G_IM_SIZ_16b) {
@@ -638,6 +704,8 @@ static void import_texture(int tile) {
     }
     int t1 = get_time();
     //printf("Time diff: %d\n", t1 - t0);
+    rdp.loaded_texture[tile].addr = orig_addr;
+    rdp.loaded_texture[tile].size_bytes = orig_size;
 #ifdef PORT_TEXDUMP
     texdump_record(rdp.loaded_texture[tile].addr, fmt, siz, rdp.loaded_texture[tile].size_bytes,
                    rdp.texture_tile.line_size_bytes);
@@ -1251,6 +1319,7 @@ static void gfx_dp_set_scissor(uint32_t mode, uint32_t ulx, uint32_t uly, uint32
 static void gfx_dp_set_texture_image(uint32_t format, uint32_t size, uint32_t width, const void* addr) {
     rdp.texture_to_load.addr = addr;
     rdp.texture_to_load.siz = size;
+    rdp.texture_to_load.width = width + 1;
 }
 
 static void gfx_dp_set_tile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t tmem, uint8_t tile, uint32_t palette, uint32_t cmt, uint32_t maskt, uint32_t shiftt, uint32_t cms, uint32_t masks, uint32_t shifts) {
@@ -1313,8 +1382,38 @@ static void gfx_dp_load_block(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t
     rdp.loaded_texture[rdp.texture_to_load.tile_number].size_bytes = size_bytes;
     if (size_bytes > 4096) { static int _w2=0; if(!_w2){_w2=1; fprintf(stderr, "[gfx] texture >4096B clamped\n");} size_bytes = 4096; }
     rdp.loaded_texture[rdp.texture_to_load.tile_number].addr = rdp.texture_to_load.addr;
+    rdp.loaded_texture[rdp.texture_to_load.tile_number].line_size_bytes = rdp.loaded_texture[rdp.texture_to_load.tile_number].size_bytes;
+    rdp.loaded_texture[rdp.texture_to_load.tile_number].full_image_line_size_bytes = rdp.loaded_texture[rdp.texture_to_load.tile_number].size_bytes;
     
     rdp.textures_changed[rdp.texture_to_load.tile_number] = true;
+}
+
+/* PORT (2026-09-24): G_LOADTILE -- load a sub-rectangle of the texture image. Logic follows
+ * libultraship's Interpreter::GfxDpLoadTile (MIT, Kenix3): the loaded texture starts at the
+ * sub-rect's first texel, rows are tile_width texels, and the source stride is the full image
+ * width from G_SETTIMG. It was unhandled (tools/gbi_audit.py), so tile-loaded textures kept the
+ * previous load's data. */
+static void gfx_dp_load_tile(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t lrs, uint32_t lrt) {
+    uint32_t word_size_shift = 0, slot;
+    uint32_t offset_x, offset_y, tile_width, tile_height, tile_line, full_line;
+    if (tile == 1) return; /* mirrors load_block: second-texture loads not supported yet */
+    switch (rdp.texture_to_load.siz) {
+        case G_IM_SIZ_16b: word_size_shift = 1; break;
+        case G_IM_SIZ_32b: word_size_shift = 2; break;
+        default: word_size_shift = 0; break; /* 4b/8b as in libultraship */
+    }
+    offset_x = uls >> G_TEXTURE_IMAGE_FRAC;
+    offset_y = ult >> G_TEXTURE_IMAGE_FRAC;
+    tile_width = ((lrs - uls) >> G_TEXTURE_IMAGE_FRAC) + 1;
+    tile_height = ((lrt - ult) >> G_TEXTURE_IMAGE_FRAC) + 1;
+    tile_line = tile_width << word_size_shift;
+    full_line = rdp.texture_to_load.width << word_size_shift;
+    slot = rdp.texture_to_load.tile_number;
+    rdp.loaded_texture[slot].addr = rdp.texture_to_load.addr + full_line * offset_y + (offset_x << word_size_shift);
+    rdp.loaded_texture[slot].size_bytes = tile_line * tile_height;
+    rdp.loaded_texture[slot].line_size_bytes = tile_line;
+    rdp.loaded_texture[slot].full_image_line_size_bytes = full_line;
+    rdp.textures_changed[slot] = true;
 }
 
 static uint8_t color_comb_component(uint32_t v) {
@@ -1775,10 +1874,13 @@ static void gfx_run_dl(Gfx* cmd) {
             
             // RDP Commands:
             case G_SETTIMG:
-                gfx_dp_set_texture_image(C0(21, 3), C0(19, 2), C0(0, 10), seg_addr(cmd->words.w1));
+                gfx_dp_set_texture_image(C0(21, 3), C0(19, 2), C0(0, 12), seg_addr(cmd->words.w1));
                 break;
             case G_LOADBLOCK:
                 gfx_dp_load_block(C1(24, 3), C0(12, 12), C0(0, 12), C1(12, 12), C1(0, 12));
+                break;
+            case G_LOADTILE:
+                gfx_dp_load_tile(C1(24, 3), C0(12, 12), C0(0, 12), C1(12, 12), C1(0, 12));
                 break;
             case G_SETTILE:
                 gfx_dp_set_tile(C0(21, 3), C0(19, 2), C0(9, 9), C0(0, 9), C1(24, 3), C1(20, 4), C1(18, 2), C1(14, 4), C1(10, 4), C1(8, 2), C1(4, 4), C1(0, 4));

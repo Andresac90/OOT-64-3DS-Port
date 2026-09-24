@@ -89,7 +89,14 @@ void PortDma_ReadRomRaw(void* dst, u32 offset, u32 n) {
     if (ROM_READY()) ReadRom(dst, offset, n); else memset(dst, 0, n);
 }
 
+extern void gfx_texture_cache_invalidate_range(const void* start, u32 size);
+static void Dma_Copy_Impl(void* ram, uintptr_t vrom, u32 size);
+/* Every DMA destination may hold a cached texture (buffers are reused in place): invalidate it. */
 static void Dma_Copy(void* ram, uintptr_t vrom, u32 size) {
+    Dma_Copy_Impl(ram, vrom, size);
+    gfx_texture_cache_invalidate_range(ram, size);
+}
+static void Dma_Copy_Impl(void* ram, uintptr_t vrom, u32 size) {
     u32 i;
 
     if (!ROM_READY()) {

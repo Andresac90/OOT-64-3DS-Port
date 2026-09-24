@@ -2,48 +2,48 @@
 #include "array_count.h"
 #include "gfx.h"
 
-u64 gTalonSkinAndClothesTLUT[];
+extern u64 gTalonSkinAndClothesTLUT[];
 
 #define gTalonSkinTex_WIDTH 8
 #define gTalonSkinTex_HEIGHT 8
-u64 gTalonSkinTex[TEX_LEN(u64, gTalonSkinTex_WIDTH, gTalonSkinTex_HEIGHT, 8)];
+extern u64 gTalonSkinTex[TEX_LEN(u64, gTalonSkinTex_WIDTH, gTalonSkinTex_HEIGHT, 8)];
 
 #define gTalonFingersTex_WIDTH 16
 #define gTalonFingersTex_HEIGHT 16
-u64 gTalonFingersTex[TEX_LEN(u64, gTalonFingersTex_WIDTH, gTalonFingersTex_HEIGHT, 8)];
+extern u64 gTalonFingersTex[TEX_LEN(u64, gTalonFingersTex_WIDTH, gTalonFingersTex_HEIGHT, 8)];
 
 #define gTalonArmHairTex_WIDTH 16
 #define gTalonArmHairTex_HEIGHT 32
-u64 gTalonArmHairTex[TEX_LEN(u64, gTalonArmHairTex_WIDTH, gTalonArmHairTex_HEIGHT, 8)];
+extern u64 gTalonArmHairTex[TEX_LEN(u64, gTalonArmHairTex_WIDTH, gTalonArmHairTex_HEIGHT, 8)];
 
 #define gTalonSleeveTex_WIDTH 8
 #define gTalonSleeveTex_HEIGHT 8
-u64 gTalonSleeveTex[TEX_LEN(u64, gTalonSleeveTex_WIDTH, gTalonSleeveTex_HEIGHT, 8)];
+extern u64 gTalonSleeveTex[TEX_LEN(u64, gTalonSleeveTex_WIDTH, gTalonSleeveTex_HEIGHT, 8)];
 
 #define gTalonBlueTex_WIDTH 8
 #define gTalonBlueTex_HEIGHT 8
-u64 gTalonBlueTex[TEX_LEN(u64, gTalonBlueTex_WIDTH, gTalonBlueTex_HEIGHT, 8)];
+extern u64 gTalonBlueTex[TEX_LEN(u64, gTalonBlueTex_WIDTH, gTalonBlueTex_HEIGHT, 8)];
 
 #define gTalonBluePatternTex_WIDTH 8
 #define gTalonBluePatternTex_HEIGHT 8
-u64 gTalonBluePatternTex[TEX_LEN(u64, gTalonBluePatternTex_WIDTH, gTalonBluePatternTex_HEIGHT, 8)];
+extern u64 gTalonBluePatternTex[TEX_LEN(u64, gTalonBluePatternTex_WIDTH, gTalonBluePatternTex_HEIGHT, 8)];
 
 #define gTalonBrownBlueOutlineTex_WIDTH 16
 #define gTalonBrownBlueOutlineTex_HEIGHT 16
-u64 gTalonBrownBlueOutlineTex[TEX_LEN(u64, gTalonBrownBlueOutlineTex_WIDTH, gTalonBrownBlueOutlineTex_HEIGHT, 8)];
+extern u64 gTalonBrownBlueOutlineTex[TEX_LEN(u64, gTalonBrownBlueOutlineTex_WIDTH, gTalonBrownBlueOutlineTex_HEIGHT, 8)];
 
 #define gTalonNecklaceStringUpperTex_WIDTH 16
 #define gTalonNecklaceStringUpperTex_HEIGHT 32
-u64 gTalonNecklaceStringUpperTex[TEX_LEN(u64, gTalonNecklaceStringUpperTex_WIDTH, gTalonNecklaceStringUpperTex_HEIGHT,
+extern u64 gTalonNecklaceStringUpperTex[TEX_LEN(u64, gTalonNecklaceStringUpperTex_WIDTH, gTalonNecklaceStringUpperTex_HEIGHT,
                                          8)];
 
 #define gTalonBowserTex_WIDTH 16
 #define gTalonBowserTex_HEIGHT 32
-u64 gTalonBowserTex[TEX_LEN(u64, gTalonBowserTex_WIDTH, gTalonBowserTex_HEIGHT, 16)];
+extern u64 gTalonBowserTex[TEX_LEN(u64, gTalonBowserTex_WIDTH, gTalonBowserTex_HEIGHT, 16)];
 
 #define gTalonNecklaceLowerStringsTex_WIDTH 8
 #define gTalonNecklaceLowerStringsTex_HEIGHT 16
-u64 gTalonNecklaceLowerStringsTex[TEX_LEN(u64, gTalonNecklaceLowerStringsTex_WIDTH,
+extern u64 gTalonNecklaceLowerStringsTex[TEX_LEN(u64, gTalonNecklaceLowerStringsTex_WIDTH,
                                           gTalonNecklaceLowerStringsTex_HEIGHT, 16)];
 
 Vtx gTalonLeftHandVtx[] = {

@@ -2,6 +2,11 @@
 typedef struct { void* romStart; void* romEnd; void* native; } VromMapEntry;
 
 /* corrected base symbols (fix-vrom-map-bases.py) */
+extern char men_room_0[];
+extern char object_oB2_Limb_000000[];
+extern char spot05_room_0[];
+extern char spot06_room_0[];
+extern char spot20_room_0[];
 extern char gameplay_dangeon_keep_000000_Tex[];
 extern char object_Bb_Anim_000184_06000000_FrameData[];
 extern char gAnubiceLaughingFrameData[];
@@ -2527,7 +2532,7 @@ VromMapEntry gVromMap[] = {
     { _object_horse_ganonSegmentRomStart, _object_horse_ganonSegmentRomEnd, gHorseGanonLimbs_06008394_SkinLimb_060001C0_DL_06000000_Vtx_fused_ },
     { _object_horse_link_childSegmentRomStart, _object_horse_link_childSegmentRomEnd, gChildEponaLimbs_06007858_SkinLimb_06000C70_DL_06000000_Vtx_fused_ },
     { _object_horse_normalSegmentRomStart, _object_horse_normalSegmentRomEnd, gHorseNormalGallopingFrameData },
-    { _object_horse_zeldaSegmentRomStart, _object_horse_zeldaSegmentRomEnd, gHorseZeldaEyeTex },
+    { _object_horse_zeldaSegmentRomStart, _object_horse_zeldaSegmentRomEnd, (char*)gHorseZeldaEyeTex - 0x8 }, /* PORT 2026-09-24: base from XML ground truth (tools/vrom_verify.py) */
     { _object_hsSegmentRomStart, _object_hsSegmentRomEnd, gCarpenterSonReachingFrameData },
     { _object_humanSegmentRomStart, _object_humanSegmentRomEnd, gHumanEyeLookForwardOpenTex },
     { _object_ice_objectsSegmentRomStart, _object_ice_objectsSegmentRomEnd, object_ice_objects_Vtx_000000 },
@@ -2602,7 +2607,7 @@ VromMapEntry gVromMap[] = {
     { _object_oA8SegmentRomStart, _object_oA8SegmentRomEnd, object_oA8_Limb_00000000 },
     { _object_oA9SegmentRomStart, _object_oA9SegmentRomEnd, object_oA9_Vtx_000000 },
     { _object_oB1SegmentRomStart, _object_oB1SegmentRomEnd, object_oB1_Limb_00000000 },
-    { _object_oB2SegmentRomStart, _object_oB2SegmentRomEnd, object_oB2_Vtx_000268 },
+    { _object_oB2SegmentRomStart, _object_oB2SegmentRomEnd, (char*)object_oB2_Limb_000000 - 0x0 }, /* PORT 2026-09-24: base from XML ground truth (tools/vrom_verify.py) */
     { _object_oB3SegmentRomStart, _object_oB3SegmentRomEnd, object_oB3_Limb_00000000 },
     { _object_oB4SegmentRomStart, _object_oB4SegmentRomEnd, object_oB4_Limb_00000000 },
     { _object_oE1SegmentRomStart, _object_oE1SegmentRomEnd, object_oE1_Limb_000000 },
@@ -2614,7 +2619,7 @@ VromMapEntry gVromMap[] = {
     { _object_oE3SegmentRomStart, _object_oE3SegmentRomEnd, object_oE3_Limb_000000 },
     { _object_oE4SegmentRomStart, _object_oE4SegmentRomEnd, object_oE4_Limb_000000 },
     { _object_oE4sSegmentRomStart, _object_oE4sSegmentRomEnd, object_oE4s_Anim_00007C_06000000_FrameData },
-    { _object_oE5SegmentRomStart, _object_oE5SegmentRomEnd, object_oE5_Vtx_000268 },
+    { _object_oE5SegmentRomStart, _object_oE5SegmentRomEnd, (char*)object_oE5_Vtx_000268 - 0x268 }, /* PORT 2026-09-24: base from XML ground truth (tools/vrom_verify.py) */
     { _object_oE6SegmentRomStart, _object_oE6SegmentRomEnd, object_oE6_Vtx_000000 },
     { _object_oE7SegmentRomStart, _object_oE7SegmentRomEnd, object_oE7_Vtx_000000 },
     { _object_oE8SegmentRomStart, _object_oE8SegmentRomEnd, object_oE8_Vtx_000000 },
@@ -2963,7 +2968,7 @@ VromMapEntry gVromMap[] = {
     { _jyasinzou_room_8SegmentRomStart, _jyasinzou_room_8SegmentRomEnd, jyasinzou_room_8 },
     { _jyasinzou_room_9SegmentRomStart, _jyasinzou_room_9SegmentRomEnd, jyasinzou_room_9 },
     { _jyasinzou_sceneSegmentRomStart, _jyasinzou_sceneSegmentRomEnd, jyasinzou_scene },
-    { _men_room_0SegmentRomStart, _men_room_0SegmentRomEnd, gMenDL_008118_03002AD0_DL_03000130_Vtx_fused_ },
+    { _men_room_0SegmentRomStart, _men_room_0SegmentRomEnd, (char*)men_room_0 - 0x0 }, /* PORT 2026-09-24: base from XML ground truth (tools/vrom_verify.py) */
     { _men_room_1SegmentRomStart, _men_room_1SegmentRomEnd, men_room_1 },
     { _men_room_10SegmentRomStart, _men_room_10SegmentRomEnd, men_room_10 },
     { _men_room_2SegmentRomStart, _men_room_2SegmentRomEnd, men_room_2 },
@@ -3132,9 +3137,9 @@ VromMapEntry gVromMap[] = {
     { _spot04_room_1SegmentRomStart, _spot04_room_1SegmentRomEnd, spot04_room_1 },
     { _spot04_room_2SegmentRomStart, _spot04_room_2SegmentRomEnd, spot04_room_2 },
     { _spot04_sceneSegmentRomStart, _spot04_sceneSegmentRomEnd, spot04_scene },
-    { _spot05_room_0SegmentRomStart, _spot05_room_0SegmentRomEnd, gSpot05DL_009A60_030015B0_DL_03000680_Vtx_fused_ },
+    { _spot05_room_0SegmentRomStart, _spot05_room_0SegmentRomEnd, (char*)spot05_room_0 - 0x0 }, /* PORT 2026-09-24: base from XML ground truth (tools/vrom_verify.py) */
     { _spot05_sceneSegmentRomStart, _spot05_sceneSegmentRomEnd, spot05_scene },
-    { _spot06_room_0SegmentRomStart, _spot06_room_0SegmentRomEnd, gSpot06DL_00A400_03001240_DL_03000A00_Vtx_fused_ },
+    { _spot06_room_0SegmentRomStart, _spot06_room_0SegmentRomEnd, (char*)spot06_room_0 - 0x0 }, /* PORT 2026-09-24: base from XML ground truth (tools/vrom_verify.py) */
     { _spot06_sceneSegmentRomStart, _spot06_sceneSegmentRomEnd, spot06_scene },
     { _spot07_room_0SegmentRomStart, _spot07_room_0SegmentRomEnd, spot07_room_0 },
     { _spot07_room_1SegmentRomStart, _spot07_room_1SegmentRomEnd, spot07_room_1 },
@@ -3174,7 +3179,7 @@ VromMapEntry gVromMap[] = {
     { _spot18_room_2SegmentRomStart, _spot18_room_2SegmentRomEnd, spot18_room_2 },
     { _spot18_room_3SegmentRomStart, _spot18_room_3SegmentRomEnd, spot18_room_3 },
     { _spot18_sceneSegmentRomStart, _spot18_sceneSegmentRomEnd, spot18_scene },
-    { _spot20_room_0SegmentRomStart, _spot20_room_0SegmentRomEnd, gSpot20DL_005E50_03001880_DL_03001590_Vtx_fused_ },
+    { _spot20_room_0SegmentRomStart, _spot20_room_0SegmentRomEnd, (char*)spot20_room_0 - 0x0 }, /* PORT 2026-09-24: base from XML ground truth (tools/vrom_verify.py) */
     { _spot20_sceneSegmentRomStart, _spot20_sceneSegmentRomEnd, spot20_scene },
     { _alley_shop_room_0SegmentRomStart, _alley_shop_room_0SegmentRomEnd, alley_shop_room_0 },
     { _alley_shop_sceneSegmentRomStart, _alley_shop_sceneSegmentRomEnd, alley_shop_scene },

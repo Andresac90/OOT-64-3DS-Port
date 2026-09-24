@@ -96,8 +96,37 @@ def unreverse_groups(px, bits):
     return bytes(out)
 
 
+_BY_DIMS = None
+def content_match(px, w, h, fmt, siz, gold):
+    """For a DMA'd (ROM-sourced) texture with no symbol: find a golden PNG of the same size that
+    matches as-is, or only after undoing the per-8-byte swizzle (=> the ^7 is wrong for ROM data)."""
+    global _BY_DIMS
+    if _BY_DIMS is None:
+        _BY_DIMS = collections.defaultdict(list)
+        for n, path in gold.items():
+            try:
+                _BY_DIMS[Image.open(path).size].append((n, path))
+            except Exception:
+                pass
+    unrev = unreverse_groups(px, BITS.get(siz, 8))
+    best = ("none", 0.0, "")
+    for n, path in _BY_DIMS.get((w, h), []):
+        _, g = golden_rgba(path)
+        if fmt == 4:
+            g = bytearray(g)
+            for i in range(0, len(g), 4):
+                g[i + 3] = g[i]
+            g = bytes(g)
+        for label, cand in (("as-is", px), ("UNSWIZZLED", unrev)):
+            f, _ = compare(cand, g)
+            if f > best[1]:
+                best = (n, f, label)
+    return "%s ok=%.0f%% (%s)" % (best[0], best[1] * 100, best[2])
+
+
 def main():
-    dump = read_dump(sys.argv[1] if len(sys.argv) > 1 else DUMP)
+    paths = [a for a in sys.argv[1:] if not a.startswith("--")]
+    dump = read_dump(paths[0] if paths else DUMP)
     starts, gold = symbol_starts(), golden_index()
     counts = collections.Counter()
     for addr, fmt, siz, w, h, px in dump:
@@ -106,6 +135,9 @@ def main():
         kind = "%s%d" % (FMT.get(fmt, "?"), BITS.get(siz, 0))
         if name is None or name not in gold:
             counts["no-golden (%s)" % region] += 1
+            if region == "linear/DMA" and "--dma" in sys.argv:
+                best = content_match(px, w, h, fmt, siz, gold)
+                print("DMA %08x %-6s %dx%d -> %s" % (addr, kind, w, h, best))
             continue
         (gw, gh), g = golden_rgba(gold[name])
         if fmt == 4:  # N64 I4/I8: the RDP replicates intensity into alpha
