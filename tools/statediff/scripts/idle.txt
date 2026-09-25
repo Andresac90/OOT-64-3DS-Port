@@ -1,0 +1,2 @@
+# frame  buttons  stick_x  stick_y   (buttons: A B Z START L R CUP CDOWN CLEFT CRIGHT DUP ... joined with |, or 0)
+0 0 0 0

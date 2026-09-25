@@ -6,7 +6,7 @@ gameplay frame on the N64 reference (ares + GDB breakpoints on every global-RNG 
 return addresses mapped back to ELF symbols) and compares the ordered list of (RNG function, calling
 function) with the 3DS trace recorded by the same statediff capture (sd_rng.bin).
 
-usage: rngtrace.py --entrance 0x102 --frame 15 [--dump-frame 100]
+usage: rngtrace.py --entrance 0x102 --frame 15 [--dump-frame 100] [--script idle]
 """
 import argparse, bisect, json, os, struct, subprocess, sys, time
 
@@ -36,11 +36,8 @@ class Symbolizer:
         return self.names[i] if i >= 0 else "?%08x" % addr
 
 
-def n64_trace(entrance, frame):
-    tag = entrance or "default"
-    rom, elf = os.path.join(SD.OUT, "ref_%s.z64" % tag), os.path.join(SD.OUT, "ref_%s.elf" % tag)
-    if not os.path.exists(rom):
-        SD.sh("tools/statediff/make_ref.sh %s" % (entrance or ""), check=True)
+def n64_trace(entrance, frame, script):
+    rom, elf = SD.ref_rom(entrance, script)
     syms = SD.n64_symbols(elf)
     sizes = {}
     for line in subprocess.run([SD.MIPS_NM, "-S", elf], capture_output=True, text=True).stdout.splitlines():
@@ -50,7 +47,7 @@ def n64_trace(entrance, frame):
     sym = Symbolizer(SD.MIPS_NM, elf)
     layout = SD.load_layout()
     off_frames = SD.field_off(layout, "PlayState", "gameplayFrames")
-    play_update = syms["Play_Update"]
+    play_update = syms["StateDiff_Sync"]  # frame anchor, see statediff_input.h
     rng = {syms[n]: k + 1 for k, n in enumerate(RNG_FUNCS)}
 
     SD.sh("pkill -9 -f MacOS/ares")
@@ -103,8 +100,8 @@ def n64_trace(entrance, frame):
     return [(k, sym(to_vram(ra))) for k, ra in calls]
 
 
-def ds_trace(entrance, frame, dump_frame):
-    j = json.load(open(os.path.join(SD.OUT, "3ds_%s_f%d.json" % (entrance or "default", dump_frame))))
+def ds_trace(entrance, frame, dump_frame, script):
+    j = json.load(open(os.path.join(SD.OUT, "3ds_%s_%s_f%d.json" % (entrance or "default", script, dump_frame))))
     raw = bytes.fromhex(j["rng_trace"])
     sym = Symbolizer(ARM_NM, os.path.join(SD.REPO, "build/3ds/oot.elf"))
     out, cur, i = [], None, 0
@@ -125,15 +122,15 @@ def main():
     ap.add_argument("--entrance", default="")
     ap.add_argument("--frame", type=int, required=True, help="gameplay frame to trace (the last equal one)")
     ap.add_argument("--dump-frame", type=int, default=100, help="--frame of the statediff capture to use")
+    ap.add_argument("--script", default="idle")
     args = ap.parse_args()
     # the 3DS trace symbols come from build/3ds/oot.elf: it must be the comparison build's code layout;
     # statediff rebuilds the normal ROM afterwards, which only differs in the hooked files, so rebuild
     # the comparison build here to symbolize against the exact binary that produced the trace
-    extra = "-DPORT_STATEDUMP=%d" % args.dump_frame + (" -DPORT_START_ENTRANCE=%s" % args.entrance if args.entrance else "")
-    SD.build_3ds(extra)
-    ds = ds_trace(args.entrance, args.frame, args.dump_frame)
+    SD.build_3ds(SD.game_extra(args.entrance, args.dump_frame, args.script))
+    ds = ds_trace(args.entrance, args.frame, args.dump_frame, args.script)
     SD.build_3ds("")
-    n64 = n64_trace(args.entrance, args.frame)
+    n64 = n64_trace(args.entrance, args.frame, args.script)
     print("frame %d: %d RNG calls on N64, %d on 3DS" % (args.frame, len(n64), len(ds)))
     i = 0
     while i < min(len(n64), len(ds)) and n64[i] == ds[i]:

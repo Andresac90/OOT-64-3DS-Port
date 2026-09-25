@@ -573,12 +573,18 @@ void Play_Init(GameState* thisx) {
 #endif
 }
 
+#if defined(__3DS__) && defined(PORT_STATEDUMP)
+#include "statediff_input.h"
+#endif
+
 void Play_Update(PlayState* this) {
     Input* input = this->state.input;
     s32 isPaused;
     s32 pad1;
 
 #if defined(__3DS__) && defined(PORT_STATEDUMP)
+    // PORT: tools/statediff - same scripted input as the reference ROM (tools/statediff/statediff_input.h)
+    StateDiff_InjectInput(this);
     // PORT: tools/statediff hook - RNG state marker every frame, raw state dump at frame PORT_STATEDUMP
     {
         extern void PortRngTrace_Frame(u32 frame, u32 state);
