@@ -20,23 +20,26 @@ PROFILE_RE = re.compile(r"ActorProfile\s+\w+_Profile\s*=\s*\{(.*?)\};", re.S)
 
 
 def actor_ids():
+    """actor table index of every DEFINE_ACTOR(Name, ...) / DEFINE_ACTOR_INTERNAL(Name, ...), keyed by Name.
+    The table index (the actor's gActorOverlayTable entry) identifies its code and instance type;
+    actor->id doesn't always (Boss_Dodongo's and Boss_Goma's profiles carry the En_ ids)."""
     ids = {}
-    for m in re.finditer(r"/\*\s*0x([0-9A-Fa-f]+)\s*\*/\s*DEFINE_ACTOR\w*\(\s*(?:\w+,\s*)?(ACTOR_\w+)",
+    for m in re.finditer(r"/\*\s*0x([0-9A-Fa-f]+)\s*\*/\s*DEFINE_ACTOR(?:_INTERNAL)?\(\s*(\w+),",
                          open(os.path.join(L.REPO, "include/tables/actor_table.h")).read()):
         ids[m.group(2)] = int(m.group(1), 16)
     return ids
 
 
 def profiles():
+    """(table Name, instance type, source) from every `<Name>_Profile = { ..., sizeof(Type), ... }`."""
     found = []
     roots = [os.path.join(L.REPO, "src/overlays/actors"), os.path.join(L.REPO, "src/code/z_player_call.c")]
     files = [roots[1]] + [os.path.join(dp, f) for dp, _, fs in os.walk(roots[0]) for f in fs if f.endswith(".c")]
     for path in files:
-        for m in PROFILE_RE.finditer(open(path, errors="ignore").read()):
-            body = m.group(1)
-            a, t = re.search(r"\b(ACTOR_\w+)", body), re.search(r"sizeof\((\w+)\)", body)
-            if a and t:
-                found.append((a.group(1), t.group(1), path))
+        for m in re.finditer(r"ActorProfile\s+(\w+)_Profile\s*=\s*\{(.*?)\};", open(path, errors="ignore").read(), re.S):
+            t = re.search(r"sizeof\((\w+)\)", m.group(2))
+            if t:
+                found.append((m.group(1), t.group(1), path))
     return found
 
 
@@ -73,7 +76,7 @@ def main():
     os.makedirs(TMP, exist_ok=True)
     flags = L.game_cflags()
     ids = actor_ids()
-    profs = [(ids[a], t, p) for a, t, p in profiles() if a in ids]
+    profs = [(ids[a], t, p) for a, t, p in profiles() if a in ids]  # keyed by actor-table index
     only = sys.argv[1:]  # optional: type names to (re)build, merged into the existing actors.json
     if only:
         profs = [x for x in profs if x[1] in only]

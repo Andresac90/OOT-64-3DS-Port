@@ -71,6 +71,11 @@ class GdbRsp:
             size -= n
         return bytes(out)
 
+    def write_mem(self, addr, data):
+        r = self.cmd("M%x,%x:%s" % (addr, len(data), data.hex()))
+        if r != "OK":
+            raise IOError("memory write failed at 0x%x (%s)" % (addr, r[:16]))
+
     def set_break(self, addr, kind=4):
         r = self.cmd("Z0,%x,%d" % (addr, kind))
         if r != "OK":

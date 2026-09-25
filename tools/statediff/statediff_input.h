@@ -62,6 +62,12 @@ static void StateDiff_InjectInput(PlayState* play) {
     StateDiff_Sync(play);
 
     gStateDiffFramesSinceCapture++;
+    if (STATEDIFF_TOUR_LEN > 0) {
+        // Scene tour: mark Navi's hot-room / underwater warnings as already shown (both sides). Drawing
+        // their NAME code with the debug save's name makes the N64 reference fault (FP exception in
+        // Message_DrawText, e.g. Death Mountain Crater, Volvagia) - a debug-save artifact.
+        gSaveContext.envHazardTextTriggerFlags |= ENV_HAZARD_TEXT_TRIGGER_HOTROOM | ENV_HAZARD_TEXT_TRIGGER_UNDERWATER;
+    }
     if ((STATEDIFF_TOUR_LEN > 0) && (gStateDiffCaptureIdx < STATEDIFF_TOUR_LEN) &&
         ((((s32)play->gameplayFrames == STATEDIFF_TOUR_FRAMES) && (play->transitionTrigger == TRANS_TRIGGER_OFF)) ||
          (gStateDiffFramesSinceCapture >= STATEDIFF_TOUR_FRAMES + 300))) {
@@ -75,6 +81,11 @@ static void StateDiff_InjectInput(PlayState* play) {
 #endif
         gStateDiffCaptureIdx++;
         if (gStateDiffCaptureIdx < STATEDIFF_TOUR_LEN) {
+            // leave any cutscene behind, like a normal exit: a scripted-cutscene index carried into a
+            // scene without that cutscene makes the real N64 read a NULL script (Cutscene_ProcessScript
+            // MemCpy fault, seen after Ganon's intro in the child tour)
+            gSaveContext.save.cutsceneIndex = 0;
+            gSaveContext.cutsceneTrigger = 0;
             play->nextEntranceIndex = sStateDiffTour[gStateDiffCaptureIdx];
             play->transitionTrigger = TRANS_TRIGGER_START;
             play->transitionType = TRANS_TYPE_INSTANT;

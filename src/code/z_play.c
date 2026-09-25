@@ -595,7 +595,12 @@ static void StateDiff_PortDump(PlayState* this, s32 index) {
     for (cat = 0; cat < ACTORCAT_MAX; cat++) {
         for (actor = this->actorCtx.actorLists[cat].head; actor != NULL; actor = actor->next) {
             // whole instance (the profile's sizeof(EnXxx)), not just the common Actor header
-            PortStateDump_Actor(cat, actor,
+            // category | (actor-table index + 1) << 16: the table entry identifies the actor's code/type
+            // (actor->id doesn't: e.g. Boss_Dodongo's profile uses ACTOR_EN_DODONGO)
+            PortStateDump_Actor(cat | ((actor->overlayEntry != NULL)
+                                           ? (u32)((actor->overlayEntry - gActorOverlayTable) + 1) << 16
+                                           : 0),
+                                actor,
                                 ((actor->overlayEntry != NULL) && (actor->overlayEntry->profile != NULL))
                                     ? actor->overlayEntry->profile->instanceSize
                                     : sizeof(Actor));
@@ -613,6 +618,14 @@ void Play_Update(PlayState* this) {
     s32 pad1;
 
 #if defined(__3DS__) && defined(PORT_STATEDUMP)
+    // PORT: tools/statediff - keep the color/depth readbacks running (dumped at captures, all modes)
+    {
+        extern void Port3ds_RequestColor(void);
+        extern void Port3ds_RequestDepth(void);
+
+        Port3ds_RequestColor();
+        Port3ds_RequestDepth();
+    }
     // PORT: tools/statediff - same scripted input as the reference ROM (tools/statediff/statediff_input.h)
     StateDiff_InjectInput(this);
     // PORT: tools/statediff hook - RNG state marker every frame, raw state dump at frame PORT_STATEDUMP

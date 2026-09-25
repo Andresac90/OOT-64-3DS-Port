@@ -176,6 +176,55 @@ static void gfx_3ds_read_back_depth(void) {
     sDepthValid = true;
 }
 
+/* Color readback for tools/statediff (renderer ground truth vs ares' RDP framebuffer): the last two
+ * finished frames, detiled into linear RGBA8, kept alternately. Only runs while a comparison build asks
+ * for it (Port3ds_RequestColor), so normal play pays nothing. */
+static u32* sColorLinear[2];
+static int sColorWantFrames;
+static int sColorLatest = -1; /* slot holding the most recently finished frame */
+
+void Port3ds_RequestColor(void) {
+    sColorWantFrames = 60;
+}
+
+/* back = 0: most recently finished frame; back = 1: the one before */
+const u32* Port3ds_GetColor(int back, int* width, int* height) {
+    int slot;
+    *width = sTarget->frameBuf.width;
+    *height = sTarget->frameBuf.height;
+    if (sColorLatest < 0) {
+        return NULL;
+    }
+    slot = back ? (sColorLatest ^ 1) : sColorLatest;
+    return sColorLinear[slot];
+}
+
+static void gfx_3ds_read_back_color(void) {
+    size_t size = (size_t)sTarget->frameBuf.width * sTarget->frameBuf.height * 4;
+    int slot;
+
+    if (sColorWantFrames <= 0) {
+        return;
+    }
+    sColorWantFrames--;
+    slot = (sColorLatest < 0) ? 0 : (sColorLatest ^ 1);
+    if (sColorLinear[slot] == NULL) {
+        sColorLinear[slot] = linearAlloc(size);
+        if (sColorLinear[slot] == NULL) {
+            return;
+        }
+    }
+    C3D_SyncDisplayTransfer((u32*)sTarget->frameBuf.colorBuf,
+                            GX_BUFFER_DIM(sTarget->frameBuf.width, sTarget->frameBuf.height), sColorLinear[slot],
+                            GX_BUFFER_DIM(sTarget->frameBuf.width, sTarget->frameBuf.height),
+                            GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
+                                GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+                                GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+                                GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+    GSPGPU_InvalidateDataCache(sColorLinear[slot], size);
+    sColorLatest = slot;
+}
+
 static bool gfx_3ds_start_frame(void)
 {
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
@@ -193,6 +242,7 @@ static void gfx_3ds_swap_buffers_begin(void)
      * depth. (Reading at the next start_frame was one frame older - measured with tools/statediff:
      * Navi's glow in the adult Water Temple flipped.) */
     gfx_3ds_read_back_depth();
+    gfx_3ds_read_back_color();
     /* PORT (2026-09-24): no vblank wait here -- Port3ds_PaceFrame (3ds_main.c) paces updates to the
      * game's R_UPDATE_RATE retraces and pumps audio per retrace. */
 }

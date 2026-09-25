@@ -150,7 +150,10 @@ cia: $(BUILD)/$(TARGET).cia
 compile: $(OBJS)                                       # compile everything, skip link
 code: $(GAME_OBJS) $(DEVKIT_OBJS) $(SHADER_OBJ)        # compile code only (no assets) — shakeout
 
-$(GAME_OBJS): CC_FLAGS := $(GAME_CFLAGS)
+# -fno-toplevel-reorder: keep static data in declaration order, as IDO does. Original out-of-bounds reads
+# then see the same neighbours as on N64 (e.g. EnHeishi1's courtyard guards read sAnimParamsInit[type>3]
+# into sRupeePositions; with GCC's reordering they read different values - found by tools/statediff).
+$(GAME_OBJS): CC_FLAGS := $(GAME_CFLAGS) -fno-toplevel-reorder
 # PORT (2026-09-24): every native asset TU must keep its ROM (declaration) layout, because the
 # DMA shim serves ROM reads of natively-linked segments as native_base + rom_offset (gVromMap).
 # With GCC's default toplevel reordering, icon_item_static came out in REVERSE order (85/86 icons

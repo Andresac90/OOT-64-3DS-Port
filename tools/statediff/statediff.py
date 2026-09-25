@@ -141,7 +141,7 @@ def capture_n64(layout, entrance, frame, script, age=""):
     g = GdbRsp(port=9123, connect_wait=30)
     try:
         g.set_break(bp)
-        g.cont(timeout=120)
+        g.cont_until(bp, timeout=120)  # passes over benign exceptions ares reports at boot
         off_frames = field_off(layout, "PlayState", "gameplayFrames")
         while True:
             play = g.read_regs()[4] & 0xFFFFFFFF
@@ -151,7 +151,7 @@ def capture_n64(layout, entrance, frame, script, age=""):
                 break
             if n > frame:
                 raise RuntimeError("N64 passed frame %d (at %d)" % (frame, n))
-            g.cont_past(bp, timeout=60)
+            g.cont_until(bp, timeout=60, from_addr=bp)
         blobs = read_n64_state(g, syms, layout, play)
         blobs["rng_frames"] = rng_frames
         blobs["zbuf"] = g.read_mem(syms["gZBuffer"], 320 * 240 * 2)  # N64 z-buffer (RDP-rendered)
@@ -170,18 +170,20 @@ def read_n64_state(g, syms, layout, play):
         lists = field_off(layout, "PlayState", "actorCtx.actorLists[0].head")
         stride = field_off(layout, "PlayState", "actorCtx.actorLists[1].head") - lists
         off_next = field_off(layout, "Actor", "next")
-        off_id = field_off(layout, "Actor", "id")
+        off_ovl = field_off(layout, "Actor", "overlayEntry")
         asz = layout["Actor"]["size"]
         actor_layouts = load_actor_layouts()
+        table = syms["gActorOverlayTable"]
         actors = []
         for cat in range(ACTORCAT_MAX):
             a = struct.unpack(">I", blobs["play"][lists + cat * stride:lists + cat * stride + 4])[0]
             while a:
                 head = g.read_mem(a, asz)
-                aid = struct.unpack(">h", head[off_id:off_id + 2])[0]
-                full = actor_layouts.get(str(aid), {}).get("n64_size", asz)  # whole instance
+                ovl_ptr = struct.unpack(">I", head[off_ovl:off_ovl + 4])[0]
+                ovl = (ovl_ptr - table) // 0x20 if ovl_ptr else -1  # actor-table index (identifies the type)
+                full = actor_layouts.get(str(ovl), {}).get("n64_size", asz)  # whole instance
                 data = head + g.read_mem(a + asz, full - asz) if full > asz else head
-                actors.append((cat, data))
+                actors.append((cat | ((ovl + 1) << 16), data))
                 a = struct.unpack(">I", head[off_next:off_next + 4])[0]
         blobs["actors"] = actors
     return blobs
@@ -471,15 +473,18 @@ def compare(n64, ds, layout, actor_layouts, pads=False, show_all=False):
     out = []
     diff_struct(layout, "PlayState", n64["play"], ds["play"], "play.", pads, out)
     diff_struct(layout, "SaveContext", n64["save"], ds["save"], "save.", pads, out)
-    # actors: pair by (category, actor id, index among same id in that category)
+    # actors: pair by (category, actor-table index, n-th of that type in the category); the dumps pack
+    # the table index + 1 into bits 16.. of the category word (0: unknown -> fall back to actor->id)
     off_id = field_off(layout, "Actor", "id")
     def keyed(actors, big):
         seen, res = {}, {}
-        for cat, d in actors:
-            aid = struct.unpack((">" if big else "<") + "h", d[off_id:off_id + 2])[0]
-            k = (cat, aid)
+        for word, d in actors:
+            cat, ovl = word & 0xFFFF, (word >> 16) - 1
+            if ovl < 0:
+                ovl = struct.unpack((">" if big else "<") + "h", d[off_id:off_id + 2])[0]
+            k = (cat, ovl)
             seen[k] = seen.get(k, 0) + 1
-            res[(cat, aid, seen[k] - 1)] = d
+            res[(cat, ovl, seen[k] - 1)] = d
         return res
     an, ad = keyed(n64["actors"], True), keyed(ds["actors"], False)
     for k in sorted(set(an) | set(ad)):

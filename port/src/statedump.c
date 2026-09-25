@@ -44,6 +44,23 @@ void PortStateDump_Begin(int index, const void* play, unsigned playSize, const v
     }
     write_file(dump_path("play"), play, playSize);
     write_file(dump_path("save"), save, saveSize);
+    { /* last two finished frames' color buffers (RGBA8, linear): renderer comparison vs ares */
+        extern const uint32_t* Port3ds_GetColor(int back, int* width, int* height);
+        int back;
+        for (back = 0; back < 2; back++) {
+            int cw, ch;
+            const uint32_t* color = Port3ds_GetColor(back, &cw, &ch);
+            if (color != NULL) {
+                FILE* f = fopen(dump_path(back ? "color1" : "color0"), "wb");
+                if (f != NULL) {
+                    uint32_t hdr[2] = { (uint32_t)cw, (uint32_t)ch };
+                    fwrite(hdr, 1, sizeof(hdr), f);
+                    fwrite(color, 4, (size_t)cw * ch, f);
+                    fclose(f);
+                }
+            }
+        }
+    }
     if (depth != NULL) { /* previous frame's depth buffer, linear, as read back by gfx_3ds.c */
         FILE* f = fopen(dump_path("depth"), "wb");
         if (f != NULL) {
@@ -94,7 +111,9 @@ void PortRngTrace(uint32_t kind, const void* caller) {
 
 void PortRngTrace_Frame(uint32_t frame, uint32_t state) {
     extern void Port3ds_RequestDepth(void);
+    extern void Port3ds_RequestColor(void);
     Port3ds_RequestDepth(); /* keep the depth readback running so sd_depth.bin can be written */
+    Port3ds_RequestColor(); /* and the color readback for sd_color*.bin (renderer ground truth) */
     sRngFrames = 1;
     if (sRngCount + 2 <= RNG_TRACE_MAX) {
         sRngTrace[sRngCount][0] = 0;

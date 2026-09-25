@@ -68,5 +68,9 @@ uint16_t PortZBuf_Read(int x, int y) {
     if (d >= 0xFFFFFF) {
         return N64_Z_FAR;
     }
-    return encode_n64_z(((d * 0x7FC0ull) / 0xFFFFFF) << 3);
+    /* +1 screen-z unit: the N64 stores surfaces slightly deeper than the game's own projection of the
+     * same point. Measured over 229,589 same-surface pixels in 4 captures (tools/statediff): median of
+     * N64 - 3DS = +1, and +1 minimizes the mean error. Matters for glows sitting on their own geometry
+     * (torch flames): N64 draws them, an unbiased 3DS value fails the strict test and hides them. */
+    return encode_n64_z((((d * 0x7FC0ull) / 0xFFFFFF) + 1) << 3);
 }
