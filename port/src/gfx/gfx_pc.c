@@ -10,6 +10,7 @@
 #define _LANGUAGE_C
 #endif
 #include <PR/gbi.h>
+#include "ultra64/gs2dex.h" /* uObjBg for S2DEX background rectangles */
 
 #include "config.h"
 
@@ -1761,6 +1762,38 @@ static inline void *seg_addr(uintptr_t w1) {
 #define C0(pos, width) ((cmd->words.w0 >> (pos)) & ((1U << width) - 1))
 #define C1(pos, width) ((cmd->words.w1 >> (pos)) & ((1U << width) - 1))
 
+/* PORT (2026-09-24): S2DEX background rectangles (pre-rendered rooms: Market, shops, houses).
+ * The room DL switches microcode with gSPLoadUcodeL(gspS2DEX2d_fifo) and draws with
+ * gSPBgRectCopy / gSPBgRect1Cyc. Logic follows libultraship's Gfxs2dexBgCopy/Gfxs2dexBg1cyc (MIT):
+ * load the image and draw one textured rectangle -- here in 16-row strips so each strip fits the
+ * importer's buffers (the whole 320x240 RGBA16 image is 150 KB). */
+static bool sUcodeS2dex = false;
+static void gfx_s2dex_bg_rect(const uObjBg* bg, bool copy) {
+    const uint8_t* img = seg_addr((uintptr_t)bg->b.imagePtr);
+    uint32_t w = bg->b.imageW >> 2, h = bg->b.imageH >> 2, row, n;
+    uint32_t line = (w * 2 + 7) >> 3;
+    int32_t fx = bg->b.frameX, fy = bg->b.frameY;
+    const uint32_t kStrip = 16;
+    if (img == NULL || w == 0 || h == 0 || bg->b.imageSiz != G_IM_SIZ_16b) return; /* OoT backgrounds are 16-bit */
+    for (row = 0; row < h; row += kStrip) {
+        n = (h - row < kStrip) ? h - row : kStrip;
+        gfx_dp_set_texture_image(bg->b.imageFmt, G_IM_SIZ_16b, w - 1, img);
+        gfx_dp_set_tile(bg->b.imageFmt, G_IM_SIZ_16b, line, 0, G_TX_LOADTILE, 0, 0, 0, 0, 0, 0, 0);
+        gfx_dp_load_tile(G_TX_LOADTILE, 0, row << 2, (w - 1) << 2, (row + n - 1) << 2);
+        gfx_dp_set_tile(bg->b.imageFmt, G_IM_SIZ_16b, line, 0, G_TX_RENDERTILE, bg->b.imagePal, 0, 0, 0, 0, 0, 0);
+        gfx_dp_set_tile_size(G_TX_RENDERTILE, 0, row << 2, (w - 1) << 2, (row + n - 1) << 2);
+        if (copy) {
+            gfx_dp_texture_rectangle(fx, fy + (int32_t)(row << 2), fx + (int32_t)(w << 2) - 4,
+                                     fy + (int32_t)((row + n) << 2) - 4, G_TX_RENDERTILE, 0, (int16_t)(row << 5),
+                                     4 << 10, 1 << 10, false);
+        } else {
+            gfx_dp_texture_rectangle(fx, fy + (int32_t)(row << 2), fx + (int32_t)bg->b.frameW,
+                                     fy + (int32_t)((row + n) << 2), G_TX_RENDERTILE, 0, (int16_t)(row << 5),
+                                     1 << 10, 1 << 10, false);
+        }
+    }
+}
+
 static void gfx_run_dl(Gfx* cmd) {
     int dummy = 0;
 #ifdef __3DS__
@@ -1792,6 +1825,20 @@ static void gfx_run_dl(Gfx* cmd) {
         }
 #endif
         uint32_t opcode = cmd->words.w0 >> 24;
+        if (opcode == (uint8_t)G_LOAD_UCODE) { /* track which microcode the DL runs under */
+            extern uint64_t gspS2DEX2d_fifoTextStart[];
+            sUcodeS2dex = (seg_addr(cmd->words.w1) == (void*)gspS2DEX2d_fifoTextStart);
+            ++cmd;
+            continue;
+        }
+        if (sUcodeS2dex && (opcode <= 0x0B || opcode == 0xDA || opcode == 0xDC)) {
+            /* S2DEX-only opcodes (same numbers as F3DEX2 VTX/TRI/...): draw backgrounds, skip the rest */
+            if (opcode == G_BG_COPY || opcode == G_BG_1CYC) {
+                gfx_s2dex_bg_rect((const uObjBg*)seg_addr(cmd->words.w1), opcode == G_BG_COPY);
+            }
+            ++cmd;
+            continue;
+        }
 #ifdef PORT_GBIAUDIT
         { extern unsigned gPortGbiCounts[256]; gPortGbiCounts[opcode & 0xFF]++; }
 #endif

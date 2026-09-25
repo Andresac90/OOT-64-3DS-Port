@@ -29,6 +29,12 @@ void TitleSetup_SetupTitleScreen(TitleSetupState* this) {
     gSaveContext.save.cutsceneIndex = 0; // < 0xFFF0 => normal (interactive) scene layer
     gSaveContext.sceneLayer = 0;
     gSaveContext.fileNum = 0;
+#ifdef PORT_START_ENTRANCE
+    // Test hook (build with GAME_EXTRA=-DPORT_START_ENTRANCE=<entrance>): boot a child Link into a
+    // specific entrance, e.g. 0xB7 Bazaar / 0xB1 Market to exercise pre-rendered (S2DEX) rooms.
+    gSaveContext.save.linkAge = LINK_AGE_CHILD;
+    gSaveContext.save.entranceIndex = PORT_START_ENTRANCE;
+#endif
     SET_NEXT_GAMESTATE(&this->state, Play_Init, PlayState);
 #else
     gSaveContext.gameMode = GAMEMODE_TITLE_SCREEN;

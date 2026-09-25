@@ -58,7 +58,8 @@ GAME_DEFS := -D__3DS__ -DCOMPILER_GCC -DNON_MATCHING -DAVOID_UB \
 # segmented_address.h, ...) over the decomp originals — matches the old PC Makefile.
 GAME_INC := -nostdinc -isystem $(GCC_INC) -Iport/include -Iport/src -Iport/src/gfx \
             -Iport/src/gfx/PR -Iinclude -Iinclude/libc -Iinclude/audio -Isrc $(GEN_INC)
-GAME_CFLAGS := $(ARCH) -std=gnu90 $(OPT) $(WARN) $(GAME_DEFS) $(GAME_INC)
+# GAME_EXTRA: opt-in game-side test hooks, e.g. GAME_EXTRA=-DPORT_START_ENTRANCE=0xB7 (boot into the Bazaar)
+GAME_CFLAGS := $(ARCH) -std=gnu90 $(OPT) $(WARN) $(GAME_DEFS) $(GAME_INC) $(GAME_EXTRA)
 
 # ---- DEVKIT world (platform backends, newlib + libctru) ---------------------
 # TARGET_N3DS gates the citro3d/gfx_3ds backend bodies (sm64-port convention) — without
@@ -113,7 +114,7 @@ PORT_GAME_SRCS := \
 
 # PORT platform backends compile in the DEVKIT world.
 DEVKIT_SRCS := \
-  port/src/3ds_main.c port/src/3ds_compat.c port/src/audio_3ds.c \
+  port/src/3ds_main.c port/src/3ds_compat.c port/src/audio_3ds.c port/src/jpeg_port.c \
   port/src/gfx/gfx_pc.c port/src/gfx3ds/gfx_3ds.c port/src/gfx3ds/gfx_citro3d.c
 
 # native little-endian assets (generated; from port/asset_srcs.mk -> $(ASSET_SRCS))

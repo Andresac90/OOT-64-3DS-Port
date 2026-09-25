@@ -91,6 +91,16 @@ typedef struct SCmdRoomList {
 } SCmdRoomList;
 
 typedef struct SCmdWindSettings {
+#ifdef __3DS__
+    /* PORT: bytes 4-7 are one CMD_BBBB word (a<<24|b<<16|c<<8|d); on little-endian they sit reversed */
+    /* 0x00 */ u8  code;
+    /* 0x01 */ u8  data1;
+    /* 0x02 */ char pad[2];
+    /* 0x04 */ u8  unk_07;
+    /* 0x05 */ u8  z;
+    /* 0x06 */ u8  y;
+    /* 0x07 */ u8  x;
+#else
     /* 0x00 */ u8  code;
     /* 0x01 */ u8  data1;
     /* 0x02 */ char pad[2];
@@ -98,6 +108,7 @@ typedef struct SCmdWindSettings {
     /* 0x05 */ u8  y;
     /* 0x06 */ u8  z;
     /* 0x07 */ u8  unk_07;
+#endif
 } SCmdWindSettings;
 
 typedef struct SCmdSpawnList {
@@ -155,29 +166,61 @@ typedef struct SCmdLightSettingList {
 } SCmdLightSettingList;
 
 typedef struct SCmdTimeSettings {
+#ifdef __3DS__
+    /* PORT: bytes 4-7 are one CMD_BBBB word (a<<24|b<<16|c<<8|d); on little-endian they sit reversed */
+    /* 0x00 */ u8  code;
+    /* 0x01 */ u8  data1;
+    /* 0x02 */ char pad[2];
+    /* 0x04 */ u8  unk_04;
+    /* 0x05 */ u8  timeSpeed;
+    /* 0x06 */ u8  min;
+    /* 0x07 */ u8  hour;
+#else
     /* 0x00 */ u8  code;
     /* 0x01 */ u8  data1;
     /* 0x02 */ char pad[2];
     /* 0x04 */ u8  hour;
     /* 0x05 */ u8  min;
     /* 0x06 */ u8  timeSpeed;
+#endif
 } SCmdTimeSettings;
 
 typedef struct SCmdSkyboxSettings {
+#ifdef __3DS__
+    /* PORT: bytes 4-7 are one CMD_BBBB word (a<<24|b<<16|c<<8|d); on little-endian they sit reversed */
+    /* 0x00 */ u8  code;
+    /* 0x01 */ u8  data1;
+    /* 0x02 */ char pad[2];
+    /* 0x04 */ u8  unk_04;
+    /* 0x05 */ u8  envLightMode;
+    /* 0x06 */ u8  skyboxConfig;
+    /* 0x07 */ u8  skyboxId;
+#else
     /* 0x00 */ u8  code;
     /* 0x01 */ u8  data1;
     /* 0x02 */ char pad[2];
     /* 0x04 */ u8  skyboxId;
     /* 0x05 */ u8  skyboxConfig;
     /* 0x06 */ u8  envLightMode;
+#endif
 } SCmdSkyboxSettings;
 
 typedef struct SCmdSkyboxDisables {
+#ifdef __3DS__
+    /* PORT: bytes 4-7 are one CMD_BBBB word (a<<24|b<<16|c<<8|d); on little-endian they sit reversed */
+    /* 0x00 */ u8  code;
+    /* 0x01 */ u8  data1;
+    /* 0x02 */ char pad[2];
+    /* 0x04 */ char pad2[2];
+    /* 0x06 */ u8  sunMoonDisabled;
+    /* 0x07 */ u8  skyboxDisabled;
+#else
     /* 0x00 */ u8  code;
     /* 0x01 */ u8  data1;
     /* 0x02 */ char pad[2];
     /* 0x04 */ u8  skyboxDisabled;
     /* 0x05 */ u8  sunMoonDisabled;
+#endif
 } SCmdSkyboxDisables;
 
 typedef struct SCmdEndMarker {
@@ -193,18 +236,37 @@ typedef struct SCmdExitList {
 } SCmdExitList;
 
 typedef struct SCmdSoundSettings {
+#ifdef __3DS__
+    /* PORT: bytes 4-7 are one CMD_BBBB word (a<<24|b<<16|c<<8|d); on little-endian they sit reversed */
+    /* 0x00 */ u8  code;
+    /* 0x01 */ u8  specId;
+    /* 0x02 */ char pad[2];
+    /* 0x04 */ u8  seqId;
+    /* 0x05 */ u8  natureAmbienceId;
+    /* 0x06 */ char pad2[2];
+#else
     /* 0x00 */ u8  code;
     /* 0x01 */ u8  specId;
     /* 0x02 */ char pad[4];
     /* 0x06 */ u8  natureAmbienceId;
     /* 0x07 */ u8  seqId;
+#endif
 } SCmdSoundSettings;
 
 typedef struct SCmdEchoSettings {
+#ifdef __3DS__
+    /* PORT: bytes 4-7 are one CMD_BBBB word (a<<24|b<<16|c<<8|d); on little-endian they sit reversed */
+    /* 0x00 */ u8  code;
+    /* 0x01 */ u8  data1;
+    /* 0x02 */ char pad[2];
+    /* 0x04 */ u8  echo;
+    /* 0x05 */ char pad2[3];
+#else
     /* 0x00 */ u8  code;
     /* 0x01 */ u8  data1;
     /* 0x02 */ char pad[5];
     /* 0x07 */ u8  echo;
+#endif
 } SCmdEchoSettings;
 
 typedef struct SCmdCutsceneData {

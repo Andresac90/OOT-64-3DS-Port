@@ -286,6 +286,15 @@ void Room_DrawCullable(PlayState* play, Room* room, u32 flags) {
 s32 Room_DecodeJpeg(void* data) {
     OSTime time;
 
+#ifdef __3DS__
+    /* PORT: decode with stb_image, in place, in the native swizzled layout (port/src/jpeg_port.c). */
+    {
+        extern int PortJpeg_DecodeRoomImageInPlace(void* data);
+        PortJpeg_DecodeRoomImageInPlace(data);
+        return 0;
+    }
+#endif
+
     if (*(u32*)data == JPEG_MARKER) {
         PRINTF(T("JPEGデータを展開します\n", "Expanding jpeg data\n"));
         PRINTF(T("JPEGデータアドレス %08x\n", "Jpeg data address %08x\n"), data);
