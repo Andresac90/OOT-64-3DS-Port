@@ -89,15 +89,19 @@ def flatten(die, path, off, out):
             # same bytes; statediff reports which views agree (a wide-int view agreeing while a byte
             # view differs is the little-endian trap: written as an integer, read as bytes)
             views = []
-            for m in members:
+            for i, m in enumerate(members):
                 vf = []
                 flatten(m.get_DIE_from_attribute("DW_AT_type"), "", 0, vf)
-                views.append([name(m) or "anon", vf])
+                views.append([name(m) or "anon%d" % i, vf])
             out.append([path, off, size_of(die), "U", False, views])
             return
+        n_anon = 0
         for m in members:
             moff = m.attributes["DW_AT_data_member_location"].value if "DW_AT_data_member_location" in m.attributes else 0
-            mname = name(m) or "anon"
+            mname = name(m)
+            if mname is None:  # anonymous struct/union: number them so 3DS/N64 paths pair up uniquely
+                mname = "anon%d" % n_anon
+                n_anon += 1
             if "DW_AT_bit_size" in m.attributes:
                 # bitfield: [path, unit_off, unit_size, "b", pad, bit_pos, bit_size]; bit_pos counts in
                 # declaration order from the unit start (LE: from the LSB, BE/MIPS: from the MSB)

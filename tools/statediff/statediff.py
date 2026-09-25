@@ -275,15 +275,88 @@ def diff_union(f, n64, ds, base, prefix, pads, out):
     agree = [v for v, o in results if not o]
     if len(agree) == len(results):
         return
-    if not agree:  # no view agrees: a real value difference; report it through the first view
+    if not agree:
+        # no whole view agrees. If every byte is still matched by SOME view's field, the bytes are the
+        # same data under different interpretations (e.g. stale data written through another member):
+        # report it as MIXED for review. Otherwise it's a real value difference, shown via view 0.
+        if union_bytes_covered(f, n64, ds, off):
+            out.append((prefix + path + " [UNION MIXED: each byte agrees under some view, no whole view agrees]",
+                        "-", "-"))
+            return
         for p, a, b in results[0][1]:
             out.append((prefix + path + "." + results[0][0] + p, a, b))
         return
     # some views agree, some don't: same bytes only under a subset of interpretations
     dis = [v for v, o in results if o]
     first = next(o for v, o in results if o)[0]
-    out.append((prefix + path + " [UNION views agree: %s | differ: %s]" % (",".join(agree), ",".join(dis)),
+    covered = " (every byte agrees under some view)" if union_bytes_covered(f, n64, ds, off) else ""
+    out.append((prefix + path + " [UNION views agree: %s | differ: %s]%s" % (",".join(agree), ",".join(dis), covered),
                 "%s=%s" % (first[0].lstrip("."), fmt(first[1])), fmt(first[2])))
+
+
+_CAM_FUNCS = None
+
+
+def camera_active_view(play_bytes, layout, cam_path):
+    """Name of the paramData union view the camera is using (its current function, e.g. "keep4"),
+    from its setting + mode and the game's own tables (src/code/z_camera_data.inc.c)."""
+    global _CAM_FUNCS
+    if _CAM_FUNCS is None:
+        src = open(os.path.join(REPO, "src/code/z_camera_data.inc.c")).read()
+        modes = {}
+        for m in re.finditer(r"CameraMode (\w+)\[\] = \{(.*?)\};", src, re.S):
+            modes[m.group(1)] = re.findall(r"CAM_SETTING_MODE_ENTRY\(CAM_FUNC_(\w+),", m.group(2))
+        table = re.search(r"CameraSetting sCameraSettings\[\] = \{(.*?)\n\};", src, re.S).group(1)
+        _CAM_FUNCS = [modes.get(m, []) for m in re.findall(r"\}, (\w+) *\}", table)]
+    setting = struct.unpack(">h", play_bytes[field_off_n64(layout, cam_path + ".setting"):][:2])[0]
+    mode = struct.unpack(">h", play_bytes[field_off_n64(layout, cam_path + ".mode"):][:2])[0]
+    funcs = _CAM_FUNCS[setting] if 0 <= setting < len(_CAM_FUNCS) else []
+    return funcs[mode].lower() if 0 <= mode < len(funcs) else None
+
+
+def field_off_n64(layout, path):
+    for f in layout["PlayState"]["fields"]:
+        if f[0] == path:
+            return f[-1]
+    raise KeyError(path)
+
+
+def drop_verified_camera_unions(out, layout, n64_play):
+    """A camera paramData union is fine when the view of the camera's ACTIVE function agrees."""
+    keep = []
+    for o in out:
+        m = re.match(r"^play\.(mainCamera|subCameras\[\d+\])\.paramData \[UNION views agree: ([^|]*) \|", o[0])
+        if m:
+            view = camera_active_view(n64_play, layout, m.group(1))
+            if view and view in [v.strip() for v in m.group(2).split(",")]:
+                continue  # the active function's parameters match
+            if o[0].endswith("(every byte agrees under some view)"):
+                # active view differs only through stale bytes from another view (params pending reload)
+                o = ("play.%s.paramData [UNION MIXED: active view %s differs, bytes identical]" % (m.group(1), view),
+                     o[1], o[2])
+        keep.append(o)
+    return keep
+
+
+def leaf_fields(fields, base3, basen):
+    """Flatten nested unions: (N64 offset, 3DS offset, field) for every leaf of every view."""
+    for f in fields:
+        if f[3] == "U":
+            for _, vf in f[5]:
+                yield from leaf_fields(vf, base3 + f[1], basen + f[6])
+        else:
+            yield basen + f[-1], base3 + f[1], f
+
+
+def union_bytes_covered(u, n64, ds, off):
+    covered = set()
+    for _, vfields in u[5]:
+        for on, o3, f in leaf_fields(vfields, off[1], off[0]):
+            g3 = [f[0], o3] + f[2:]
+            gn = [f[0], on] + f[2:]
+            if same(value(n64, gn, True), value(ds, g3, False), f[3]):
+                covered.update(range(o3 - off[1], o3 - off[1] + f[2]))
+    return all(i in covered for i in range(u[2]))
 
 
 def diff_struct(layout, typ, n64, ds, prefix, pads, out):
@@ -389,6 +462,7 @@ def main():
             else:
                 diff_struct(layout, "Actor", an[k], ad[k], name, args.pads, out)
 
+    out = drop_verified_camera_unions(out, layout, n64["play"])
     allow = []
     for line in open(os.path.join(HERE, "allow.txt")):
         rx = line.split("  #")[0].split(" #")[0].strip()

@@ -1,0 +1,4 @@
+# Child Link, Bazaar: turn around and walk out the door -> scene transition into the Market.
+0   0       0   0
+10  0       0   -80
+70  0       0   0
