@@ -36,6 +36,13 @@ def load_layout():
     return json.load(open(path))
 
 
+def load_actor_layouts():
+    path = os.path.join(OUT, "actors.json")
+    if not os.path.exists(path):
+        sh("%s tools/statediff/layout_actors.py" % sys.executable, check=True)
+    return json.load(open(path))
+
+
 def field_off(layout, typ, path):
     for f in layout[typ]["fields"]:
         if f[0] == path:
@@ -53,6 +60,16 @@ def n64_symbols(elf):
     return syms
 
 
+def n64_rand_state_addr(elf, syms):
+    """sRandInt is static (IDO emits no symbol): decode Rand_Seed = lui at,HI ; jr ra ; sw a0,LO(at)."""
+    a = syms["Rand_Seed"]
+    dis = subprocess.run([MIPS_NM.replace("nm", "objdump"), "-d", "--start-address=0x%x" % a,
+                          "--stop-address=0x%x" % (a + 12), elf], capture_output=True, text=True).stdout
+    hi = int(re.search(r"lui\s+at,0x([0-9a-f]+)", dis).group(1), 16)
+    lo = int(re.search(r"sw\s+a0,(-?\d+)\(at\)", dis).group(1))
+    return ((hi << 16) + lo) & 0xFFFFFFFF
+
+
 def capture_n64(layout, entrance, frame):
     tag = entrance or "default"
     rom, elf = os.path.join(OUT, "ref_%s.z64" % tag), os.path.join(OUT, "ref_%s.elf" % tag)
@@ -60,6 +77,8 @@ def capture_n64(layout, entrance, frame):
         sh("tools/statediff/make_ref.sh %s" % (entrance or ""), check=True)
     syms = n64_symbols(elf)
     bp = syms["Play_Update"]
+    rng_addr = n64_rand_state_addr(elf, syms)
+    rng_frames = {}
     sh("pkill -9 -f MacOS/ares")
     time.sleep(1)
     subprocess.Popen([ARES, "--system", "Nintendo 64", "--no-file-prompt", rom],
@@ -72,6 +91,7 @@ def capture_n64(layout, entrance, frame):
         while True:
             play = g.read_regs()[4] & 0xFFFFFFFF
             n = struct.unpack(">I", g.read_mem(play + off_frames, 4))[0]
+            rng_frames[n] = struct.unpack(">I", g.read_mem(rng_addr, 4))[0]
             if n == frame:
                 break
             if n > frame:
@@ -82,15 +102,21 @@ def capture_n64(layout, entrance, frame):
         lists = field_off(layout, "PlayState", "actorCtx.actorLists[0].head")
         stride = field_off(layout, "PlayState", "actorCtx.actorLists[1].head") - lists
         off_next = field_off(layout, "Actor", "next")
+        off_id = field_off(layout, "Actor", "id")
         asz = layout["Actor"]["size"]
+        actor_layouts = load_actor_layouts()
         actors = []
         for cat in range(ACTORCAT_MAX):
             a = struct.unpack(">I", blobs["play"][lists + cat * stride:lists + cat * stride + 4])[0]
             while a:
-                data = g.read_mem(a, asz)
+                head = g.read_mem(a, asz)
+                aid = struct.unpack(">h", head[off_id:off_id + 2])[0]
+                full = actor_layouts.get(str(aid), {}).get("n64_size", asz)  # whole instance
+                data = head + g.read_mem(a + asz, full - asz) if full > asz else head
                 actors.append((cat, data))
-                a = struct.unpack(">I", data[off_next:off_next + 4])[0]
+                a = struct.unpack(">I", head[off_next:off_next + 4])[0]
         blobs["actors"] = actors
+        blobs["rng_frames"] = rng_frames
     finally:
         g.detach()
         sh("pkill -9 -f MacOS/ares")
@@ -99,9 +125,12 @@ def capture_n64(layout, entrance, frame):
 
 # ---------------------------------------------------------------- 3DS (Azahar) capture
 def build_3ds(game_extra):
-    for o in ("build/3ds/src/code/z_play.o", "build/3ds/src/code/graph.o", "build/3ds/src/overlays/gamestates/ovl_opening/z_opening.o"):
-        if os.path.exists(os.path.join(REPO, o)):
-            os.remove(os.path.join(REPO, o))
+    # make doesn't track flags: drop the objects of every game file that reacts to these defines
+    hooked = sh("grep -rlE 'PORT_STATEDUMP|PORT_START_ENTRANCE' src", capture_output=True, text=True).stdout.split()
+    for src in hooked:
+        o = os.path.join(REPO, "build/3ds", os.path.splitext(src)[0] + ".o")
+        if os.path.exists(o):
+            os.remove(o)
     r = sh("make -f Makefile.3ds cci GAME_EXTRA='%s' 2>&1 | grep -iE ' error|undefined reference' ; true" % game_extra,
            capture_output=True, text=True)
     if r.stdout.strip():
@@ -111,7 +140,7 @@ def build_3ds(game_extra):
 def capture_3ds(layout, entrance, frame):
     extra = "-DPORT_STATEDUMP=%d" % frame + (" -DPORT_START_ENTRANCE=%s" % entrance if entrance else "")
     build_3ds(extra)
-    for f in ("sd_play.bin", "sd_save.bin", "sd_actors.bin", "boot.log"):
+    for f in ("sd_play.bin", "sd_save.bin", "sd_actors.bin", "sd_rng.bin", "boot.log"):
         if os.path.exists(os.path.join(SD, f)):
             os.remove(os.path.join(SD, f))
     sh("pkill -9 -f MacOS/azahar")
@@ -138,6 +167,8 @@ def capture_3ds(layout, entrance, frame):
         actors.append((cat, raw[i + 8:i + 8 + size]))
         i += 8 + size
     blobs["actors"] = actors
+    rng_path = os.path.join(SD, "sd_rng.bin")
+    blobs["rng_trace"] = open(rng_path, "rb").read() if os.path.exists(rng_path) else b""
     build_3ds("")  # leave the normal ROM in build/3ds
     return blobs
 
@@ -218,6 +249,32 @@ def fmt(v):
     return "%.4g" % v if isinstance(v, float) else (hex(v) if isinstance(v, int) and abs(v) > 9 else str(v))
 
 
+def rng_frames_3ds(trace):
+    frames, i = {}, 0
+    while i + 16 <= len(trace):
+        k, v = struct.unpack("<II", trace[i:i + 8])
+        if k == 0:
+            frames[v] = struct.unpack("<II", trace[i + 8:i + 16])[1]
+            i += 16
+        else:
+            i += 8
+    return frames
+
+
+def rng_report(n64, ds):
+    """First gameplay frame whose starting RNG state differs (the divergence happened in the frame before)."""
+    a, b = n64.get("rng_frames") or {}, rng_frames_3ds(ds.get("rng_trace") or b"")
+    common = sorted(set(a) & set(b))
+    if not common:
+        return
+    bad = [f for f in common if a[f] != b[f]]
+    if bad:
+        print("RNG: diverges before frame %d (N64 %08x, 3DS %08x); last equal frame %s -> run rngtrace.py --frame %d" %
+              (bad[0], a[bad[0]], b[bad[0]], max([f for f in common if f < bad[0]], default="none"), bad[0] - 1))
+    else:
+        print("RNG: identical at the start of all %d frames compared" % len(common))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--entrance", default="")
@@ -229,17 +286,22 @@ def main():
     ap.add_argument("--all", action="store_true", help="also show allow-listed differences (allow.txt)")
     args = ap.parse_args()
     layout = load_layout()
+    actor_layouts = load_actor_layouts()
     os.makedirs(OUT, exist_ok=True)
 
     def cache(side, blobs=None):
         p = os.path.join(OUT, "%s_%s_f%d.json" % (side, args.entrance or "default", args.frame))
         if blobs is not None:
             json.dump({"play": blobs["play"].hex(), "save": blobs["save"].hex(),
-                       "actors": [[c, d.hex()] for c, d in blobs["actors"]]}, open(p, "w"))
+                       "actors": [[c, d.hex()] for c, d in blobs["actors"]],
+                       "rng_frames": blobs.get("rng_frames", {}),
+                       "rng_trace": blobs.get("rng_trace", b"").hex()}, open(p, "w"))
             return blobs
         j = json.load(open(p))
         return {"play": bytes.fromhex(j["play"]), "save": bytes.fromhex(j["save"]),
-                "actors": [(c, bytes.fromhex(d)) for c, d in j["actors"]]}
+                "actors": [(c, bytes.fromhex(d)) for c, d in j["actors"]],
+                "rng_frames": {int(k): v for k, v in j.get("rng_frames", {}).items()},
+                "rng_trace": bytes.fromhex(j.get("rng_trace", ""))}
 
     n64 = cache("n64") if args.skip_n64 else cache("n64", capture_n64(layout, args.entrance, args.frame))
     ds = cache("3ds") if args.skip_3ds else cache("3ds", capture_3ds(layout, args.entrance, args.frame))
@@ -265,7 +327,12 @@ def main():
         elif k not in an:
             out.append((name + "(extra on 3DS)", "-", "present"))
         else:
-            diff_struct(layout, "Actor", an[k], ad[k], name, args.pads, out)
+            al = actor_layouts.get(str(k[1]))
+            if al is not None and len(an[k]) >= al["n64_size"] and len(ad[k]) >= al["size"]:
+                name = "actor[cat%d %s #%d]." % (k[0], al["name"], k[2])
+                diff_fields(al["fields"], an[k], ad[k], (0, 0), name, args.pads, out)
+            else:
+                diff_struct(layout, "Actor", an[k], ad[k], name, args.pads, out)
 
     allow = []
     for line in open(os.path.join(HERE, "allow.txt")):
@@ -276,6 +343,7 @@ def main():
     if not args.all:
         out = [o for o in out if not any(r.search(o[0]) for r in allow)]
 
+    rng_report(n64, ds)
     print("statediff entrance=%s frame=%d: %d actors N64 / %d actors 3DS, %d differing fields (+%d allow-listed, --all shows them)" %
           (args.entrance or "default", args.frame, len(an), len(ad), len(out), len(allowed) if not args.all else 0))
     for path, a, b in out[:args.max]:

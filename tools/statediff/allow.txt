@@ -8,4 +8,5 @@
 \.(view|interfaceCtx\.view|msgCtx\.view)\.(vp|projection|viewing) \[UNION views agree: (vp|m)\b  # Vp/Mtx read through their typed view only
 ^play\.envCtx\.dirLight[12]\.params \[UNION views agree: dir  # directional light: s8 dir view is the one in use
 ^play\.transitionCtx\.instanceData \[UNION views agree: fade  # fade instance: the active transition's view agrees
-^play\.mainCamera\.paramData \[UNION views agree: [^|]*\b(norm1|fixd3)\b  # per-camera-function param union: the active function's view agrees (Normal1 in Hyrule Field, Fixed3 in shops); other views reinterpret the same bytes
+^play\.(mainCamera|subCameras\[\d+\])\.paramData \[UNION views agree: [^|]*\b(norm1|fixd3)\b  # per-camera-function param union: the active function's view agrees (Normal1 in Hyrule Field, Fixed3 in shops); other views reinterpret the same bytes
+\.lightInfo\w*\.params \[UNION views agree: point  # point light: the s16 point view is the one in use

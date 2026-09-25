@@ -4126,11 +4126,22 @@ void Actor_RequestQuakeAndRumble(Actor* actor, PlayState* play, s16 quakeY, s16 
     Actor_RequestQuake(play, quakeY, quakeDuration);
 }
 
-f32 Rand_ZeroFloat(f32 f) {
+#if defined(__3DS__) && defined(PORT_STATEDUMP)
+extern void PortRngTrace(unsigned kind, const void* caller);
+#define PORT_RNG_TRACE(kind) PortRngTrace(kind, __builtin_return_address(0))
+#define PORT_NOINLINE __attribute__((noinline))
+#else
+#define PORT_RNG_TRACE(kind) (void)0
+#define PORT_NOINLINE
+#endif
+
+PORT_NOINLINE f32 Rand_ZeroFloat(f32 f) {
+    PORT_RNG_TRACE(3);
     return Rand_ZeroOne() * f;
 }
 
-f32 Rand_CenteredFloat(f32 f) {
+PORT_NOINLINE f32 Rand_CenteredFloat(f32 f) {
+    PORT_RNG_TRACE(4);
     return (Rand_ZeroOne() - 0.5f) * f;
 }
 

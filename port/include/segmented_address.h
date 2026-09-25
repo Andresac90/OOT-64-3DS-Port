@@ -74,6 +74,11 @@ static inline void* PortSegmentedToVirtual(uintptr_t addr) {
 #endif
 }
 
-#define SEGMENTED_TO_VIRTUAL(addr) PortSegmentedToVirtual((uintptr_t)(addr))
+/* The N64 macro evaluates `addr` twice (SEGMENT_NUMBER + SEGMENT_OFFSET), and the game depends on it:
+ * e.g. SEGMENTED_TO_VIRTUAL(Rand_ZeroOne() < 0.5f ? A : B) in the bubble effects draws two random
+ * numbers, and a single evaluation desynced every later random value (found by tools/statediff
+ * rngtrace, Lake Hylia). Evaluate it twice too; the result uses the second value, as on N64 for
+ * the same-segment addresses the game passes. */
+#define SEGMENTED_TO_VIRTUAL(addr) ((void)(addr), PortSegmentedToVirtual((uintptr_t)(addr)))
 
 #endif

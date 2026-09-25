@@ -579,7 +579,15 @@ void Play_Update(PlayState* this) {
     s32 pad1;
 
 #if defined(__3DS__) && defined(PORT_STATEDUMP)
-    // PORT: tools/statediff hook - dump raw state at the start of gameplay frame PORT_STATEDUMP
+    // PORT: tools/statediff hook - RNG state marker every frame, raw state dump at frame PORT_STATEDUMP
+    {
+        extern void PortRngTrace_Frame(u32 frame, u32 state);
+        extern u32 PortRand_GetState(void);
+
+        if (this->gameplayFrames <= PORT_STATEDUMP) {
+            PortRngTrace_Frame(this->gameplayFrames, PortRand_GetState());
+        }
+    }
     if (this->gameplayFrames == PORT_STATEDUMP) {
         extern void PortStateDump_Begin(const void* play, unsigned playSize, const void* save, unsigned saveSize);
         extern void PortStateDump_Actor(unsigned category, const void* actor, unsigned size);
@@ -590,7 +598,11 @@ void Play_Update(PlayState* this) {
         PortStateDump_Begin(this, sizeof(PlayState), &gSaveContext, sizeof(SaveContext));
         for (cat = 0; cat < ACTORCAT_MAX; cat++) {
             for (actor = this->actorCtx.actorLists[cat].head; actor != NULL; actor = actor->next) {
-                PortStateDump_Actor(cat, actor, sizeof(Actor));
+                // whole instance (the profile's sizeof(EnXxx)), not just the common Actor header
+                PortStateDump_Actor(cat, actor,
+                                    ((actor->overlayEntry != NULL) && (actor->overlayEntry->profile != NULL))
+                                        ? actor->overlayEntry->profile->instanceSize
+                                        : sizeof(Actor));
             }
         }
         PortStateDump_End();

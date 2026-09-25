@@ -236,11 +236,22 @@ void Lib_GetControlStickData(f32* outMagnitude, s16* outAngle, Input* input) {
     *outAngle = Math_Atan2S(relY, -relX);
 }
 
-s16 Rand_S16Offset(s16 base, s16 range) {
+#if defined(__3DS__) && defined(PORT_STATEDUMP)
+extern void PortRngTrace(unsigned kind, const void* caller);
+#define PORT_RNG_TRACE(kind) PortRngTrace(kind, __builtin_return_address(0))
+#define PORT_NOINLINE __attribute__((noinline))
+#else
+#define PORT_RNG_TRACE(kind) (void)0
+#define PORT_NOINLINE
+#endif
+
+PORT_NOINLINE s16 Rand_S16Offset(s16 base, s16 range) {
+    PORT_RNG_TRACE(5);
     return (s16)(Rand_ZeroOne() * range) + base;
 }
 
-s16 Rand_S16OffsetStride(s16 base, s16 stride, s16 range) {
+PORT_NOINLINE s16 Rand_S16OffsetStride(s16 base, s16 stride, s16 range) {
+    PORT_RNG_TRACE(6);
     return (s16)(Rand_ZeroOne() * range) * stride + base;
 }
 

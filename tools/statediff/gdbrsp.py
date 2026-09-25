@@ -64,7 +64,7 @@ class GdbRsp:
         while size > 0:
             n = min(chunk, size)
             r = self.cmd("m%x,%x" % (addr, n))
-            if r.startswith("E") or len(r) != 2 * n:
+            if (len(r) == 3 and r[0] == "E") or len(r) != 2 * n:  # error replies are exactly "Exx"
                 raise IOError("memory read failed at 0x%x (%s)" % (addr, r[:16]))
             out += bytes.fromhex(r)
             addr += n
