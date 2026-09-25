@@ -9,6 +9,7 @@
  * tools/statediff/statediff.py reads the same structs from ares (N64) and diffs field by field. */
 #include <stdio.h>
 #include <stdint.h>
+#include <sys/stat.h>
 
 static FILE* sActors;
 
@@ -20,15 +21,31 @@ static void write_file(const char* path, const void* data, unsigned size) {
     }
 }
 
-void PortStateDump_Begin(const void* play, unsigned playSize, const void* save, unsigned saveSize) {
+static int sDumpIndex;
+
+static const char* dump_path(const char* name) {
+    static char path[64];
+    if (sDumpIndex < 0) {
+        snprintf(path, sizeof(path), "sdmc:/3ds/oot/sd_%s.bin", name);
+    } else {
+        snprintf(path, sizeof(path), "sdmc:/3ds/oot/tour/sd_%s_%d.bin", name, sDumpIndex);
+    }
+    return path;
+}
+
+void PortStateDump_Begin(int index, const void* play, unsigned playSize, const void* save, unsigned saveSize) {
     extern const uint32_t* Port3ds_GetDepth(int* width, int* height);
     int w, h;
     const uint32_t* depth = Port3ds_GetDepth(&w, &h);
 
-    write_file("sdmc:/3ds/oot/sd_play.bin", play, playSize);
-    write_file("sdmc:/3ds/oot/sd_save.bin", save, saveSize);
+    sDumpIndex = index;
+    if (index >= 0) {
+        mkdir("sdmc:/3ds/oot/tour", 0777);
+    }
+    write_file(dump_path("play"), play, playSize);
+    write_file(dump_path("save"), save, saveSize);
     if (depth != NULL) { /* previous frame's depth buffer, linear, as read back by gfx_3ds.c */
-        FILE* f = fopen("sdmc:/3ds/oot/sd_depth.bin", "wb");
+        FILE* f = fopen(dump_path("depth"), "wb");
         if (f != NULL) {
             uint32_t hdr[2] = { (uint32_t)w, (uint32_t)h };
             fwrite(hdr, 1, sizeof(hdr), f);
@@ -36,7 +53,19 @@ void PortStateDump_Begin(const void* play, unsigned playSize, const void* save, 
             fclose(f);
         }
     }
-    sActors = fopen("sdmc:/3ds/oot/sd_actors.bin", "wb");
+    sActors = fopen(dump_path("actors"), "wb");
+}
+
+/* game globals: concatenated raw values, sizes as given (see statediff.py GLOBALS) */
+void PortStateDump_Globals(const void* const* ptrs, const uint8_t* sizes, int count) {
+    FILE* f = fopen(dump_path("glob"), "wb");
+    int i;
+    if (f != NULL) {
+        for (i = 0; i < count; i++) {
+            fwrite(ptrs[i], 1, sizes[i], f);
+        }
+        fclose(f);
+    }
 }
 
 void PortStateDump_Actor(unsigned category, const void* actor, unsigned size) {
@@ -81,6 +110,12 @@ void PortStateDump_End(void) {
     if (sActors != NULL) {
         fclose(sActors);
         sActors = NULL;
+    }
+    if (sDumpIndex >= 0) {
+        char msg[48];
+        snprintf(msg, sizeof(msg), "statedump: tour capture %d", sDumpIndex);
+        PortDbg(msg);
+        return;
     }
     write_file("sdmc:/3ds/oot/sd_rng.bin", sRngTrace, sRngCount * 8);
     PortDbg("statedump: wrote sd_play/sd_save/sd_actors.bin");

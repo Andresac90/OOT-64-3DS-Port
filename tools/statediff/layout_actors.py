@@ -53,7 +53,7 @@ def compile_layout(path, tname, n64, flags):
 
 def _compile_layout(path, tname, n64, flags):
     obj = os.path.join(TMP, "%s%s.o" % (tname, "_n64" if n64 else ""))
-    fl = [f for f in flags if not (n64 and f == "-D__3DS__")]
+    fl = [f for f in flags if not (n64 and f == "-D__3DS__")] + (["-fno-short-enums"] if n64 else [])
     r = subprocess.run([L.CC] + fl + ["-g", "-O0", "-w", "-c", path, "-o", obj], cwd=L.REPO, capture_output=True)
     if r.returncode != 0:
         return None

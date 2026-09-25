@@ -134,8 +134,7 @@ static void gfx_3ds_handle_events(void)
 }
 
 /* Depth readback for the game's CPU reads of the N64 z-buffer (point-light glows in z_lights.c, the
- * sun's lens-flare test in z_kankyo.c). Before the target is cleared for the next frame, the finished
- * frame's D24S8 depth buffer is copied (GPU display transfer, detiled) into linear memory; the copy
+ * sun's lens-flare test in z_kankyo.c). When a frame's render completes, its D24S8 depth buffer is copied (GPU display transfer, detiled) into linear memory; the copy
  * only runs while the game has asked for depth recently. port/src/zbuffer_port.c converts samples to
  * N64 z-buffer words. */
 static u32* sDepthLinear;
@@ -179,7 +178,6 @@ static void gfx_3ds_read_back_depth(void) {
 
 static bool gfx_3ds_start_frame(void)
 {
-    gfx_3ds_read_back_depth();
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
     C3D_RenderTargetClear(sTarget, C3D_CLEAR_ALL, 0x000000FF, 0xFFFFFFFF);
 	C3D_FrameDrawOn(sTarget);
@@ -189,6 +187,12 @@ static bool gfx_3ds_start_frame(void)
 static void gfx_3ds_swap_buffers_begin(void) 
 {
     C3D_FrameEnd(0);
+    /* Depth readback right after this frame's render (C3D_SyncDisplayTransfer outside a frame waits
+     * for the queued render first). The game samples it from Environment_GraphCallback, which the N64
+     * runs once the previous frame's RDP work is done: reading it back here gives the same frame N-1
+     * depth. (Reading at the next start_frame was one frame older - measured with tools/statediff:
+     * Navi's glow in the adult Water Temple flipped.) */
+    gfx_3ds_read_back_depth();
     /* PORT (2026-09-24): no vblank wait here -- Port3ds_PaceFrame (3ds_main.c) paces updates to the
      * game's R_UPDATE_RATE retraces and pumps audio per retrace. */
 }

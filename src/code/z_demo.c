@@ -185,6 +185,11 @@ void Cutscene_DrawDebugInfo(PlayState* play, Gfx** dlist, CutsceneContext* csCtx
 }
 #endif
 
+#ifdef __3DS__
+void Cutscene_EnsureNormalized(void* script);
+extern u32 gCsSceneLoadGeneration;
+#endif
+
 void Cutscene_InitContext(PlayState* play, CutsceneContext* csCtx) {
     csCtx->state = CS_STATE_IDLE;
     csCtx->timer = 0.0f;
@@ -192,6 +197,7 @@ void Cutscene_InitContext(PlayState* play, CutsceneContext* csCtx) {
     /* PORT: reset the scene-cutscene byte-order-normalization guard once per scene load,
      * so a scene reload (e.g. title-demo loop) re-normalizes freshly-DMA'd packed data. */
     gCsSceneNormalized = NULL;
+    gCsSceneLoadGeneration++;
 #endif
 }
 
@@ -1394,7 +1400,7 @@ void CutsceneCmd_Destination(PlayState* play, CutsceneContext* csCtx, CsCmdDesti
                     Flags_GetEventChkInf(EVENTCHKINF_BF) && Flags_GetEventChkInf(EVENTCHKINF_AD)) {
                     play->csCtx.script = SEGMENTED_TO_VIRTUAL(gTowerBarrierCs);
 #ifdef __3DS__
-                    Cutscene_NormalizePackedFieldsOnce(play->csCtx.script); /* static array */
+                    Cutscene_EnsureNormalized(play->csCtx.script); /* static array */
 #endif
                     play->csCtx.curFrame = 0;
                     gSaveContext.cutsceneTrigger = 1;
@@ -2057,18 +2063,41 @@ void Cutscene_NormalizePackedFields(void* scriptPtr) {
     }
 }
 
-/* SCENE cutscenes are re-DMA'd fresh (BE-packed) into the play arena each scene load;
- * Scene_CommandAlternateHeaderList can re-run the scene commands, so the assignment can
- * fire >1x per load. Single-slot guard: normalize the currently-assigned script once;
- * reset to NULL in Cutscene_InitContext (once per scene load) so a scene RELOAD (title-demo
- * loop, same arena address, fresh data) re-normalizes. Only the LAST-assigned
- * play->csCtx.script actually runs, so tracking one slot is sufficient. */
+/* Scripts in LOADED data (scene/room/object files in the play arena) are DMA'd fresh (BE-packed)
+ * on every scene load: normalize each address once per load. The set is cleared in
+ * Cutscene_InitContext (once per scene load), so a reload of the same data re-normalizes.
+ * (gCsSceneNormalized is kept as the reset hook Cutscene_InitContext already clears.) */
+#define CS_NORMALIZE_LOAD_SET_SIZE 32
 void* gCsSceneNormalized = NULL;
-void Cutscene_NormalizeSceneScript(void* script) {
-    if (script != NULL && script != gCsSceneNormalized) {
-        Cutscene_NormalizePackedFields(script);
-        gCsSceneNormalized = script;
+u32 gCsSceneLoadGeneration = 0; /* incremented by Cutscene_InitContext (once per scene load) */
+static void* sCsLoadNormalized[CS_NORMALIZE_LOAD_SET_SIZE];
+static s32 sCsLoadNormalizedCount = 0;
+static u32 sCsLoadSetGeneration = 0xFFFFFFFF;
+
+static void Cutscene_NormalizeLoadedScript(void* script) {
+    s32 k;
+    if (sCsLoadSetGeneration != gCsSceneLoadGeneration) { /* a new scene load happened since last use */
+        sCsLoadNormalizedCount = 0;
+        sCsLoadSetGeneration = gCsSceneLoadGeneration;
     }
+    for (k = 0; k < sCsLoadNormalizedCount; k++) {
+        if (sCsLoadNormalized[k] == script) {
+            return;
+        }
+    }
+    Cutscene_NormalizePackedFields(script);
+    if (sCsLoadNormalizedCount < CS_NORMALIZE_LOAD_SET_SIZE) {
+        sCsLoadNormalized[sCsLoadNormalizedCount++] = script;
+    }
+}
+
+/* Scene cutscene data may be loaded (arena) or the natively linked scene file itself (the port maps
+ * scene segments onto native asset data): classify by address like every other script, so the scene
+ * command and Cutscene_ProcessScript never both swap the same data (a double swap ended the Ganon
+ * intro cutscene at once - found by tools/statediff). */
+void Cutscene_EnsureNormalized(void* script);
+void Cutscene_NormalizeSceneScript(void* script) {
+    Cutscene_EnsureNormalized(script);
 }
 
 /* STATIC native cutscene arrays (gTowerBarrierCs, entrance/actor scripts) are never
@@ -2091,6 +2120,36 @@ void Cutscene_NormalizePackedFieldsOnce(void* script) {
         sCsNormalizedScripts[sCsNormalizedCount++] = script;
     }
 }
+/* An overlay's .data was just restored to its initial (BE-packed) contents by the port's overlay
+ * statics reset (port/src/overlay_statics.c, the N64 fresh-load semantics): scripts inside it must be
+ * normalized again, so drop them from the once-ever set. */
+void Cutscene_ForgetNormalizedRange(void* start, void* end) {
+    s32 k = 0;
+    while (k < sCsNormalizedCount) {
+        if ((uintptr_t)sCsNormalizedScripts[k] >= (uintptr_t)start && (uintptr_t)sCsNormalizedScripts[k] < (uintptr_t)end) {
+            sCsNormalizedScripts[k] = sCsNormalizedScripts[--sCsNormalizedCount];
+        } else {
+            k++;
+        }
+    }
+}
+
+/* Every script, however it was assigned (Cutscene_SetScript, a scene command, or an actor writing
+ * play->csCtx.script directly - e.g. the sages' medallion cutscenes in the Chamber of the Sages,
+ * which previously ran un-normalized and ended at once; found by the tools/statediff scene tour),
+ * is normalized exactly once before it runs. Static arrays live in the executable image (below
+ * __end__) and are never reloaded; anything else is loaded data (per-scene-load guard). */
+void Cutscene_EnsureNormalized(void* script) {
+    extern char __end__[];
+    if (script == NULL) {
+        return;
+    }
+    if ((uintptr_t)script < (uintptr_t)__end__) {
+        Cutscene_NormalizePackedFieldsOnce(script);
+    } else {
+        Cutscene_NormalizeLoadedScript(script);
+    }
+}
 /* --- END PORT ------------------------------------------------------------------- */
 #endif
 
@@ -2105,6 +2164,8 @@ void Cutscene_ProcessScript(PlayState* play, CutsceneContext* csCtx, u8* script)
 
 #ifdef __3DS__
     u8* csScriptStart = script; /* PORT_CS_BOUNDS */
+
+    Cutscene_EnsureNormalized(script);
 #endif
     MemCpy(&totalEntries, script, sizeof(totalEntries));
     script += sizeof(totalEntries);
@@ -2770,8 +2831,7 @@ void Cutscene_SetScript(PlayState* play, void* script) {
         play->csCtx.script = script;
     }
 #ifdef __3DS__
-    /* PORT: entrance/actor cutscene scripts are static native arrays (big-endian-packed);
-     * normalize once per address (guard prevents double-swap on replay). */
-    Cutscene_NormalizePackedFieldsOnce(play->csCtx.script);
+    /* PORT: normalize once (static arrays: once ever; loaded data: once per scene load) */
+    Cutscene_EnsureNormalized(play->csCtx.script);
 #endif
 }

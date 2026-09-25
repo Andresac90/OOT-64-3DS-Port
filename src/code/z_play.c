@@ -574,6 +574,36 @@ void Play_Init(GameState* thisx) {
 }
 
 #if defined(__3DS__) && defined(PORT_STATEDUMP)
+// PORT: tools/statediff - write PlayState, SaveContext and every actor instance to the SD card
+// (index < 0: single capture at frame PORT_STATEDUMP; index >= 0: scene-tour capture number)
+static void StateDiff_PortDump(PlayState* this, s32 index) {
+    extern void PortStateDump_Begin(s32 index, const void* play, unsigned playSize, const void* save,
+                                    unsigned saveSize);
+    extern void PortStateDump_Actor(unsigned category, const void* actor, unsigned size);
+    extern void PortStateDump_End(void);
+    s32 cat;
+    Actor* actor;
+
+    extern void PortStateDump_Globals(const void* const* ptrs, const u8* sizes, s32 count);
+    // game globals outside PlayState/SaveContext; same order/size list as statediff.py GLOBALS
+    static const void* const sGlobPtrs[] = { &gWeatherMode, &gSkyboxIsChanging, &gLightConfigAfterUnderwater,
+                                             &gInterruptSongOfStorms, &gTimeSpeed };
+    static const u8 sGlobSizes[] = { 1, 1, 1, 1, 2 };
+
+    PortStateDump_Begin(index, this, sizeof(PlayState), &gSaveContext, sizeof(SaveContext));
+    PortStateDump_Globals(sGlobPtrs, sGlobSizes, ARRAY_COUNT(sGlobSizes));
+    for (cat = 0; cat < ACTORCAT_MAX; cat++) {
+        for (actor = this->actorCtx.actorLists[cat].head; actor != NULL; actor = actor->next) {
+            // whole instance (the profile's sizeof(EnXxx)), not just the common Actor header
+            PortStateDump_Actor(cat, actor,
+                                ((actor->overlayEntry != NULL) && (actor->overlayEntry->profile != NULL))
+                                    ? actor->overlayEntry->profile->instanceSize
+                                    : sizeof(Actor));
+        }
+    }
+    PortStateDump_End();
+}
+
 #include "statediff_input.h"
 #endif
 
@@ -590,28 +620,12 @@ void Play_Update(PlayState* this) {
         extern void PortRngTrace_Frame(u32 frame, u32 state);
         extern u32 PortRand_GetState(void);
 
-        if (this->gameplayFrames <= PORT_STATEDUMP) {
+        if ((s32)this->gameplayFrames <= PORT_STATEDUMP) {
             PortRngTrace_Frame(this->gameplayFrames, PortRand_GetState());
         }
     }
     if (this->gameplayFrames == PORT_STATEDUMP) {
-        extern void PortStateDump_Begin(const void* play, unsigned playSize, const void* save, unsigned saveSize);
-        extern void PortStateDump_Actor(unsigned category, const void* actor, unsigned size);
-        extern void PortStateDump_End(void);
-        s32 cat;
-        Actor* actor;
-
-        PortStateDump_Begin(this, sizeof(PlayState), &gSaveContext, sizeof(SaveContext));
-        for (cat = 0; cat < ACTORCAT_MAX; cat++) {
-            for (actor = this->actorCtx.actorLists[cat].head; actor != NULL; actor = actor->next) {
-                // whole instance (the profile's sizeof(EnXxx)), not just the common Actor header
-                PortStateDump_Actor(cat, actor,
-                                    ((actor->overlayEntry != NULL) && (actor->overlayEntry->profile != NULL))
-                                        ? actor->overlayEntry->profile->instanceSize
-                                        : sizeof(Actor));
-            }
-        }
-        PortStateDump_End();
+        StateDiff_PortDump(this, -1);
     }
 #endif
 

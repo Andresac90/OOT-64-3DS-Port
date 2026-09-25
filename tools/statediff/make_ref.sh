@@ -9,8 +9,9 @@ REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 UPSTREAM=269d03016
 WT="$REPO/../OOT-64-3DS-Port-n64ref"
 ENTR="${1:-}"
-SCRIPT_H="${2:-}"          # generated input_script.h (scripted controller input), optional
+SCRIPT_H="${2:-}"          # generated input_script.h (scripted controller input); tour_script.h beside it
 TAG="${3:-${ENTR:-default}}"
+AGE="${4:-}"               # optional LINK_AGE_* for the boot (scene tour)
 export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v miniconda | paste -sd: -)   # conda's libxml2 breaks tools/audio
 
 if [ ! -d "$WT" ]; then
@@ -31,6 +32,7 @@ grep -q "Rand_Seed(0x5EED0000)" "$WT/$P" || { echo "upstream z_play.c changed"; 
 if [ -n "$SCRIPT_H" ]; then
   cp "$REPO/tools/statediff/statediff_input.h" "$WT/src/code/statediff_input.h"
   cp "$SCRIPT_H" "$WT/src/code/input_script.h"
+  cp "$(dirname "$SCRIPT_H")/tour_script.h" "$WT/src/code/tour_script.h"
   python3 - "$WT/$P" <<'PY3'
 import sys
 p = sys.argv[1]
@@ -50,9 +52,9 @@ old = '        gameState = SYSTEM_ARENA_MALLOC(size, "../graph.c", 1196);\n'
 assert s.count(old) == 1, "upstream graph.c changed"
 open(p, "w").write(s.replace(old, old + "        if (gameState != NULL) {\n            bzero(gameState, size);\n        }\n"))
 PY2
-python3 - "$WT/$F" "$ENTR" <<'PY'
+python3 - "$WT/$F" "$ENTR" "$AGE" <<'PY'
 import sys
-p, entr = sys.argv[1], sys.argv[2]
+p, entr, age = sys.argv[1], sys.argv[2], sys.argv[3]
 s = open(p).read()
 old = """    gSaveContext.gameMode = GAMEMODE_TITLE_SCREEN;
     this->state.running = false;
@@ -73,12 +75,14 @@ new = """    // statediff reference: same boot bypass as the 3DS port (z_opening
 """
 if entr:
     new += "    gSaveContext.save.linkAge = LINK_AGE_CHILD;\n    gSaveContext.save.entranceIndex = %s;\n" % entr
+if age:
+    new += "    gSaveContext.save.linkAge = %s;\n" % age
 assert s.count(old) == 1, "upstream z_opening.c changed"
 open(p, "w").write(s.replace(old, new))
 PY
 gmake -C "$WT" rom VERSION=ntsc-1.0 REGION=US -j8 >"$REPO/build/statediff/ref_build.log" 2>&1 || { tail -20 "$REPO/build/statediff/ref_build.log"; exit 1; }
 git -C "$WT" checkout -q "$UPSTREAM" -- "$F" "$G" "$P"
-rm -f "$WT/src/code/statediff_input.h" "$WT/src/code/input_script.h"
+rm -f "$WT/src/code/statediff_input.h" "$WT/src/code/input_script.h" "$WT/src/code/tour_script.h"
 mkdir -p "$REPO/build/statediff"
 cp "$WT/build/ntsc-1.0/oot-ntsc-1.0.z64" "$REPO/build/statediff/ref_$TAG.z64"
 cp "$WT/build/ntsc-1.0/oot-ntsc-1.0.elf" "$REPO/build/statediff/ref_$TAG.elf"

@@ -283,6 +283,7 @@ static void WipeCrashDumps(void) {
 
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
+    { extern void PortOverlayStatics_Init(void); PortOverlayStatics_Init(); } /* before any game code */
     DBG("PORT: main() entered");
     gfxInitDefault();
     DBG("PORT: gfxInitDefault done");

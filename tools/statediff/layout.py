@@ -39,6 +39,8 @@ def build_probe(obj, n64):
     field reorders such as the little-endian fixes live under #ifdef __3DS__)."""
     os.makedirs(OUT_DIR, exist_ok=True)
     flags = [f for f in game_cflags() if not (n64 and f == "-D__3DS__")]
+    if n64:
+        flags.append("-fno-short-enums")  # IDO: every enum is a 4-byte int (arm-none-eabi GCC: 1/2/4)
     subprocess.run([CC] + flags + ["-g", "-O0", "-c", PROBE_SRC, "-o", obj], cwd=REPO, check=True)
 
 
@@ -149,7 +151,8 @@ def extract_obj(obj):
 
 
 def merge(f3, fn):
-    """Attach the N64 offset (last item) to each 3DS field, pairing by path; unions recurse per view."""
+    """Attach the N64 size and offset (last two items) to each 3DS field, pairing by path; unions
+    recurse per view."""
     by_path = {f[0]: f for f in fn}
     out = []
     for f in f3:
@@ -159,9 +162,9 @@ def merge(f3, fn):
         if f[3] == "U":
             nviews = dict((v[0], v[1]) for v in g[5])
             views = [[v[0], merge(v[1], nviews.get(v[0], []))] for v in f[5]]
-            out.append(f[:5] + [views, g[1]])
+            out.append(f[:5] + [views, g[2], g[1]])
         else:
-            out.append(f + [g[1]])
+            out.append(f + [g[2], g[1]])  # N64 size (IDO enums are 4 bytes), N64 offset last
     return out
 
 

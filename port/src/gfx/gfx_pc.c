@@ -72,7 +72,12 @@ extern char __end__[];
 #define RATIO_Y (gfx_current_dimensions.height / (2.0f * HALF_SCREEN_HEIGHT))
 
 #define MAX_BUFFERED 256
-#define MAX_LIGHTS 2
+/* PORT (2026-09-25): F3DEX2 supports 7 directional lights + ambient (G_MAX_LIGHTS); sm64 used 2. OoT
+ * sends up to 7 (e.g. torch-lit rooms): with 2, G_MW_NUMLIGHT made the lighting loop write
+ * current_lights_coeffs past the array, which corrupted current_num_lights and then everything after
+ * rsp (buf_vbo_len / buf_vbo_num_tris -> out-of-bounds vertex reads, found by the tools/statediff
+ * scene tour in the Treasure Chest Shop), and lights 3..7 were dropped. */
+#define MAX_LIGHTS 7
 #define MAX_VERTICES 64
 
 struct RGBA {
@@ -1296,6 +1301,9 @@ static void gfx_sp_moveword(uint8_t index, uint16_t offset, uint32_t data) {
         case G_MW_NUMLIGHT:
 #ifdef F3DEX_GBI_2
             rsp.current_num_lights = data / 24 + 1; // add ambient light
+            if (rsp.current_num_lights > MAX_LIGHTS + 1) {
+                rsp.current_num_lights = MAX_LIGHTS + 1;
+            }
 #else
             // Ambient light is included
             // The 31th bit is a flag that lights should be recalculated

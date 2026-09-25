@@ -111,6 +111,17 @@ class GdbRsp:
         self.set_break(addr)
         return self.cont(timeout)
 
+    def pc(self):
+        return self.read_regs()[37] & 0xFFFFFFFF  # ares MIPS 'g' block: 32 GPRs, sr, lo, hi, bad, cause, pc
+
+    def cont_until(self, addr, timeout=None, from_addr=None):
+        """Continue until execution stops AT `addr`, passing over other stops (ares also reports some
+        exceptions the game handles itself, e.g. one in AudioLoad_Init at boot)."""
+        r = self.cont_past(from_addr, timeout) if from_addr is not None else self.cont(timeout)
+        while self.pc() != addr:
+            r = self.cont(timeout)
+        return r
+
     def interrupt(self):
         self.s.sendall(b"\x03")
         return self._read_packet()

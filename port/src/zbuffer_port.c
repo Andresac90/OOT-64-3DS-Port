@@ -8,7 +8,7 @@
  *    z, C3D_DepthMap(-1, 0) negates it back), so N64 screen z = depth / 0xFFFFFF * 0x7FC0, matching
  *    z_lights.c's own model (viewport z scale = translate = G_MAXZ / 2, times 32)
  *  - N64 pixel (x, y) -> window (x + 40, y) (4:3 pillarboxed in 400x240), times the supersampling
- *    factor; the portrait buffer's column is mirrored window y, its row is window x
+ *    factor (first subsample); the portrait buffer's column is mirrored window y, its row is window x
  * The result is encoded like the RDP stores z (3-bit exponent, 11-bit mantissa, 2-bit dz) using the
  * inverse of z_kankyo.c's sZBufValConversionTable.
  * Known difference: the N64 only clears z inside the scissor, so letterbox bars keep stale depth;
@@ -55,8 +55,15 @@ uint16_t PortZBuf_Read(int x, int y) {
     }
     sx = h / 400;
     sy = w / 240;
-    u = (w - 1) - (y * sy + sy / 2);
-    v = (x + 40) * sx + sx / 2;
+    /* Subsample choice and alignment measured against ares' gZBuffer over full frames (5 captures,
+     * tools/statediff): the pixel's first x subsample and the window-y subsample just above it agree
+     * best (3.7% of pixels off by >64 z units, vs 4.3% one subsample lower and 8.0% for the last
+     * subsample; the latter flipped a torch glow at an object edge in Gerudo Training Ground). */
+    u = w - (y * sy);
+    if (u > w - 1) {
+        u = w - 1;
+    }
+    v = (x + 40) * sx;
     d = depth[v * w + u] & 0xFFFFFF;
     if (d >= 0xFFFFFF) {
         return N64_Z_FAR;

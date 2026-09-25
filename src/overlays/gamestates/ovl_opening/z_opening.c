@@ -35,6 +35,9 @@ void TitleSetup_SetupTitleScreen(TitleSetupState* this) {
     gSaveContext.save.linkAge = LINK_AGE_CHILD;
     gSaveContext.save.entranceIndex = PORT_START_ENTRANCE;
 #endif
+#ifdef PORT_START_AGE
+    gSaveContext.save.linkAge = PORT_START_AGE; // tools/statediff scene tour: LINK_AGE_ADULT (0) / CHILD (1)
+#endif
     SET_NEXT_GAMESTATE(&this->state, Play_Init, PlayState);
 #else
     gSaveContext.gameMode = GAMEMODE_TITLE_SCREEN;

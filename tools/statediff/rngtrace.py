@@ -36,8 +36,9 @@ class Symbolizer:
         return self.names[i] if i >= 0 else "?%08x" % addr
 
 
-def n64_trace(entrance, frame, script):
-    rom, elf = SD.ref_rom(entrance, script)
+def n64_trace(entrance, frame, script, age=""):
+    rom, elf = SD.ref_rom(entrance, script, tag="%s_%s%s" % (entrance or "default", script, "_age" + age if age else ""),
+                          age=age)
     syms = SD.n64_symbols(elf)
     sizes = {}
     for line in subprocess.run([SD.MIPS_NM, "-S", elf], capture_output=True, text=True).stdout.splitlines():
@@ -100,8 +101,9 @@ def n64_trace(entrance, frame, script):
     return [(k, sym(to_vram(ra))) for k, ra in calls]
 
 
-def ds_trace(entrance, frame, dump_frame, script):
-    j = json.load(open(os.path.join(SD.OUT, "3ds_%s_%s_f%d.json" % (entrance or "default", script, dump_frame))))
+def ds_trace(entrance, frame, dump_frame, script, age_name=""):
+    j = json.load(open(os.path.join(SD.OUT, "3ds_%s_%s%s_f%d.json" % (entrance or "default", script,
+                                                                     "_" + age_name if age_name else "", dump_frame))))
     raw = bytes.fromhex(j["rng_trace"])
     sym = Symbolizer(ARM_NM, os.path.join(SD.REPO, "build/3ds/oot.elf"))
     out, cur, i = [], None, 0
@@ -123,14 +125,16 @@ def main():
     ap.add_argument("--frame", type=int, required=True, help="gameplay frame to trace (the last equal one)")
     ap.add_argument("--dump-frame", type=int, default=100, help="--frame of the statediff capture to use")
     ap.add_argument("--script", default="idle")
+    ap.add_argument("--age", default="", choices=["", "adult", "child"])
     args = ap.parse_args()
     # the 3DS trace symbols come from build/3ds/oot.elf: it must be the comparison build's code layout;
     # statediff rebuilds the normal ROM afterwards, which only differs in the hooked files, so rebuild
     # the comparison build here to symbolize against the exact binary that produced the trace
-    SD.build_3ds(SD.game_extra(args.entrance, args.dump_frame, args.script))
-    ds = ds_trace(args.entrance, args.frame, args.dump_frame, args.script)
+    age = SD.AGE_IDS.get(args.age, "")
+    SD.build_3ds(SD.game_extra(args.entrance, args.dump_frame, args.script, age=age))
+    ds = ds_trace(args.entrance, args.frame, args.dump_frame, args.script, args.age)
     SD.build_3ds("")
-    n64 = n64_trace(args.entrance, args.frame, args.script)
+    n64 = n64_trace(args.entrance, args.frame, args.script, age)
     print("frame %d: %d RNG calls on N64, %d on 3DS" % (args.frame, len(n64), len(ds)))
     i = 0
     while i < min(len(n64), len(ds)) and n64[i] == ds[i]:

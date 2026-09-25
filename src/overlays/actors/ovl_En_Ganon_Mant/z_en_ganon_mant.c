@@ -181,8 +181,18 @@ void EnGanonMant_Tear(EnGanonMant* this) {
     }
 
     for (i = 0; i < 4; i++) {
+#ifdef __3DS__
+        // PORT: C leaves the order of these two calls unspecified. IDO draws the joint index first
+        // (N64 disassembly of EnGanonMant_Tear: 1st Rand_ZeroFloat -> byte offset, 2nd -> strand);
+        // GCC drew the strand first, tearing a different pattern (found by tools/statediff tour).
+        s16 joint = Rand_ZeroFloat(GANON_MANT_NUM_JOINTS - 0.1f);
+        s16 strand = Rand_ZeroFloat(GANON_MANT_NUM_STRANDS - 0.1f);
+
+        this->strands[strand].torn[joint] = true;
+#else
         this->strands[(s16)Rand_ZeroFloat(GANON_MANT_NUM_STRANDS - 0.1f)]
             .torn[(s16)Rand_ZeroFloat(GANON_MANT_NUM_JOINTS - 0.1f)] = true;
+#endif
     }
 }
 

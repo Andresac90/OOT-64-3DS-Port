@@ -797,6 +797,24 @@ static void gfx_citro3d_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size
         return;
     }
 
+    /* Invariant: gfx_pc.c packed buf_vbo_num_tris * 3 vertices of exactly the current shader's
+     * stride. A mismatch means the front end and this backend disagree on the vertex layout; reading
+     * with the wrong stride walks off the buffer (unmapped reads, found by the tools/statediff tour in
+     * the Treasure Chest Shop). Log it once with the details and skip the draw. */
+    if (buf_vbo_len != buf_vbo_num_tris * 3 * (size_t)sVtxUnitSize) {
+        static int sReported;
+        if (sReported < 4) {
+            extern void PortDbgX(const char* label, unsigned val);
+            sReported++;
+            PortDbgX("VTX-STRIDE MISMATCH shader_id", sShaderProgramPool[sCurShader].shader_id);
+            PortDbgX("  cur shader slot", (unsigned)sCurShader);
+            PortDbgX("  pool size", (unsigned)sShaderProgramPoolSize);
+            PortDbgX("  backend stride", (unsigned)sVtxUnitSize);
+            PortDbgX("  buf_vbo_len", (unsigned)buf_vbo_len);
+            PortDbgX("  tris", (unsigned)buf_vbo_num_tris);
+        }
+        return;
+    }
     applyAlphaTest();
     if(sShaderProgramPool[sCurShader].num_inputs >= 2)
     {

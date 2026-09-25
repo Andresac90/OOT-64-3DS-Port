@@ -6,7 +6,22 @@
  * The script (input_script.h, generated from tools/statediff/scripts/<name>.txt by statediff.py)
  * is a list of { firstFrame, buttons, stickX, stickY }; each entry holds until the next one. */
 #include "libu64/pad.h"
+#include "transition.h"
 #include "input_script.h"
+#include "tour_script.h" /* sStateDiffTour[] entrances, STATEDIFF_TOUR_LEN, STATEDIFF_TOUR_FRAMES */
+
+/* Scene tour: after STATEDIFF_TOUR_FRAMES frames in each scene, capture (anchor StateDiff_Captured for
+ * the N64 side, SD-card dump on the 3DS) and jump to the next entrance with an instant transition. */
+s32 gStateDiffCaptureIdx = 0;
+/* Watchdog: gameplay frames since the last capture, across scene reloads (some entrances never settle
+ * into normal play when entered cold, e.g. re-transitioning every frame). After
+ * STATEDIFF_TOUR_FRAMES + 300 frames the capture is forced (same rule on both sides) and recorded in
+ * gStateDiffForcedMask so the report can flag it. */
+s32 gStateDiffFramesSinceCapture = 0;
+u32 gStateDiffForcedMask[4] = { 0, 0, 0, 0 };
+
+void StateDiff_Captured(PlayState* play) {
+}
 
 static OSContPad sStateDiffPrevPad;
 
@@ -45,4 +60,24 @@ static void StateDiff_InjectInput(PlayState* play) {
     sStateDiffPrevPad = input->cur;
     osWritebackDCacheAll();
     StateDiff_Sync(play);
+
+    gStateDiffFramesSinceCapture++;
+    if ((STATEDIFF_TOUR_LEN > 0) && (gStateDiffCaptureIdx < STATEDIFF_TOUR_LEN) &&
+        ((((s32)play->gameplayFrames == STATEDIFF_TOUR_FRAMES) && (play->transitionTrigger == TRANS_TRIGGER_OFF)) ||
+         (gStateDiffFramesSinceCapture >= STATEDIFF_TOUR_FRAMES + 300))) {
+        if (gStateDiffFramesSinceCapture >= STATEDIFF_TOUR_FRAMES + 300) {
+            gStateDiffForcedMask[gStateDiffCaptureIdx >> 5] |= 1u << (gStateDiffCaptureIdx & 31);
+        }
+        gStateDiffFramesSinceCapture = 0;
+        StateDiff_Captured(play);
+#ifdef __3DS__
+        StateDiff_PortDump(play, gStateDiffCaptureIdx);
+#endif
+        gStateDiffCaptureIdx++;
+        if (gStateDiffCaptureIdx < STATEDIFF_TOUR_LEN) {
+            play->nextEntranceIndex = sStateDiffTour[gStateDiffCaptureIdx];
+            play->transitionTrigger = TRANS_TRIGGER_START;
+            play->transitionType = TRANS_TYPE_INSTANT;
+        }
+    }
 }
