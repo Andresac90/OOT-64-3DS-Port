@@ -117,6 +117,7 @@ def capture_n64(layout, entrance, frame):
                 a = struct.unpack(">I", head[off_next:off_next + 4])[0]
         blobs["actors"] = actors
         blobs["rng_frames"] = rng_frames
+        blobs["zbuf"] = g.read_mem(syms["gZBuffer"], 320 * 240 * 2)  # N64 z-buffer (RDP-rendered)
     finally:
         g.detach()
         sh("pkill -9 -f MacOS/ares")
@@ -140,7 +141,7 @@ def build_3ds(game_extra):
 def capture_3ds(layout, entrance, frame):
     extra = "-DPORT_STATEDUMP=%d" % frame + (" -DPORT_START_ENTRANCE=%s" % entrance if entrance else "")
     build_3ds(extra)
-    for f in ("sd_play.bin", "sd_save.bin", "sd_actors.bin", "sd_rng.bin", "boot.log"):
+    for f in ("sd_play.bin", "sd_save.bin", "sd_actors.bin", "sd_rng.bin", "sd_depth.bin", "boot.log"):
         if os.path.exists(os.path.join(SD, f)):
             os.remove(os.path.join(SD, f))
     sh("pkill -9 -f MacOS/azahar")
@@ -169,6 +170,8 @@ def capture_3ds(layout, entrance, frame):
     blobs["actors"] = actors
     rng_path = os.path.join(SD, "sd_rng.bin")
     blobs["rng_trace"] = open(rng_path, "rb").read() if os.path.exists(rng_path) else b""
+    depth_path = os.path.join(SD, "sd_depth.bin")
+    blobs["depth"] = open(depth_path, "rb").read() if os.path.exists(depth_path) else b""
     build_3ds("")  # leave the normal ROM in build/3ds
     return blobs
 
@@ -249,6 +252,10 @@ def fmt(v):
     return "%.4g" % v if isinstance(v, float) else (hex(v) if isinstance(v, int) and abs(v) > 9 else str(v))
 
 
+def read_opt(path):
+    return open(path, "rb").read() if os.path.exists(path) else b""
+
+
 def rng_frames_3ds(trace):
     frames, i = {}, 0
     while i + 16 <= len(trace):
@@ -296,12 +303,17 @@ def main():
                        "actors": [[c, d.hex()] for c, d in blobs["actors"]],
                        "rng_frames": blobs.get("rng_frames", {}),
                        "rng_trace": blobs.get("rng_trace", b"").hex()}, open(p, "w"))
+            for key in ("zbuf", "depth"):  # large raw buffers live next to the json
+                if blobs.get(key):
+                    open(p.replace(".json", "_%s.bin" % key), "wb").write(blobs[key])
             return blobs
         j = json.load(open(p))
         return {"play": bytes.fromhex(j["play"]), "save": bytes.fromhex(j["save"]),
                 "actors": [(c, bytes.fromhex(d)) for c, d in j["actors"]],
                 "rng_frames": {int(k): v for k, v in j.get("rng_frames", {}).items()},
-                "rng_trace": bytes.fromhex(j.get("rng_trace", ""))}
+                "rng_trace": bytes.fromhex(j.get("rng_trace", "")),
+                "zbuf": read_opt(p.replace(".json", "_zbuf.bin")),
+                "depth": read_opt(p.replace(".json", "_depth.bin"))}
 
     n64 = cache("n64") if args.skip_n64 else cache("n64", capture_n64(layout, args.entrance, args.frame))
     ds = cache("3ds") if args.skip_3ds else cache("3ds", capture_3ds(layout, args.entrance, args.frame))

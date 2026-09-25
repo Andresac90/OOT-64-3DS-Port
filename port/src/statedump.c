@@ -5,6 +5,7 @@
  *   sdmc:/3ds/oot/sd_save.bin    SaveContext
  *   sdmc:/3ds/oot/sd_actors.bin  per actor: u32 category, u32 size, then the whole instance
  *   sdmc:/3ds/oot/sd_rng.bin     RNG trace (see PortRngTrace below)
+ *   sdmc:/3ds/oot/sd_depth.bin   u32 width, u32 height, then the previous frame's D24S8 depth (linear)
  * tools/statediff/statediff.py reads the same structs from ares (N64) and diffs field by field. */
 #include <stdio.h>
 #include <stdint.h>
@@ -20,8 +21,21 @@ static void write_file(const char* path, const void* data, unsigned size) {
 }
 
 void PortStateDump_Begin(const void* play, unsigned playSize, const void* save, unsigned saveSize) {
+    extern const uint32_t* Port3ds_GetDepth(int* width, int* height);
+    int w, h;
+    const uint32_t* depth = Port3ds_GetDepth(&w, &h);
+
     write_file("sdmc:/3ds/oot/sd_play.bin", play, playSize);
     write_file("sdmc:/3ds/oot/sd_save.bin", save, saveSize);
+    if (depth != NULL) { /* previous frame's depth buffer, linear, as read back by gfx_3ds.c */
+        FILE* f = fopen("sdmc:/3ds/oot/sd_depth.bin", "wb");
+        if (f != NULL) {
+            uint32_t hdr[2] = { (uint32_t)w, (uint32_t)h };
+            fwrite(hdr, 1, sizeof(hdr), f);
+            fwrite(depth, 4, (size_t)w * h, f);
+            fclose(f);
+        }
+    }
     sActors = fopen("sdmc:/3ds/oot/sd_actors.bin", "wb");
 }
 
@@ -50,6 +64,8 @@ void PortRngTrace(uint32_t kind, const void* caller) {
 }
 
 void PortRngTrace_Frame(uint32_t frame, uint32_t state) {
+    extern void Port3ds_RequestDepth(void);
+    Port3ds_RequestDepth(); /* keep the depth readback running so sd_depth.bin can be written */
     sRngFrames = 1;
     if (sRngCount + 2 <= RNG_TRACE_MAX) {
         sRngTrace[sRngCount][0] = 0;

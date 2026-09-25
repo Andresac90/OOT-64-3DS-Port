@@ -346,9 +346,20 @@ void Lights_GlowCheck(PlayState* play) {
                 // The multiplication by 32 follows from how the RSP microcode computes the screen z value.
                 wZ = (s32)((multDest.z * cappedInvWDest) * ((G_MAXZ / 2) * 32)) + ((G_MAXZ / 2) * 32);
                 // Obtain the z-buffer value for the screen pixel corresponding to the center of the glow.
+#ifdef __3DS__
+                {
+                    // PORT: gZBuffer is never rendered to; sample the 3DS depth buffer in N64 format
+                    extern u16 PortZBuf_Read(s32 x, s32 y);
+
+                    zBuf = PortZBuf_Read((s32)((wX * (SCREEN_WIDTH / 2)) + (SCREEN_WIDTH / 2)),
+                                         (s32)((wY * -(SCREEN_HEIGHT / 2)) + (SCREEN_HEIGHT / 2)))
+                           << 2;
+                }
+#else
                 zBuf = gZBuffer[(s32)((wY * -(SCREEN_HEIGHT / 2)) + (SCREEN_HEIGHT / 2))]
                                [(s32)((wX * (SCREEN_WIDTH / 2)) + (SCREEN_WIDTH / 2))]
                        << 2;
+#endif
                 if (1) {}
                 if (1) {}
 

@@ -273,7 +273,13 @@ s32 Environment_ZBufValToFixedPoint(s32 zBufferVal) {
 }
 
 u16 Environment_GetPixelDepth(s32 x, s32 y) {
+#ifdef __3DS__
+    // PORT: gZBuffer is never rendered to; sample the 3DS depth buffer in N64 format
+    extern u16 PortZBuf_Read(s32 x, s32 y);
+    s32 pixelDepth = PortZBuf_Read(x, y);
+#else
     s32 pixelDepth = gZBuffer[y][x];
+#endif
 
     return pixelDepth;
 }

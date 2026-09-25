@@ -133,8 +133,53 @@ static void gfx_3ds_handle_events(void)
     
 }
 
+/* Depth readback for the game's CPU reads of the N64 z-buffer (point-light glows in z_lights.c, the
+ * sun's lens-flare test in z_kankyo.c). Before the target is cleared for the next frame, the finished
+ * frame's D24S8 depth buffer is copied (GPU display transfer, detiled) into linear memory; the copy
+ * only runs while the game has asked for depth recently. port/src/zbuffer_port.c converts samples to
+ * N64 z-buffer words. */
+static u32* sDepthLinear;
+static int sDepthWantFrames;
+static bool sDepthValid;
+
+void Port3ds_RequestDepth(void) {
+    sDepthWantFrames = 60;
+}
+
+const u32* Port3ds_GetDepth(int* width, int* height) {
+    *width = sTarget->frameBuf.width;
+    *height = sTarget->frameBuf.height;
+    return sDepthValid ? sDepthLinear : NULL;
+}
+
+static void gfx_3ds_read_back_depth(void) {
+    size_t size = (size_t)sTarget->frameBuf.width * sTarget->frameBuf.height * 4;
+
+    if (sDepthWantFrames <= 0) {
+        sDepthValid = false;
+        return;
+    }
+    sDepthWantFrames--;
+    if (sDepthLinear == NULL) {
+        sDepthLinear = linearAlloc(size);
+        if (sDepthLinear == NULL) {
+            return;
+        }
+    }
+    C3D_SyncDisplayTransfer((u32*)sTarget->frameBuf.depthBuf,
+                            GX_BUFFER_DIM(sTarget->frameBuf.width, sTarget->frameBuf.height), sDepthLinear,
+                            GX_BUFFER_DIM(sTarget->frameBuf.width, sTarget->frameBuf.height),
+                            GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
+                                GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+                                GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+                                GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+    GSPGPU_InvalidateDataCache(sDepthLinear, size);
+    sDepthValid = true;
+}
+
 static bool gfx_3ds_start_frame(void)
 {
+    gfx_3ds_read_back_depth();
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
     C3D_RenderTargetClear(sTarget, C3D_CLEAR_ALL, 0x000000FF, 0xFFFFFFFF);
 	C3D_FrameDrawOn(sTarget);
