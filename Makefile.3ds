@@ -114,7 +114,7 @@ PORT_GAME_SRCS := \
 
 # PORT platform backends compile in the DEVKIT world.
 DEVKIT_SRCS := \
-  port/src/3ds_main.c port/src/3ds_compat.c port/src/audio_3ds.c port/src/jpeg_port.c \
+  port/src/3ds_main.c port/src/3ds_compat.c port/src/audio_3ds.c port/src/jpeg_port.c port/src/statedump.c \
   port/src/gfx/gfx_pc.c port/src/gfx3ds/gfx_3ds.c port/src/gfx3ds/gfx_citro3d.c
 
 # native little-endian assets (generated; from port/asset_srcs.mk -> $(ASSET_SRCS))

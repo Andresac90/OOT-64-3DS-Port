@@ -351,7 +351,7 @@ extern void PortDbgX(const char* str, unsigned val);
 void Actor_ProcessInitChain(struct Actor* actor, InitChainEntry* ichain) {
 #ifdef __3DS__
     /* Keep the runaway guard (a corrupt chain with a stuck cont bit would hang),
-     * but silently — the per-init IChain trace was heavy per-frame console spam. */
+     * but silently - the per-init IChain trace was heavy per-frame console spam. */
     { int _i = 0;
       do {
           sInitChainHandlers[ichain->type]((u8*)actor, ichain);

@@ -472,7 +472,11 @@ void Play_Init(GameState* thisx) {
     gTransitionTileState = TRANS_TILE_OFF;
     this->transitionMode = TRANS_MODE_OFF;
     FrameAdvance_Init(&this->frameAdvCtx);
+#ifdef PORT_STATEDUMP
+    Rand_Seed(0x5EED0000); // PORT: tools/statediff - same fixed seed as the reference ROM
+#else
     Rand_Seed((u32)osGetTime());
+#endif
     Matrix_Init(&this->state);
     this->state.main = Play_Main;
     this->state.destroy = Play_Destroy;
@@ -573,6 +577,25 @@ void Play_Update(PlayState* this) {
     Input* input = this->state.input;
     s32 isPaused;
     s32 pad1;
+
+#if defined(__3DS__) && defined(PORT_STATEDUMP)
+    // PORT: tools/statediff hook - dump raw state at the start of gameplay frame PORT_STATEDUMP
+    if (this->gameplayFrames == PORT_STATEDUMP) {
+        extern void PortStateDump_Begin(const void* play, unsigned playSize, const void* save, unsigned saveSize);
+        extern void PortStateDump_Actor(unsigned category, const void* actor, unsigned size);
+        extern void PortStateDump_End(void);
+        s32 cat;
+        Actor* actor;
+
+        PortStateDump_Begin(this, sizeof(PlayState), &gSaveContext, sizeof(SaveContext));
+        for (cat = 0; cat < ACTORCAT_MAX; cat++) {
+            for (actor = this->actorCtx.actorLists[cat].head; actor != NULL; actor = actor->next) {
+                PortStateDump_Actor(cat, actor, sizeof(Actor));
+            }
+        }
+        PortStateDump_End();
+    }
+#endif
 
 #if DEBUG_FEATURES
     if ((SREG(1) < 0) || (DREG(0) != 0)) {

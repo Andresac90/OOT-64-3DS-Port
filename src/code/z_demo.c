@@ -1830,7 +1830,7 @@ void CutsceneCmd_Text(PlayState* play, CutsceneContext* csCtx, CsCmdText* cmd) {
 /* --- PORT: cutscene packed-field byte-order normalization -------------------------
  * OoT cutscene scripts are authored as packed BIG-ENDIAN words (CMD_BBH/CMD_HH/CMD_HBB
  * in cutscene_commands.h). On this little-endian port the packed u32 VALUE is correct but
- * its sub-fields land byte-reversed vs the C struct overlays in cutscene.h — so every
+ * its sub-fields land byte-reversed vs the C struct overlays in cutscene.h - so every
  * packed field (continueFlag, cameraRoll, nextPointFrame, pos.x/y/z, ids, start/endFrame,
  * rotations, hour/min, rumble params, ...) reads wrong. Full-word fields (CMD_W: header,
  * cmdType, cmdEntries, actor-cue Vec3i positions; CMD_F: viewAngle, unused floats) are

@@ -3169,7 +3169,7 @@ void Message_DrawMain(PlayState* play, Gfx** p) {
 #ifdef __3DS__
                 /* PORT bring-up: AudioOcarina_Update() lives inside the stubbed
                  * Audio_Update(), so the playing staff never leaves its Start()
-                 * value (state==0xFE, pos==0) — no note or song can ever be
+                 * value (state==0xFE, pos==0) - no note or song can ever be
                  * recognized and this state can only exit via B. Make the
                  * ocarina a graceful no-op until real audio (M3) lands. */
                 AudioOcarina_SetInstrument(OCARINA_INSTRUMENT_OFF);
@@ -3591,7 +3591,7 @@ void Message_DrawMain(PlayState* play, Gfx** p) {
                 msgCtx->ocarinaStaff = AudioOcarina_GetPlaybackStaff();
 #ifdef __3DS__
                 /* PORT bring-up: playback staff state only returns to 0 when the
-                 * (stubbed) audio engine finishes playing the demo — force
+                 * (stubbed) audio engine finishes playing the demo - force
                  * "finished" so learning/being-shown a song can't hang. */
                 msgCtx->ocarinaStaff->state = 0;
 #endif
@@ -3624,10 +3624,10 @@ void Message_DrawMain(PlayState* play, Gfx** p) {
                 msgCtx->ocarinaStaff = AudioOcarina_GetPlayingStaff();
 #ifdef __3DS__
                 /* PORT bring-up: with audio stubbed the playing staff is frozen at
-                 * state 0xFE — neither the success (< MEMORY_GAME) nor the fail
+                 * state 0xFE - neither the success (< MEMORY_GAME) nor the fail
                  * (== 0xFF) branch can ever fire and this state has NO manual
                  * exit. This is the "talk to Navi and freeze" lock: Navi's
-                 * "play Saria's Song" prompt routes here. Force the fail branch —
+                 * "play Saria's Song" prompt routes here. Force the fail branch -
                  * its timer-driven exit resumes the conversation gracefully. */
                 msgCtx->ocarinaStaff->state = 0xFF;
 #endif

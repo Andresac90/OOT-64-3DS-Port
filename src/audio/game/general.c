@@ -3178,11 +3178,11 @@ void Audio_PortEnsureNullChannels(void) {
 
 /**
  * PORT bring-up: AudioLoad_Init never runs, so the gAudioCtx table POINTERS stay
- * NULL while game code reads them directly — e.g. grabbing an item plays the
+ * NULL while game code reads them directly - e.g. grabbing an item plays the
  * item-get fanfare: Audio_PlayFanfare -> AudioLoad_GetFontsForSequence ->
  * gAudioCtx.sequenceFontTable[seqId] -> NULL deref crash. The tables themselves
  * are native C data already linked into the build (src/audio/tables/*.c +
- * src_gen/sequence_font_table_data.c), so point at them once at boot — mirrors
+ * src_gen/sequence_font_table_data.c), so point at them once at boot - mirrors
  * AudioLoad_Init load.c:1372-1377 (pointer assignments only; no
  * AudioLoad_InitTable, which mutates entries and belongs to real init/M3b).
  * Called from 3ds_main.c. Remove when real AudioLoad_Init runs (M3b).

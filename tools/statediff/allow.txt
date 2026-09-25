@@ -1,0 +1,11 @@
+# statediff allow-list: differences that were reviewed and are expected port behavior.
+# One Python regex per line (matched against the reported path), then " # reason". Keep reasons honest.
+\.dmaRequest\.notifyQueue$            # port DMA is synchronous: requests never get a notify queue
+\.loadQueue\.(mtqueue|fullqueue)$     # same: object/room load queues are never waited on
+^play\.animTaskQueue\.tasks\[\d+\]\.data  # Link anim frames are memcpy'd from native data (z_skelanime.c __3DS__), no DMA request
+^play\.msgCtx\.font\.(msgOffset|msgLength)$  # z_kanfont.c reads message 0xFFFC in place; overwritten when a real message loads
+^play\.msgCtx\.font\.anon \[UNION views agree: msgBufWide  # text stored as native u16 words (read as u16 on both)
+\.(view|interfaceCtx\.view|msgCtx\.view)\.(vp|projection|viewing) \[UNION views agree: (vp|m)\b  # Vp/Mtx read through their typed view only
+^play\.envCtx\.dirLight[12]\.params \[UNION views agree: dir  # directional light: s8 dir view is the one in use
+^play\.transitionCtx\.instanceData \[UNION views agree: fade  # fade instance: the active transition's view agrees
+^play\.mainCamera\.paramData \[UNION views agree: [^|]*\b(norm1|fixd3)\b  # per-camera-function param union: the active function's view agrees (Normal1 in Hyrule Field, Fixed3 in shops); other views reinterpret the same bytes

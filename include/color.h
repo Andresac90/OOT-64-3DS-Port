@@ -14,7 +14,13 @@ typedef struct Color_RGBA8 {
 // only use when necessary for alignment purposes
 typedef union Color_RGBA8_u32 {
     struct {
+#ifdef __3DS__
+        // PORT: the game writes .rgba (0xRRGGBBAA) and reads .r/.g/.b/.a, and vice versa; on
+        // little-endian the u32's low byte comes first, so the byte fields are declared reversed
+        u8 a, b, g, r;
+#else
         u8 r, g, b, a;
+#endif
     };
     u32 rgba;
 } Color_RGBA8_u32;

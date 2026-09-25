@@ -29,7 +29,7 @@
 /* Address conversion macros */
 #ifdef __3DS__
 /* 3DS: host RAM lives at physical-equivalent addresses BELOW 0x10000000 (binary
- * .data, arena, gfx pools) — there is no emulated RDRAM mapped at 0x80000000.
+ * .data, arena, gfx pools) - there is no emulated RDRAM mapped at 0x80000000.
  * So anything that isn't a KSEG0/KSEG1 address (>= 0x80000000) is already a
  * usable host pointer; never add 0x80000000. (KSEG addresses still strip down.)
  * N64/GC/iQue builds MUST keep the stock macros so the ROM byte-matches. */

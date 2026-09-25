@@ -530,6 +530,13 @@ void Graph_ThreadEntry(void* arg0) {
         PRINTF(T("クラスサイズ＝%dバイト\n", "Class size = %d bytes\n"), size);
 
         gameState = SYSTEM_ARENA_MALLOC(size, "../graph.c", 1196);
+#ifdef PORT_STATEDUMP
+        // PORT: tools/statediff - start each gamestate from zeroed memory (the reference ROM does the
+        // same) so fields the game never writes compare equal instead of showing leftover bytes
+        if (gameState != NULL) {
+            bzero(gameState, size);
+        }
+#endif
 
         if (gameState == NULL) {
 #if DEBUG_FEATURES
