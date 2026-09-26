@@ -8,7 +8,7 @@ A scene that hangs or crashes shows up as the capture index where one side stops
 
 usage: tour.py [--age adult|child] [--frames 40] [--scenes SCENE_A,SCENE_B] [--skip-n64] [--skip-3ds]
 """
-import argparse, glob, json, os, re, struct, subprocess, sys, time
+import argparse, glob, json, os, re, shutil, struct, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -162,16 +162,17 @@ def capture_3ds(tour, age):
         gp = os.path.join(TOUR_SD, "sd_glob_%d.bin" % i)
         caps[i] = {"play": open(paths[0], "rb").read(), "save": open(paths[1], "rb").read(), "actors": actors,
                    "glob": open(gp, "rb").read() if os.path.exists(gp) else b""}
-        for k in ("depth", "color0", "color1"):
+        for k in ("depth", "color0", "color1", "depthst0", "depthst1", "draws0", "draws1"):
             dp = os.path.join(TOUR_SD, "sd_%s_%d.bin" % (k, i))
             caps[i][k] = open(dp, "rb").read() if os.path.exists(dp) else b""
+    shutil.copy(os.path.join(SD.REPO, "build/3ds/oot.elf"), os.path.join(SD.OUT, "3ds_tour.elf"))  # addresses in dumps
     SD.build_3ds("")
     return caps
 
 
 def save_caps(path, caps):
     for i, c in caps.items():  # depth buffers next to the json (large, raw)
-        for k in ("zbuf", "depth", "fbdisp", "fb0", "fb1", "color0", "color1"):
+        for k in ("zbuf", "depth", "fbdisp", "fb0", "fb1", "color0", "color1", "depthst0", "depthst1", "draws0", "draws1"):
             if c.get(k):
                 open(path.replace(".json", "_%s_%d.bin" % (k, i)), "wb").write(c[k])
     json.dump({str(i): {"play": c["play"].hex(), "save": c["save"].hex(), "forced": c.get("forced", False),
@@ -182,7 +183,7 @@ def save_caps(path, caps):
 def load_caps(path):
     caps = _load_caps(path)
     for i, c in caps.items():
-        for k in ("zbuf", "depth", "fbdisp", "fb0", "fb1", "color0", "color1"):
+        for k in ("zbuf", "depth", "fbdisp", "fb0", "fb1", "color0", "color1", "depthst0", "depthst1", "draws0", "draws1"):
             f = path.replace(".json", "_%s_%d.bin" % (k, i))
             c[k] = open(f, "rb").read() if os.path.exists(f) else b""
     return caps

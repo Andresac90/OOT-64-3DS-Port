@@ -26,6 +26,18 @@ MIPS_NM = "/opt/homebrew/bin/mips-linux-gnu-nm"
 ACTORCAT_MAX = 12
 AGE_IDS = {"adult": "0", "child": "1"}  # LINK_AGE_ADULT / LINK_AGE_CHILD
 # Game globals outside PlayState/SaveContext (name, size, kind): same order as sGlobPtrs in z_play.c
+REG_GROUP_NAMES = ["REG", "SREG", "OREG", "PREG", "QREG", "MREG", "YREG", "DREG", "UREG", "IREG", "ZREG", "CREG",
+                   "NREG", "KREG", "XREG", "cREG", "sREG", "iREG", "WREG", "AREG", "VREG", "HREG", "GREG", "mREG",
+                   "nREG", "BREG", "dREG", "kREG", "bREG"]  # include/regs.h group order
+REG_COUNT = 29 * 96
+
+
+def read_regs(g, syms):
+    """gRegEditor->data (RegEditor: 5 s32 then s16 data[29 * 96]), appended to the globals blob"""
+    ptr = struct.unpack(">I", g.read_mem(syms["gRegEditor"], 4))[0]
+    return g.read_mem(ptr + 0x14, REG_COUNT * 2)
+
+
 GLOBALS = [("gWeatherMode", 1, "u"), ("gSkyboxIsChanging", 1, "u"), ("gLightConfigAfterUnderwater", 1, "u"),
            ("gInterruptSongOfStorms", 1, "u"), ("gTimeSpeed", 2, "u")]
 
@@ -166,7 +178,7 @@ def read_n64_state(g, syms, layout, play):
     if True:
         blobs = {"play": g.read_mem(play, layout["PlayState"]["size"]),
                  "save": g.read_mem(syms["gSaveContext"], layout["SaveContext"]["size"]),
-                 "glob": b"".join(g.read_mem(syms[n], sz) for n, sz, _ in GLOBALS)}
+                 "glob": b"".join(g.read_mem(syms[n], sz) for n, sz, _ in GLOBALS) + read_regs(g, syms)}
         lists = field_off(layout, "PlayState", "actorCtx.actorLists[0].head")
         stride = field_off(layout, "PlayState", "actorCtx.actorLists[1].head") - lists
         off_next = field_off(layout, "Actor", "next")
@@ -511,6 +523,12 @@ def compare(n64, ds, layout, actor_layouts, pads=False, show_all=False):
             if a != b:
                 out.append(("global." + name, a, b))
             o += sz
+        if len(n64["glob"]) >= o + REG_COUNT * 2 and len(ds["glob"]) >= o + REG_COUNT * 2:
+            ra = struct.unpack(">%dh" % REG_COUNT, n64["glob"][o:o + REG_COUNT * 2])
+            rb = struct.unpack("<%dh" % REG_COUNT, ds["glob"][o:o + REG_COUNT * 2])
+            for k in range(REG_COUNT):
+                if ra[k] != rb[k]:
+                    out.append(("reg.%s(%d)" % (REG_GROUP_NAMES[k // 96], k % 96), ra[k], rb[k]))
     out = drop_verified_camera_unions(out, layout, n64["play"], ds["play"])
     # transitionCtx.instanceData is only live while a transition runs (transitionType >= 0); an
     # inactive one holds the previous transition's leftovers, re-initialized when the next starts

@@ -137,9 +137,11 @@ static void gfx_3ds_handle_events(void)
  * sun's lens-flare test in z_kankyo.c). When a frame's render completes, its D24S8 depth buffer is copied (GPU display transfer, detiled) into linear memory; the copy
  * only runs while the game has asked for depth recently. port/src/zbuffer_port.c converts samples to
  * N64 z-buffer words. */
-static u32* sDepthLinear;
+static u32* sDepthLinear[2]; /* same slot convention as the color readback below */
+static int sDepthSlot = -1;   /* slot of the most recent depth readback */
 static int sDepthWantFrames;
 static bool sDepthValid;
+static int sFrameSlot;        /* slot this frame's readbacks go to (alternates each frame) */
 
 void Port3ds_RequestDepth(void) {
     sDepthWantFrames = 60;
@@ -148,7 +150,17 @@ void Port3ds_RequestDepth(void) {
 const u32* Port3ds_GetDepth(int* width, int* height) {
     *width = sTarget->frameBuf.width;
     *height = sTarget->frameBuf.height;
-    return sDepthValid ? sDepthLinear : NULL;
+    return (sDepthValid && sDepthSlot >= 0) ? sDepthLinear[sDepthSlot] : NULL;
+}
+
+/* back = 0: most recent frame, 1: the one before (tools/statediff dumps both with the colors) */
+const u32* Port3ds_GetDepthSlot(int back, int* width, int* height) {
+    *width = sTarget->frameBuf.width;
+    *height = sTarget->frameBuf.height;
+    if (sDepthSlot < 0) {
+        return NULL;
+    }
+    return sDepthLinear[back ? (sDepthSlot ^ 1) : sDepthSlot];
 }
 
 static void gfx_3ds_read_back_depth(void) {
@@ -159,20 +171,21 @@ static void gfx_3ds_read_back_depth(void) {
         return;
     }
     sDepthWantFrames--;
-    if (sDepthLinear == NULL) {
-        sDepthLinear = linearAlloc(size);
-        if (sDepthLinear == NULL) {
+    if (sDepthLinear[sFrameSlot] == NULL) {
+        sDepthLinear[sFrameSlot] = linearAlloc(size);
+        if (sDepthLinear[sFrameSlot] == NULL) {
             return;
         }
     }
     C3D_SyncDisplayTransfer((u32*)sTarget->frameBuf.depthBuf,
-                            GX_BUFFER_DIM(sTarget->frameBuf.width, sTarget->frameBuf.height), sDepthLinear,
+                            GX_BUFFER_DIM(sTarget->frameBuf.width, sTarget->frameBuf.height), sDepthLinear[sFrameSlot],
                             GX_BUFFER_DIM(sTarget->frameBuf.width, sTarget->frameBuf.height),
                             GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
                                 GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
                                 GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
                                 GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
-    GSPGPU_InvalidateDataCache(sDepthLinear, size);
+    GSPGPU_InvalidateDataCache(sDepthLinear[sFrameSlot], size);
+    sDepthSlot = sFrameSlot;
     sDepthValid = true;
 }
 
@@ -185,6 +198,14 @@ static int sColorLatest = -1; /* slot holding the most recently finished frame *
 
 void Port3ds_RequestColor(void) {
     sColorWantFrames = 60;
+}
+
+int Port3ds_DrawIdActive(void) {
+    return sColorWantFrames > 0;
+}
+
+int Port3ds_ColorLatestSlot(void) {
+    return sColorLatest;
 }
 
 /* back = 0: most recently finished frame; back = 1: the one before */
@@ -207,7 +228,7 @@ static void gfx_3ds_read_back_color(void) {
         return;
     }
     sColorWantFrames--;
-    slot = (sColorLatest < 0) ? 0 : (sColorLatest ^ 1);
+    slot = sFrameSlot;
     if (sColorLinear[slot] == NULL) {
         sColorLinear[slot] = linearAlloc(size);
         if (sColorLinear[slot] == NULL) {
@@ -243,6 +264,7 @@ static void gfx_3ds_swap_buffers_begin(void)
      * Navi's glow in the adult Water Temple flipped.) */
     gfx_3ds_read_back_depth();
     gfx_3ds_read_back_color();
+    sFrameSlot ^= 1; /* next frame's readbacks go to the other slot */
     /* PORT (2026-09-24): no vblank wait here -- Port3ds_PaceFrame (3ds_main.c) paces updates to the
      * game's R_UPDATE_RATE retraces and pumps audio per retrace. */
 }

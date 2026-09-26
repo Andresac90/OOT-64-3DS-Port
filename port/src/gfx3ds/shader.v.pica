@@ -12,12 +12,13 @@
 .alias inpos v0
 .alias intex v1
 .alias inclr v2
+.alias intex1 v3
 
 .proc main
 	mov outpos, inpos
 
     mov outtc0, intex
-    mov outtc1, intex
+    mov outtc1, intex1
 
 	mov outclr, inclr
 

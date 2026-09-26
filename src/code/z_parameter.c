@@ -2167,7 +2167,22 @@ void Interface_LoadActionLabel(InterfaceContext* interfaceCtx, u16 action, s16 l
         osRecvMesg(&interfaceCtx->loadQueue, NULL, OS_MESG_BLOCK);
     } else {
         gSegments[7] = OS_K0_TO_PHYSICAL(interfaceCtx->doActionSegment);
+#ifdef __3DS__
+        {
+            // PORT: sDoActionTextures are segment-7 addresses on the N64 (0x07000000 + n * DO_ACTION_TEX_SIZE),
+            // but natively-linked asset symbols here, so SEGMENTED_TO_VIRTUAL returned the static
+            // do_action_static data itself: the label stayed on screen ("Attack" on an idle A button,
+            // tools/statediff fbdiff) and the ROM image was zeroed. Clear the loaded slot instead.
+            extern void gfx_texture_cache_invalidate_range(const void* start, u32 size);
+            u8* slot = (u8*)interfaceCtx->doActionSegment + loadOffset * DO_ACTION_TEX_SIZE;
+
+            func_80086D5C((s32*)slot, DO_ACTION_TEX_SIZE / 4);
+            gfx_texture_cache_invalidate_range(slot, DO_ACTION_TEX_SIZE);
+            (void)sDoActionTextures;
+        }
+#else
         func_80086D5C(SEGMENTED_TO_VIRTUAL(sDoActionTextures[loadOffset]), DO_ACTION_TEX_SIZE / 4);
+#endif
     }
 }
 

@@ -51,7 +51,19 @@ void PortStateDump_Begin(int index, const void* play, unsigned playSize, const v
             int cw, ch;
             const uint32_t* color = Port3ds_GetColor(back, &cw, &ch);
             if (color != NULL) {
-                FILE* f = fopen(dump_path(back ? "color1" : "color0"), "wb");
+                extern void PortGfx_WriteDrawLog(int back, const char* path);
+                extern const uint32_t* Port3ds_GetDepthSlot(int back, int* width, int* height);
+                int dw, dh;
+                const uint32_t* dslot = Port3ds_GetDepthSlot(back, &dw, &dh);
+                FILE* f;
+                PortGfx_WriteDrawLog(back, dump_path(back ? "draws1" : "draws0")); /* .bin name, text content */
+                if (dslot != NULL && (f = fopen(dump_path(back ? "depthst1" : "depthst0"), "wb")) != NULL) {
+                    uint32_t dh2[2] = { (uint32_t)dw, (uint32_t)dh };
+                    fwrite(dh2, 1, sizeof(dh2), f);
+                    fwrite(dslot, 4, (size_t)dw * dh, f);
+                    fclose(f);
+                }
+                f = fopen(dump_path(back ? "color1" : "color0"), "wb");
                 if (f != NULL) {
                     uint32_t hdr[2] = { (uint32_t)cw, (uint32_t)ch };
                     fwrite(hdr, 1, sizeof(hdr), f);
@@ -74,7 +86,7 @@ void PortStateDump_Begin(int index, const void* play, unsigned playSize, const v
 }
 
 /* game globals: concatenated raw values, sizes as given (see statediff.py GLOBALS) */
-void PortStateDump_Globals(const void* const* ptrs, const uint8_t* sizes, int count) {
+void PortStateDump_Globals(const void* const* ptrs, const uint16_t* sizes, int count) {
     FILE* f = fopen(dump_path("glob"), "wb");
     int i;
     if (f != NULL) {

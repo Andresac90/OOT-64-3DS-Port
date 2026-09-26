@@ -56,6 +56,55 @@ def score(a, b):
     return err / len(a), 100.0 * bad / len(a)
 
 
+def attribute(cap, color_key, nv, dv, top, by_err=False):
+    """Which draws produced the wrong pixels: the stencil of the same frame slot holds, per pixel, the
+    id of the last draw that passed the depth test (gfx_citro3d.c applyDrawId); the draw log gives its
+    GBI state. Draws are ranked by wrongly drawn pixels."""
+    slot = color_key[-1]
+    st, log = cap.get("depthst" + slot), cap.get("draws" + slot)
+    if not st or not log:
+        return
+    W, H = struct.unpack("<II", st[:8])
+    words = struct.unpack("<%dI" % (W * H), st[8:8 + W * H * 4])
+    sx, sy = H // 400, W // 240
+    draws = {}
+    for line in log.decode(errors="ignore").splitlines():
+        if line.startswith("#") or not line.strip():
+            continue
+        f = line.split()
+        draws[int(f[0])] = f  # ids repeat mod 254 in huge frames: the last one wins
+    bad, total, sums, errs = {}, {}, {}, {}
+    for y in range(240):
+        for x in range(320):
+            sid = words[((x + 40) * sx) * W + min(W - 1, W - y * sy)] >> 24
+            p, q = nv[y * 320 + x], dv[y * 320 + x]
+            e = max(abs(p[0] - q[0]), abs(p[1] - q[1]), abs(p[2] - q[2]))
+            total[sid] = total.get(sid, 0) + 1
+            errs[sid] = errs.get(sid, 0) + e
+            if e > 48 or by_err:
+                bad[sid] = bad.get(sid, 0) + 1
+                s = sums.setdefault(sid, [0] * 6)
+                for c in range(3):
+                    s[c] += p[c]
+                    s[3 + c] += q[c]
+    rank = (lambda kv: -errs[kv[0]]) if by_err else (lambda kv: -kv[1])
+    for sid, n in sorted(bad.items(), key=rank)[:top]:
+        d = draws.get(sid)
+        what = "cleared/background (no draw)" if sid == 0xFF else (
+            "cc %s omh %s oml %s geo %s prim %s env %s tex %s %sx%s fmt %s siz %s blend %s tris %s%s" %
+            (d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[12], d[13], d[10], d[11], d[14], d[1],
+             (" | pal %s tlut@%s %s %s" % (d[16], d[17], d[18], d[19])) if len(d) > 19 and d[10] == "2" else "") if d else "?")
+        if d:
+            what += "".join(" " + x for x in d if x.startswith(("sub=", "behind=")))
+        s = sums[sid]
+        if by_err:
+            print("        draw %3d: err share %4.1f%% (mean %4.1f over %5d px)  N64 avg #%02x%02x%02x vs 3DS #%02x%02x%02x  %s" %
+                  (sid, 100.0 * errs[sid] / (sum(errs.values()) or 1), errs[sid] / total[sid], total[sid], *(v // n for v in s), what))
+            continue
+        print("        draw %3d: %5d wrong px of %5d  N64 avg #%02x%02x%02x vs 3DS #%02x%02x%02x  %s" %
+              (sid, n, total[sid], *(v // n for v in s), what))
+
+
 def write_png(path, width, height, rows):
     raw = b"".join(b"\x00" + bytes(v for px in row for v in px) for row in rows)
     def chunk(t, d):
@@ -70,13 +119,19 @@ def main():
     ap.add_argument("--tour", required=True, help="capture tag, e.g. tour_child_40_101")
     ap.add_argument("--only", default="")
     ap.add_argument("--png", action="store_true")
+    ap.add_argument("--top", type=int, default=6, help="draws listed per scene")
+    ap.add_argument("--by-err", action="store_true", help="rank draws by total error instead of pixels off by > 48")
+    ap.add_argument("--scenes", default="", help="the tour's --scenes list, for scene names")
     a = ap.parse_args()
     n64 = T.load_caps(os.path.join(SD.OUT, "n64_%s.json" % a.tour))
     ds = T.load_caps(os.path.join(SD.OUT, "3ds_%s.json" % a.tour))
     only = set(int(x) for x in a.only.split(",")) if a.only else None
     os.makedirs(OUT, exist_ok=True)
     age = a.tour.split("_")[1]
-    names = {i: t[0] for i, t in enumerate(T.retail_scene_entrances(age))}
+    scenes = T.retail_scene_entrances(age)
+    if a.scenes:
+        scenes = [t for t in scenes if t[0] in a.scenes.split(",")]
+    names = {i: t[0] for i, t in enumerate(scenes)}
     order = None
     for i in sorted(set(n64) & set(ds)):
         if only is not None and i not in only:
@@ -98,6 +153,7 @@ def main():
         (mae, badpct), order, nk, dk, nv, dv = best
         print("  %-3d %-34s mean err %5.1f   %5.1f%% px off   (N64 %s vs 3DS %s, %s)" %
               (i, names.get(i, "?"), mae, badpct, nk, dk, order), flush=True)
+        attribute(ds[i], dk, nv, dv, a.top, a.by_err)
         if a.png:
             rows = []
             for y in range(240):

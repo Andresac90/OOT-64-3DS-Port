@@ -584,11 +584,12 @@ static void StateDiff_PortDump(PlayState* this, s32 index) {
     s32 cat;
     Actor* actor;
 
-    extern void PortStateDump_Globals(const void* const* ptrs, const u8* sizes, s32 count);
-    // game globals outside PlayState/SaveContext; same order/size list as statediff.py GLOBALS
-    static const void* const sGlobPtrs[] = { &gWeatherMode, &gSkyboxIsChanging, &gLightConfigAfterUnderwater,
-                                             &gInterruptSongOfStorms, &gTimeSpeed };
-    static const u8 sGlobSizes[] = { 1, 1, 1, 1, 2 };
+    extern void PortStateDump_Globals(const void* const* ptrs, const u16* sizes, s32 count);
+    // game globals outside PlayState/SaveContext; same order/size list as statediff.py GLOBALS, then
+    // the REG file (gRegEditor->data: HUD positions/colors and other tunables the game reads)
+    const void* sGlobPtrs[] = { &gWeatherMode, &gSkyboxIsChanging, &gLightConfigAfterUnderwater,
+                                &gInterruptSongOfStorms, &gTimeSpeed, gRegEditor->data };
+    static const u16 sGlobSizes[] = { 1, 1, 1, 1, 2, sizeof(gRegEditor->data) };
 
     PortStateDump_Begin(index, this, sizeof(PlayState), &gSaveContext, sizeof(SaveContext));
     PortStateDump_Globals(sGlobPtrs, sGlobSizes, ARRAY_COUNT(sGlobSizes));

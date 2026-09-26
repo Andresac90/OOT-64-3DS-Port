@@ -46,27 +46,58 @@ static void* sVboBuffer;
 extern const u8 shader_shbin[];
 extern const u32 shader_shbin_size;
 
+/* PORT (2026-09-25): N64 color combiner -> PICA TEV compiler.
+ *
+ * gfx_pc.c hands over the complete combiner (gfx_cc.h: both cycles, both channels, every input of
+ * (A-B)*C+D). Each cycle/channel is lowered to 1..3 TEV operations (lowerChannel), RGB and alpha run
+ * side by side in the same stages, cycle 1 follows cycle 0, and fog (blender cycle 1: lerp to the
+ * fog color by shade alpha) is a last stage. Inputs:
+ *   TEXEL0/1 -> GPU_TEXTURE0/1, SHADE -> GPU_PRIMARY_COLOR (the vertex color is always shade),
+ *   PRIM, ENV, their alpha broadcasts, LOD fractions, ONE, ZERO, fog color -> per-stage CONSTANT
+ *   (each stage has its own RGB and alpha constant, filled per draw from GfxCombineConsts),
+ *   a second constant in one stage -> the TEV buffer's initial color (GPU_PREVIOUS_BUFFER),
+ *   COMBINED -> GPU_PREVIOUS in cycle 1's first stage, else the TEV buffer (written by the last
+ *   cycle-0 stage; PICA: stage s reads the buffer as updated by stages <= s-2).
+ * Keys this can't express exactly are compiled approximately and reported once (PortDbgX). */
+
+enum { KC_NONE, KC_ZERO, KC_ONE, KC_PRIM, KC_PRIMA, KC_ENV, KC_ENVA, KC_LODF, KC_PRIMLODF, KC_FOG };
+enum { OK_CONST, OK_TEX0, OK_TEX1, OK_SHADE, OK_PREV, OK_COMB };
+
+typedef struct {
+    u8 kind, alpha, inv, k; /* alpha: use the source's alpha; inv: 1 - x; k: KC_* for OK_CONST */
+} Opnd;
+
+typedef struct {
+    u8 func; /* GPU_COMBINEFUNC */
+    Opnd src[3];
+} ChanOp;
+
+typedef struct {
+    u8 func[2];     /* [channel] GPU_COMBINEFUNC */
+    u8 src[2][3];   /* GPU_TEVSRC */
+    u8 op[2][3];    /* GPU_TEVOP_RGB / GPU_TEVOP_A */
+    u8 konst[2];    /* KC_* in this stage's CONSTANT, per channel */
+} TevStage;
+
+#define TEV_STAGES 6
+
 struct ShaderProgram {
-    uint32_t shader_id;
-    u32 opengl_program_id;
-    uint8_t num_inputs;
+    uint64_t shader_id0;
+    uint32_t shader_id1;
     bool used_textures[2];
-    uint8_t num_floats;
-    u32 attrib_locations[7];
-    uint8_t attrib_sizes[7];
-    uint8_t num_attribs;
+    u8 num_stages;
+    TevStage stages[TEV_STAGES];
+    u8 buf_konst[2];  /* KC_* held in the TEV buffer's initial color, per channel */
+    u8 buf_update[2]; /* TEV buffer update masks (stages 0..3), per channel */
 };
 
-/* PORT: OoT uses many more distinct color-combiner configs than sm64 did. The
- * old [64] pool + uint8_t size overflowed once the game encountered >64 combiners
- * (writing past the array corrupted the adjacent sCurShader global -> OOB index ->
- * crash in updateShader, e.g. after using an item). Enlarge the pool and widen the
- * counter, and hard-guard allocation in gfx_citro3d_create_and_load_new_shader. */
+/* OoT uses many distinct combiners (the sm64 [64] pool overflowed); lookups only happen when the key changes */
 #define SHADER_POOL_CAP 1024
 static struct ShaderProgram sShaderProgramPool[SHADER_POOL_CAP];
 static uint16_t sShaderProgramPoolSize;
 
 static int sCurShader = 0;
+static struct GfxCombineConsts sConsts;
 
 static C3D_Tex sTexturePool[4096];
 static float sTexturePoolScaleS[4096];
@@ -81,7 +112,7 @@ static bool gfx_citro3d_z_is_from_0_to_1(void)
     return true;
 }
 
-static int sVtxUnitSize = 0;
+#define VTX_FLOATS 12 /* gfx_pc.c packs pos(4) uv0(2) uv1(2) shade(4); the VBO holds the same layout */
 
 static bool sDepthTestOn = false;
 static bool sDepthUpdateOn = true;
@@ -91,323 +122,414 @@ static bool sUseBlend;
 
 static int sBufIdx = 0;
 
-static void gfx_citro3d_vertex_array_set_attribs(struct ShaderProgram *prg) {
-    int unitSize = 0;
-    for (int i = 0; i < prg->num_attribs; i++)
-        unitSize += prg->attrib_sizes[i];
-    sVtxUnitSize = unitSize;
-}
-
 static void gfx_citro3d_unload_shader(struct ShaderProgram *old_prg) {
 
 }
 
-/* Map an N64 combiner colour input to a PICA TEV source. The N64 combiner has up
- * to two per-vertex colour inputs (SHADER_INPUT_1/_2 — resolved by gfx_pc.c from
- * shade/prim/env). The port carries ONE of them per vertex (GPU_PRIMARY_COLOR) and,
- * when a draw needs two (renderTwoColorTris), puts the other in the TEV CONSTANT.
- * `swapInput01` selects which of the pair is the varying (vertex) one. */
-static GPU_TEVSRC getTevSrc(int input, bool swapInput01)
-{
-    switch(input)
-    {
-        case SHADER_0:
-            return GPU_CONSTANT; /* only referenced by funcs that ignore it */
-        case SHADER_INPUT_1:
-            return swapInput01 ? GPU_CONSTANT : GPU_PRIMARY_COLOR;
-        case SHADER_INPUT_2:
-            return swapInput01 ? GPU_PRIMARY_COLOR : GPU_CONSTANT;
-        case SHADER_INPUT_3:
-            return GPU_CONSTANT;
-        case SHADER_INPUT_4:
-            return GPU_CONSTANT;
-        case SHADER_TEXEL0:
-        case SHADER_TEXEL0A:
-            return GPU_TEXTURE0;
-        case SHADER_TEXEL1:
-            return GPU_TEXTURE1;
-    }
-    return GPU_CONSTANT;
+static Opnd opnd(u8 kind, u8 alpha, u8 k) {
+    Opnd o = { kind, alpha, 0, k };
+    return o;
 }
 
-static void updateShader(bool swapInput01)
+static bool opndEq(Opnd a, Opnd b) {
+    return a.kind == b.kind && a.alpha == b.alpha && a.inv == b.inv && a.k == b.k;
+}
+
+static bool isK(Opnd a, u8 k) {
+    return a.kind == OK_CONST && !a.inv && a.k == k;
+}
+
+/* gfx_cc.h source -> operand, for channel ch (0 RGB, 1 alpha: every source is its alpha) */
+static Opnd ccsOpnd(u8 s, int ch) {
+    switch (s) {
+        case CCS_1: return opnd(OK_CONST, ch, KC_ONE);
+        case CCS_TEX0: return opnd(OK_TEX0, ch, 0);
+        case CCS_TEX1: return opnd(OK_TEX1, ch, 0);
+        case CCS_TEX0A: return opnd(OK_TEX0, 1, 0);
+        case CCS_TEX1A: return opnd(OK_TEX1, 1, 0);
+        case CCS_SHADE: return opnd(OK_SHADE, ch, 0);
+        case CCS_SHADEA: return opnd(OK_SHADE, 1, 0);
+        case CCS_PRIM: return opnd(OK_CONST, ch, KC_PRIM);
+        case CCS_PRIMA: return opnd(OK_CONST, ch, ch ? KC_PRIM : KC_PRIMA);
+        case CCS_ENV: return opnd(OK_CONST, ch, KC_ENV);
+        case CCS_ENVA: return opnd(OK_CONST, ch, ch ? KC_ENV : KC_ENVA);
+        case CCS_LODF: return opnd(OK_CONST, ch, KC_LODF);
+        case CCS_PRIMLODF: return opnd(OK_CONST, ch, KC_PRIMLODF);
+        case CCS_COMB: return opnd(OK_COMB, ch, 0);
+        case CCS_COMBA: return opnd(OK_COMB, 1, 0);
+    }
+    return opnd(OK_CONST, ch, KC_ZERO);
+}
+
+static int emit(ChanOp* out, int n, u8 func, Opnd a, Opnd b, Opnd c) {
+    out[n].func = func;
+    out[n].src[0] = a;
+    out[n].src[1] = b;
+    out[n].src[2] = c;
+    return n + 1;
+}
+
+/* (A-B)*C+D as TEV operations (PICA clamps every stage to 0..1). Returns the count (<= 3);
+ * 0 = the channel passes the previous cycle through unchanged. */
+static int lowerChannel(Opnd a, Opnd b, Opnd c, Opnd d, int ch, int cycle, ChanOp* out) {
+    Opnd z = opnd(OK_CONST, ch, KC_ZERO), prev = opnd(OK_PREV, ch, 0);
+    int n = 0;
+    if (isK(c, KC_ZERO) || opndEq(a, b)) {
+        if (cycle == 1 && d.kind == OK_COMB && d.alpha == ch) {
+            return 0;
+        }
+        return emit(out, n, GPU_REPLACE, d, z, z);
+    }
+    if (isK(b, KC_ZERO)) {
+        if (isK(d, KC_ZERO)) {
+            if (isK(a, KC_ONE)) return emit(out, n, GPU_REPLACE, c, z, z);
+            if (isK(c, KC_ONE)) return emit(out, n, GPU_REPLACE, a, z, z);
+            return emit(out, n, GPU_MODULATE, a, c, z);
+        }
+        if (isK(a, KC_ONE)) return emit(out, n, GPU_ADD, c, d, z);
+        if (isK(c, KC_ONE)) return emit(out, n, GPU_ADD, a, d, z);
+        return emit(out, n, GPU_MULTIPLY_ADD, a, c, d);
+    }
+    if (opndEq(b, d)) {
+        return emit(out, n, GPU_INTERPOLATE, a, b, c); /* a*c + b*(1-c) */
+    }
+    if (isK(a, KC_ONE) && b.kind != OK_PREV) { /* (1-B)*C+D */
+        Opnd nb = b;
+        nb.inv = 1;
+        if (isK(d, KC_ZERO)) return emit(out, n, GPU_MODULATE, nb, c, z);
+        if (isK(c, KC_ONE)) return emit(out, n, GPU_ADD, nb, d, z);
+        return emit(out, n, GPU_MULTIPLY_ADD, nb, c, d);
+    }
+    if (isK(d, KC_ZERO)) { /* max(A-B, 0)*C is exact: C >= 0 and the N64 clamps the result */
+        n = emit(out, n, GPU_SUBTRACT, a, b, z);
+        if (isK(c, KC_ONE)) return n;
+        return emit(out, n, GPU_MODULATE, prev, c, z);
+    }
+    if (isK(c, KC_ONE)) {
+        n = emit(out, n, GPU_ADD, a, d, z);
+        return emit(out, n, GPU_SUBTRACT, prev, b, z);
+    }
+    n = emit(out, n, GPU_INTERPOLATE, a, b, c); /* (A-B)*C + B */
+    n = emit(out, n, GPU_ADD, prev, d, z);      /* ... + D */
+    return emit(out, n, GPU_SUBTRACT, prev, b, z); /* ... - B */
+}
+
+/* compile state */
+typedef struct {
+    struct ShaderProgram* prg;
+    bool exact;
+    int cyc0Last;         /* last cycle-0 stage */
+    bool prevIsComb[2];   /* per component (0 rgb, 1 alpha): PREVIOUS still holds cycle 0's output */
+    bool bufComb[2];      /* buffer component carries cycle 0's output (updated by stage cyc0Last) */
+    int bufKLast[2];      /* last stage reading the buffer's initial color */
+} TevCompile;
+
+static int arityOf(u8 func) {
+    return func == GPU_REPLACE ? 1 : (func == GPU_INTERPOLATE || func == GPU_MULTIPLY_ADD) ? 3 : 2;
+}
+
+/* buffer component c as constant k at stage s: its initial color is visible until the cycle-0
+ * output lands in it (PICA: stage s reads buffer updates of stages <= s-2) */
+static bool bufKonstOk(TevCompile* tc, int c, u8 k, int s) {
+    struct ShaderProgram* prg = tc->prg;
+    if (prg->buf_konst[c] != KC_NONE && prg->buf_konst[c] != k) {
+        return false;
+    }
+    if (tc->bufComb[c] && s > tc->cyc0Last + 1) {
+        return false;
+    }
+    return true;
+}
+
+/* place op for channel ch into stage s; returns false (placing nothing) if it needs a second
+ * constant with nowhere to put it: *needK then names that constant */
+static bool placeOp(TevCompile* tc, TevStage* st, int s, int ch, int cycle, const ChanOp* op, u8* needK) {
+    struct ShaderProgram* prg = tc->prg;
+    int arity = arityOf(op->func);
+    u8 konst = st->konst[ch], bufK = prg->buf_konst[ch];
+    u8 src[3], ops[3];
+    bool useBufK = false, useBufComb[2] = { false, false };
+    for (int i = 0; i < 3; i++) {
+        Opnd o = op->src[i];
+        bool alpha = ch == 1 || o.alpha;
+        if (i >= arity) { /* unused by the function: claim nothing */
+            src[i] = GPU_PREVIOUS;
+            ops[i] = ch ? GPU_TEVOP_A_SRC_ALPHA : GPU_TEVOP_RGB_SRC_COLOR;
+            continue;
+        }
+        if (o.kind == OK_COMB && cycle == 0) { /* cleared by gfx_cc_key; keep safe */
+            o.kind = OK_CONST;
+            o.k = KC_ZERO;
+        }
+        switch (o.kind) {
+            case OK_TEX0: src[i] = GPU_TEXTURE0; break;
+            case OK_TEX1: src[i] = GPU_TEXTURE1; break;
+            case OK_SHADE: src[i] = GPU_PRIMARY_COLOR; break;
+            case OK_PREV: src[i] = GPU_PREVIOUS; break;
+            case OK_COMB:
+                if (tc->prevIsComb[alpha ? 1 : 0]) {
+                    src[i] = GPU_PREVIOUS;
+                } else {
+                    src[i] = GPU_PREVIOUS_BUFFER;
+                    useBufComb[alpha ? 1 : 0] = true;
+                }
+                break;
+            case OK_CONST:
+                alpha = ch == 1; /* constants carry per-channel values (KC_PRIMA etc.) */
+                if (konst == KC_NONE || konst == o.k) {
+                    konst = o.k;
+                    src[i] = GPU_CONSTANT;
+                } else if ((bufK == KC_NONE || bufK == o.k) && bufKonstOk(tc, ch, o.k, s)) {
+                    bufK = o.k;
+                    useBufK = true;
+                    src[i] = GPU_PREVIOUS_BUFFER;
+                } else {
+                    *needK = o.k;
+                    return false;
+                }
+                break;
+        }
+        if (ch == 0) {
+            ops[i] = alpha ? (o.inv ? GPU_TEVOP_RGB_ONE_MINUS_SRC_ALPHA : GPU_TEVOP_RGB_SRC_ALPHA)
+                           : (o.inv ? GPU_TEVOP_RGB_ONE_MINUS_SRC_COLOR : GPU_TEVOP_RGB_SRC_COLOR);
+        } else {
+            ops[i] = o.inv ? GPU_TEVOP_A_ONE_MINUS_SRC_ALPHA : GPU_TEVOP_A_SRC_ALPHA;
+        }
+    }
+    for (int c = 0; c < 2; c++) {
+        if (useBufComb[c]) {
+            if (tc->cyc0Last < 0 || tc->cyc0Last > 3 || s < tc->cyc0Last + 2 || tc->bufKLast[c] > tc->cyc0Last + 1) {
+                tc->exact = false;
+            } else {
+                tc->bufComb[c] = true;
+                prg->buf_update[c] = 1 << tc->cyc0Last;
+            }
+        }
+    }
+    if (useBufK) {
+        prg->buf_konst[ch] = bufK;
+        if (s > tc->bufKLast[ch]) {
+            tc->bufKLast[ch] = s;
+        }
+    }
+    st->konst[ch] = konst;
+    st->func[ch] = op->func;
+    for (int i = 0; i < 3; i++) {
+        st->src[ch][i] = src[i];
+        st->op[ch][i] = ops[i];
+    }
+    return true;
+}
+
+static ChanOp passOp(int ch) {
+    ChanOp op;
+    op.func = GPU_REPLACE;
+    op.src[0] = opnd(OK_PREV, ch, 0);
+    op.src[1] = op.src[2] = opnd(OK_CONST, ch, KC_ZERO);
+    return op;
+}
+
+/* compile a key; returns false if some input had to be approximated */
+static bool compileTev(struct ShaderProgram* prg) {
+    uint64_t id0 = prg->shader_id0;
+    TevCompile tc;
+    int ns = 0;
+    memset(&tc, 0, sizeof(tc));
+    tc.prg = prg;
+    tc.exact = true;
+    tc.cyc0Last = -1;
+    tc.bufKLast[0] = tc.bufKLast[1] = -1;
+    memset(prg->stages, 0, sizeof(prg->stages));
+    prg->buf_konst[0] = prg->buf_konst[1] = KC_NONE;
+    prg->buf_update[0] = prg->buf_update[1] = 0;
+
+    for (int cycle = 0; cycle < 2; cycle++) {
+        ChanOp ops[2][4];
+        int nops[2], next[2] = { 0, 0 };
+        for (int ch = 0; ch < 2; ch++) {
+            nops[ch] = lowerChannel(ccsOpnd(CC_SRC(id0, cycle, ch, 0), ch), ccsOpnd(CC_SRC(id0, cycle, ch, 1), ch),
+                                    ccsOpnd(CC_SRC(id0, cycle, ch, 2), ch), ccsOpnd(CC_SRC(id0, cycle, ch, 3), ch), ch,
+                                    cycle, ops[ch]);
+        }
+        if (cycle == 1) {
+            tc.prevIsComb[0] = tc.prevIsComb[1] = true;
+        }
+        while (next[0] < nops[0] || next[1] < nops[1]) {
+            if (ns >= TEV_STAGES) {
+                tc.exact = false;
+                goto done;
+            }
+            TevStage* st = &prg->stages[ns];
+            bool changed[2] = { false, false };
+            for (int ch = 0; ch < 2; ch++) {
+                u8 needK = KC_NONE;
+                if (next[ch] < nops[ch]) {
+                    ChanOp* op = &ops[ch][next[ch]];
+                    if (placeOp(&tc, st, ns, ch, cycle, op, &needK)) {
+                        next[ch]++;
+                        changed[ch] = true;
+                        continue;
+                    }
+                    /* two constants: preload the second into PREVIOUS with this stage, if the op
+                     * doesn't need PREVIOUS itself (COMBINED then comes from the buffer) */
+                    bool usesPrev = false;
+                    for (int i = 0; i < arityOf(op->func); i++) {
+                        usesPrev |= op->src[i].kind == OK_PREV;
+                    }
+                    ChanOp pre;
+                    pre.func = GPU_REPLACE;
+                    pre.src[0] = opnd(OK_CONST, ch, needK);
+                    pre.src[1] = pre.src[2] = pre.src[0];
+                    if (!usesPrev && placeOp(&tc, st, ns, ch, cycle, &pre, &needK)) {
+                        for (int i = 0; i < 3; i++) {
+                            if (op->src[i].kind == OK_CONST && op->src[i].k == pre.src[0].k) {
+                                u8 inv = op->src[i].inv;
+                                op->src[i] = opnd(OK_PREV, ch, 0);
+                                op->src[i].inv = inv;
+                            }
+                        }
+                        changed[ch] = true;
+                        continue;
+                    }
+                    tc.exact = false; /* approximate: drop the op's second constant */
+                    for (int i = 0; i < 3; i++) {
+                        if (op->src[i].kind == OK_CONST && op->src[i].k == needK) {
+                            op->src[i].k = st->konst[ch];
+                        }
+                    }
+                    if (placeOp(&tc, st, ns, ch, cycle, op, &needK)) {
+                        next[ch]++;
+                        changed[ch] = true;
+                        continue;
+                    }
+                }
+                ChanOp pass = passOp(ch);
+                if (ns == 0) { /* nothing to pass through at stage 0 */
+                    pass.src[0] = opnd(OK_CONST, ch, ch ? KC_ONE : KC_ZERO);
+                }
+                placeOp(&tc, st, ns, ch, cycle, &pass, &needK);
+            }
+            for (int ch = 0; ch < 2; ch++) {
+                if (changed[ch]) {
+                    tc.prevIsComb[ch] = false;
+                }
+            }
+            ns++;
+        }
+        if (cycle == 0) {
+            tc.cyc0Last = ns - 1;
+        }
+    }
+done:
+    if (prg->shader_id1 & SHADER_OPT_FOG) {
+        if (ns < TEV_STAGES) {
+            TevStage* st = &prg->stages[ns++];
+            st->func[0] = GPU_INTERPOLATE; /* fog * f + prev * (1 - f), f = shade alpha */
+            st->src[0][0] = GPU_CONSTANT;
+            st->src[0][1] = GPU_PREVIOUS;
+            st->src[0][2] = GPU_PRIMARY_COLOR;
+            st->op[0][0] = GPU_TEVOP_RGB_SRC_COLOR;
+            st->op[0][1] = GPU_TEVOP_RGB_SRC_COLOR;
+            st->op[0][2] = GPU_TEVOP_RGB_SRC_ALPHA;
+            st->konst[0] = KC_FOG;
+            st->func[1] = GPU_REPLACE;
+            st->src[1][0] = st->src[1][1] = st->src[1][2] = GPU_PREVIOUS;
+            st->op[1][0] = st->op[1][1] = st->op[1][2] = GPU_TEVOP_A_SRC_ALPHA;
+        } else {
+            tc.exact = false;
+        }
+    }
+    prg->num_stages = ns;
+    return tc.exact;
+}
+
+/* value of constant k for channel ch, as 0..255 */
+static u8 konstVal(u8 k, int ch, int comp) {
+    const struct GfxCombineConsts* c = &sConsts;
+    switch (k) {
+        case KC_ONE: return 255;
+        case KC_PRIM: return c->prim[ch ? 3 : comp];
+        case KC_PRIMA: return c->prim[3];
+        case KC_ENV: return c->env[ch ? 3 : comp];
+        case KC_ENVA: return c->env[3];
+        case KC_LODF: return c->lod_frac;
+        case KC_PRIMLODF: return c->prim_lod_frac;
+        case KC_FOG: return c->fog[ch ? 3 : comp];
+    }
+    return 0;
+}
+
+static u32 konstColor(u8 krgb, u8 ka) { /* PICA constant: 0xAABBGGRR */
+    return konstVal(krgb, 0, 0) | (konstVal(krgb, 0, 1) << 8) | (konstVal(krgb, 0, 2) << 16) |
+           ((u32)konstVal(ka, 1, 3) << 24);
+}
+
+/* program the TEV for the current shader and constants */
+static void updateShader(void)
 {
-    /* Defensive: never index the pool out of range (a corrupt sCurShader must
-     * degrade to a wrong-but-safe shader, not crash). */
     if (sCurShader < 0 || sCurShader >= SHADER_POOL_CAP) {
         sCurShader = 0;
     }
-    struct ShaderProgram* new_prg = &sShaderProgramPool[sCurShader];
-
-    u32 shader_id = new_prg->shader_id;
-
-    uint8_t c[2][4];
-    for (int i = 0; i < 4; i++) {
-        c[0][i] = (shader_id >> (i * 3)) & 7;
-        c[1][i] = (shader_id >> (12 + i * 3)) & 7;
+    const struct ShaderProgram* prg = &sShaderProgramPool[sCurShader];
+    for (int s = 0; s < TEV_STAGES; s++) {
+        C3D_TexEnv* e = C3D_GetTexEnv(s);
+        C3D_TexEnvInit(e);
+        if (s >= prg->num_stages) {
+            continue;
+        }
+        const TevStage* st = &prg->stages[s];
+        C3D_TexEnvSrc(e, C3D_RGB, st->src[0][0], st->src[0][1], st->src[0][2]);
+        C3D_TexEnvSrc(e, C3D_Alpha, st->src[1][0], st->src[1][1], st->src[1][2]);
+        C3D_TexEnvOpRgb(e, st->op[0][0], st->op[0][1], st->op[0][2]);
+        C3D_TexEnvOpAlpha(e, st->op[1][0], st->op[1][1], st->op[1][2]);
+        C3D_TexEnvFunc(e, C3D_RGB, st->func[0]);
+        C3D_TexEnvFunc(e, C3D_Alpha, st->func[1]);
+        C3D_TexEnvColor(e, konstColor(st->konst[0], st->konst[1]));
     }
-    bool opt_alpha = (shader_id & SHADER_OPT_ALPHA) != 0;
-    bool opt_fog = (shader_id & SHADER_OPT_FOG) != 0;
-    bool opt_texture_edge = (shader_id & SHADER_OPT_TEXTURE_EDGE) != 0;
-    bool used_textures[2] = {0, 0};
-    int num_inputs = 0;
-    for (int i = 0; i < 2; i++) {
-        for (int j = 0; j < 4; j++) {
-            if (c[i][j] >= SHADER_INPUT_1 && c[i][j] <= SHADER_INPUT_4) {
-                if (c[i][j] > num_inputs) {
-                    num_inputs = c[i][j];
-                }
-            }
-            if (c[i][j] == SHADER_TEXEL0 || c[i][j] == SHADER_TEXEL0A) {
-                used_textures[0] = true;
-            }
-            if (c[i][j] == SHADER_TEXEL1) {
-                used_textures[1] = true;
-            }
-        }
-    }
-    bool do_single[2] = {c[0][2] == 0, c[1][2] == 0};
-    bool do_multiply[2] = {c[0][1] == 0 && c[0][3] == 0, c[1][1] == 0 && c[1][3] == 0};
-    bool do_mix[2] = {c[0][1] == c[0][3], c[1][1] == c[1][3]};
-    bool color_alpha_same = (shader_id & 0xfff) == ((shader_id >> 12) & 0xfff);
-
-    if(num_inputs >= 3)
-        printf("more than 2!\n");
-
-    /* PORT: minimal, correct colour combiner (TEV). OoT scene/actor geometry
-     * reduces to "texture modulated by a per-vertex colour" (shade/prim/env — the
-     * N64 combiner's colour source, resolved and packed into PRIMARY_COLOR by
-     * gfx_pc.c), or a flat colour where there is no texture. The former hand-rolled
-     * do_single/multiply/mix + two-colour TEV path mis-programmed the PICA TEV and
-     * tinted grayscale surfaces wrong (grass rendered pink); this mapping renders
-     * them correctly. Texture-only combiners get PRIMARY_COLOR = white (gfx_pc.c
-     * writes 1,1,1,1 when there is no colour input) so TEXEL0 * white == TEXEL0. */
-    {
-        C3D_TexEnv* e0 = C3D_GetTexEnv(0);
-        C3D_TexEnvInit(e0);
-        /* Reset the TEV CONSTANT to 0 every shader setup. It is the 2nd colour input
-         * for two-colour combiners (overwritten per-draw by renderTwoColorTris) and
-         * the value of SHADER_0. Without this reset a shader inherits the CONSTANT the
-         * *previous* scene left behind -> the same combiner renders differently in
-         * different scenes (e.g. HUD icons correct in town but boxes in Hyrule Field). */
-        C3D_TexEnvColor(e0, 0);
-
-        bool has_tex = used_textures[0] || used_textures[1];
-
-        /* --- RGB: map the N64 colour combiner (A-B)*C+D onto one PICA TEV stage. ---
-         * A=c[0][0] B=c[0][1] C=c[0][2] D=c[0][3]. Sources resolve via getTevSrc to
-         * TEXEL0/1, the varying vertex colour (PRIMARY_COLOR) and a per-draw CONSTANT
-         * (the 2nd colour, set by renderTwoColorTris). The func is chosen so that
-         * zero terms are never referenced (PICA has no true zero source). TEXEL0A
-         * uses the texture's ALPHA as an RGB source. */
-        if (has_tex || num_inputs > 0) {
-            uint8_t a = c[0][0], b = c[0][1], cc = c[0][2], d = c[0][3];
-            GPU_TEVSRC sa = getTevSrc(a, swapInput01), sb = getTevSrc(b, swapInput01),
-                       sc = getTevSrc(cc, swapInput01), sd = getTevSrc(d, swapInput01);
-            GPU_TEVOP_RGB opa = (a == SHADER_TEXEL0A) ? GPU_TEVOP_RGB_SRC_ALPHA : GPU_TEVOP_RGB_SRC_COLOR;
-            GPU_TEVOP_RGB opb = (b == SHADER_TEXEL0A) ? GPU_TEVOP_RGB_SRC_ALPHA : GPU_TEVOP_RGB_SRC_COLOR;
-            GPU_TEVOP_RGB opc = (cc == SHADER_TEXEL0A) ? GPU_TEVOP_RGB_SRC_ALPHA : GPU_TEVOP_RGB_SRC_COLOR;
-            GPU_TEVOP_RGB opd = (d == SHADER_TEXEL0A) ? GPU_TEVOP_RGB_SRC_ALPHA : GPU_TEVOP_RGB_SRC_COLOR;
-            if (cc == SHADER_0) {
-                /* (A-B)*0 + D  ==  D */
-                C3D_TexEnvSrc(e0, C3D_RGB, sd, 0, 0);
-                C3D_TexEnvOpRgb(e0, opd, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
-                C3D_TexEnvFunc(e0, C3D_RGB, GPU_REPLACE);
-            } else if (b == SHADER_0 && d == SHADER_0) {
-                /* A * C  (the common "texture modulated by colour") */
-                C3D_TexEnvSrc(e0, C3D_RGB, sa, sc, 0);
-                C3D_TexEnvOpRgb(e0, opa, opc, GPU_TEVOP_RGB_SRC_COLOR);
-                C3D_TexEnvFunc(e0, C3D_RGB, GPU_MODULATE);
-            } else if (b == SHADER_0) {
-                /* A * C + D */
-                C3D_TexEnvSrc(e0, C3D_RGB, sa, sc, sd);
-                C3D_TexEnvOpRgb(e0, opa, opc, opd);
-                C3D_TexEnvFunc(e0, C3D_RGB, GPU_MULTIPLY_ADD);
-            } else if (d == b) {
-                /* (A-B)*C + B  ==  interpolate(A,B,C) = A*C + B*(1-C).
-                 * This is the two-colour "mix" (e.g. tunic (PRIM-ENV)*TEXEL0+ENV). */
-                C3D_TexEnvSrc(e0, C3D_RGB, sa, sb, sc);
-                C3D_TexEnvOpRgb(e0, opa, opb, opc);
-                C3D_TexEnvFunc(e0, C3D_RGB, GPU_INTERPOLATE);
-            } else {
-                /* fallback: A * C */
-                C3D_TexEnvSrc(e0, C3D_RGB, sa, sc, 0);
-                C3D_TexEnvOpRgb(e0, opa, opc, GPU_TEVOP_RGB_SRC_COLOR);
-                C3D_TexEnvFunc(e0, C3D_RGB, GPU_MODULATE);
-            }
-        } else {
-            /* No texture and no colour input — pass the (white) vertex colour. */
-            C3D_TexEnvSrc(e0, C3D_RGB, GPU_PRIMARY_COLOR, 0, 0);
-            C3D_TexEnvOpRgb(e0, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
-            C3D_TexEnvFunc(e0, C3D_RGB, GPU_REPLACE);
-        }
-
-        /* --- ALPHA: take alpha from the texture when textured (matches OoT opaque &
-         * cutout surfaces and keeps Link visible — modulating by the packed shade
-         * alpha wrongly zeroed him); else from the vertex colour. ---
-         * NOTE: an earlier attempt to drive this from the decoded alpha mux
-         * (build 7E39522E) regressed HW — surfaces whose alpha mux resolved to a
-         * zero/CONSTANT source got alpha 0 and were discarded by the alpha test
-         * (Link's sword vanished). Reverted to this proven behaviour. A correct
-         * alpha combiner needs per-surface validation, not a blanket ladder. */
-        /* PORT (2026-09-24): the N64 ALPHA combiner (A-B)*C+D, mapped like the RGB ladder above.
-         * Only for draws with the alpha option (translucent / cutout). Opaque draws have blending
-         * and alpha test OFF (applyAlphaTest), so their alpha -- whose mux gfx_pc zeroes -- can no
-         * longer discard them (the failure mode of the earlier attempt: Link's sword vanished). */
-        if (opt_alpha) {
-            uint8_t a = c[1][0], b = c[1][1], cc = c[1][2], d = c[1][3];
-            GPU_TEVSRC sa = getTevSrc(a, swapInput01), sb = getTevSrc(b, swapInput01),
-                       sc = getTevSrc(cc, swapInput01), sd = getTevSrc(d, swapInput01);
-            if (cc == SHADER_0 || (a == SHADER_0 && b == SHADER_0)) {
-                C3D_TexEnvSrc(e0, C3D_Alpha, sd, 0, 0);                /* D */
-                C3D_TexEnvFunc(e0, C3D_Alpha, GPU_REPLACE);
-            } else if (b == SHADER_0 && d == SHADER_0) {
-                C3D_TexEnvSrc(e0, C3D_Alpha, sa, sc, 0);               /* A*C */
-                C3D_TexEnvFunc(e0, C3D_Alpha, GPU_MODULATE);
-            } else if (b == SHADER_0) {
-                C3D_TexEnvSrc(e0, C3D_Alpha, sa, sc, sd);              /* A*C + D */
-                C3D_TexEnvFunc(e0, C3D_Alpha, GPU_MULTIPLY_ADD);
-            } else if (b == d) {
-                C3D_TexEnvSrc(e0, C3D_Alpha, sa, sb, sc);              /* (A-B)*C + B = lerp */
-                C3D_TexEnvFunc(e0, C3D_Alpha, GPU_INTERPOLATE);
-            } else {
-                C3D_TexEnvSrc(e0, C3D_Alpha, sa, sc, 0);               /* fallback: A*C */
-                C3D_TexEnvFunc(e0, C3D_Alpha, GPU_MODULATE);
-            }
-        } else {
-            C3D_TexEnvSrc(e0, C3D_Alpha, has_tex ? GPU_TEXTURE0 : GPU_PRIMARY_COLOR, 0, 0);
-            C3D_TexEnvFunc(e0, C3D_Alpha, GPU_REPLACE);
-        }
-        C3D_TexEnvOpAlpha(e0, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
-
-        /* --- TEV stage 1: N64 combiner CYCLE 1 fold (see gfx_pc.c). When the DL's
-         * cycle 1 is (COMBINED-0)*X+0, gfx_pc routes X through a colour-input slot
-         * and encodes: bits 27-29 = X's CC source (nonzero = active), bits 30-31 =
-         * input slot - 1. RGB1 = PREVIOUS * srcof(slot); alpha passes through.
-         * This restores e.g. the tunic's ENV tint (cycle0 TEX*SHADE was rendering
-         * untinted -> white tunic) and terrain's cycle-1 SHADE/PRIM lighting. */
-        if ((shader_id >> 27) & 7) {
-            int pslot = (int)((shader_id >> 30) & 3) + 1;
-            C3D_TexEnv* e1 = C3D_GetTexEnv(1);
-            C3D_TexEnvInit(e1);
-            C3D_TexEnvColor(e1, 0); /* renderTwoColorTris overwrites per-draw */
-            C3D_TexEnvSrc(e1, C3D_RGB, GPU_PREVIOUS, getTevSrc(pslot, swapInput01), 0);
-            C3D_TexEnvOpRgb(e1, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
-            C3D_TexEnvFunc(e1, C3D_RGB, GPU_MODULATE);
-            C3D_TexEnvSrc(e1, C3D_Alpha, GPU_PREVIOUS, 0, 0);
-            C3D_TexEnvOpAlpha(e1, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
-            C3D_TexEnvFunc(e1, C3D_Alpha, GPU_REPLACE);
-        } else {
-            C3D_TexEnvInit(C3D_GetTexEnv(1));
-        }
-        C3D_TexEnvInit(C3D_GetTexEnv(2));
-        /* Alpha test discards fully-transparent texels: opaque surfaces have alpha 1
-         * and survive `> 0`; transparent parts of HUD icons/sprites get cut out
-         * (without this they draw as solid boxes). Cutout foliage uses a higher
-         * threshold. */
-        /* alpha test is per draw (depends on blend state): see applyAlphaTest() */
-    }
+    C3D_TexEnvBufUpdate(C3D_RGB, prg->buf_update[0]);
+    C3D_TexEnvBufUpdate(C3D_Alpha, prg->buf_update[1]);
+    C3D_TexEnvBufColor(konstColor(prg->buf_konst[0], prg->buf_konst[1]));
 }
 
 static void gfx_citro3d_load_shader(struct ShaderProgram *new_prg) {
-    sCurShader = new_prg->opengl_program_id;
-    gfx_citro3d_vertex_array_set_attribs(new_prg);
-
-    updateShader(false);
+    sCurShader = new_prg - sShaderProgramPool;
+    updateShader();
 }
 
-static struct ShaderProgram *gfx_citro3d_create_and_load_new_shader(uint32_t shader_id) {
-    uint8_t c[2][4];
-    for (int i = 0; i < 4; i++) {
-        c[0][i] = (shader_id >> (i * 3)) & 7;
-        c[1][i] = (shader_id >> (12 + i * 3)) & 7;
-    }
-    bool opt_alpha = (shader_id & SHADER_OPT_ALPHA) != 0;
-    bool opt_fog = (shader_id & SHADER_OPT_FOG) != 0;
-    bool opt_texture_edge = (shader_id & SHADER_OPT_TEXTURE_EDGE) != 0;
-    bool used_textures[2] = {0, 0};
-    int num_inputs = 0;
-    for (int i = 0; i < 2; i++) {
-        for (int j = 0; j < 4; j++) {
-            if (c[i][j] >= SHADER_INPUT_1 && c[i][j] <= SHADER_INPUT_4) {
-                if (c[i][j] > num_inputs) {
-                    num_inputs = c[i][j];
-                }
-            }
-            if (c[i][j] == SHADER_TEXEL0 || c[i][j] == SHADER_TEXEL0A) {
-                used_textures[0] = true;
-            }
-            if (c[i][j] == SHADER_TEXEL1) {
-                used_textures[1] = true;
-            }
-        }
-    }
-    bool do_single[2] = {c[0][2] == 0, c[1][2] == 0};
-    bool do_multiply[2] = {c[0][1] == 0 && c[0][3] == 0, c[1][1] == 0 && c[1][3] == 0};
-    bool do_mix[2] = {c[0][1] == c[0][3], c[1][1] == c[1][3]};
-    bool color_alpha_same = (shader_id & 0xfff) == ((shader_id >> 12) & 0xfff);
+static void gfx_citro3d_set_combine_consts(const struct GfxCombineConsts *consts) {
+    sConsts = *consts;
+    updateShader();
+}
 
-    /* two-cycle postmul input (see gfx_pc.c fold): its colour rides an extra
-     * vertex-colour slot that the mux bits don't reference — count it so the
-     * vertex layout and gfx_pc's packing agree. */
-    if ((shader_id >> 27) & 7) {
-        int pslot = (int)((shader_id >> 30) & 3) + 1;
-        if (pslot > num_inputs) {
-            num_inputs = pslot;
-        }
-    }
-
-    size_t vs_len = 0;
-    size_t fs_len = 0;
-    size_t num_floats = 4;
-    
-    size_t cnt = 0;
-    
+static struct ShaderProgram *gfx_citro3d_create_and_load_new_shader(uint64_t shader_id0, uint32_t shader_id1) {
+    struct ShaderProgram *prg;
     if (sShaderProgramPoolSize >= SHADER_POOL_CAP) {
-        /* Pool full: reuse the last slot instead of overflowing into adjacent
-         * globals. Returns an already-loaded, valid shader — no crash. Only hit
-         * if the game uses more than SHADER_POOL_CAP distinct combiner configs. */
-        return &sShaderProgramPool[SHADER_POOL_CAP - 1];
+        /* pool full: recycle the last slot (wrong-but-safe) */
+        prg = &sShaderProgramPool[SHADER_POOL_CAP - 1];
+    } else {
+        prg = &sShaderProgramPool[sShaderProgramPoolSize++];
     }
-    int id = sShaderProgramPoolSize;
-    struct ShaderProgram *prg = &sShaderProgramPool[sShaderProgramPoolSize++];
-    prg->attrib_sizes[cnt] = 4;
-    ++cnt;
-    
-    if (used_textures[0] || used_textures[1]) 
-    {
-        prg->attrib_sizes[cnt] = 2;
-        ++cnt;
+    prg->shader_id0 = shader_id0;
+    prg->shader_id1 = shader_id1;
+    prg->used_textures[0] = (shader_id1 & SHADER_OPT_TEX0) != 0;
+    prg->used_textures[1] = (shader_id1 & SHADER_OPT_TEX1) != 0;
+    if (!compileTev(prg)) {
+        static int sReported;
+        if (sReported < 16) {
+            extern void PortDbgX(const char* label, unsigned val);
+            sReported++;
+            PortDbgX("TEV approx key hi", (unsigned)(shader_id0 >> 32));
+            PortDbgX("TEV approx key lo", (unsigned)shader_id0);
+            PortDbgX("TEV approx opts", (unsigned)shader_id1);
+        }
     }
-    
-    if (opt_fog) 
-    {
-        prg->attrib_sizes[cnt] = 4;
-        ++cnt;
-    }
-    
-    for (int i = 0; i < num_inputs; i++) 
-    {
-        prg->attrib_sizes[cnt] = opt_alpha ? 4 : 3;
-        ++cnt;
-    }
-    
-    prg->shader_id = shader_id;
-    prg->opengl_program_id = id;
-    prg->num_inputs = num_inputs;
-    prg->used_textures[0] = used_textures[0];
-    prg->used_textures[1] = used_textures[1];
-    prg->num_floats = num_floats;
-    prg->num_attribs = cnt;
-    
     gfx_citro3d_load_shader(prg);
-    
     return prg;
 }
 
-static struct ShaderProgram *gfx_citro3d_lookup_shader(uint32_t shader_id) {
+static struct ShaderProgram *gfx_citro3d_lookup_shader(uint64_t shader_id0, uint32_t shader_id1) {
     for (size_t i = 0; i < sShaderProgramPoolSize; i++) {
-        if (sShaderProgramPool[i].shader_id == shader_id) {
+        if (sShaderProgramPool[i].shader_id0 == shader_id0 && sShaderProgramPool[i].shader_id1 == shader_id1) {
             return &sShaderProgramPool[i];
         }
     }
@@ -415,7 +537,7 @@ static struct ShaderProgram *gfx_citro3d_lookup_shader(uint32_t shader_id) {
 }
 
 static void gfx_citro3d_shader_get_info(struct ShaderProgram *prg, uint8_t *num_inputs, bool used_textures[2]) {
-    *num_inputs = prg->num_inputs;
+    *num_inputs = 1;
     used_textures[0] = prg->used_textures[0];
     used_textures[1] = prg->used_textures[1];
 }
@@ -559,11 +681,15 @@ static void gfx_citro3d_set_zmode_decal(bool zmode_decal) {
     updateDepth();
 }
 
+/* The top-screen target is PORTRAIT (240x400, rotated): x/y and width/height swap (sm64 3DS port),
+ * and the vertex setup writes (y, -x), so N64 x runs down the target's second axis: a rectangle at x
+ * sits at 400 - (x + width) there. PORT (2026-09-25): without that mirror every sub-viewport/scissor
+ * was mirrored horizontally (full-screen ones are symmetric, so only small ones showed it: the A
+ * button drawn over the hearts, found by tools/statediff fbdiff). */
+#define TOP_W 400
+
 static void gfx_citro3d_set_viewport(int x, int y, int width, int height) {
-    /* PORT (2026-09-24): the top-screen target is PORTRAIT (240x400, rotated), so x/y and
-     * width/height swap -- exactly like gfx_citro3d_set_scissor below and the sm64 3DS port
-     * this backend derives from. Passing them unswapped shifted the whole picture ~half a
-     * screen to the right ("camera off-center"), which also pushed the pause menu off-screen. */
+    x = TOP_W - (x + width);
     if (gGfx3DSMode == GFX_3DS_MODE_AA_22 || gGfx3DSMode == GFX_3DS_MODE_WIDE_AA_12)
         C3D_SetViewport(y * 2, x * 2, height * 2, width * 2);
     else if (gGfx3DSMode == GFX_3DS_MODE_WIDE)
@@ -574,6 +700,7 @@ static void gfx_citro3d_set_viewport(int x, int y, int width, int height) {
 
 static void gfx_citro3d_set_scissor(int x, int y, int width, int height)
 {
+    x = TOP_W - (x + width);
     if (gGfx3DSMode == GFX_3DS_MODE_NORMAL)
         C3D_SetScissor(GPU_SCISSOR_NORMAL, y, x, y + height, x + width);
     else if (gGfx3DSMode == GFX_3DS_MODE_AA_22 || gGfx3DSMode == GFX_3DS_MODE_WIDE_AA_12)
@@ -587,7 +714,7 @@ static void gfx_citro3d_set_scissor(int x, int y, int width, int height)
  * discard alpha < 8/256. Other translucent draws: discard alpha 0 only (keeps depth clean). */
 static void applyAlphaTest(void)
 {
-    u32 id = sShaderProgramPool[sCurShader].shader_id;
+    u32 id = sShaderProgramPool[sCurShader].shader_id1;
     if (!(id & SHADER_OPT_ALPHA))
         C3D_AlphaTest(false, GPU_ALWAYS, 0);
     else if (id & SHADER_OPT_TEXTURE_EDGE)
@@ -610,269 +737,69 @@ static void gfx_citro3d_set_use_alpha(bool use_alpha)
     applyBlend();
 }
 
-static u32 vec4ToU32Color(float r, float g, float b, float a)
-{
-    int r2 = r * 255;
-    if (r2 < 0)
-        r2 = 0;
-    else if(r2 > 255)
-        r2 = 255;
-    int g2 = g * 255;
-    if (g2 < 0)
-        g2 = 0;
-    else if(g2 > 255)
-        g2 = 255;
-    int b2 = b * 255;
-    if (b2 < 0)
-        b2 = 0;
-    else if(b2 > 255)
-        b2= 255;
-    int a2 = a * 255;
-    if (a2 < 0)
-        a2 = 0;
-    else if(a2 > 255)
-        a2 = 255;
-    return (a2 << 24) | (b2 << 16) | (g2 << 8) | r2;
+/* tools/statediff per-draw attribution: gfx_pc.c sets an id per flush while the color readback runs;
+ * every fragment that passes the depth test writes it into the (otherwise unused) stencil buffer. */
+static int sDrawId;
+
+void gfx_citro3d_set_draw_id(int id) {
+    sDrawId = id;
 }
 
-static void renderFog(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris)
-{
-    C3D_TexEnv* env = C3D_GetTexEnv(0);
-    C3D_TexEnvInit(env);
-    C3D_TexEnvColor(env, 0);
-    C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
-    C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, 0, 0);
-    C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
-    C3D_TexEnvOpAlpha(env, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
-    env = C3D_GetTexEnv(1);
-    C3D_TexEnvInit(env);
-    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ZERO, GPU_DST_ALPHA);
-    C3D_DepthTest(sDepthTestOn, GPU_LEQUAL, GPU_WRITE_COLOR);
-
-    int offset = 0;
-    float* dst = &((float*)sVboBuffer)[sBufIdx * 10];
-    bool hasTex = sShaderProgramPool[sCurShader].used_textures[0] || sShaderProgramPool[sCurShader].used_textures[1];
-    bool hasFog = (sShaderProgramPool[sCurShader].shader_id & SHADER_OPT_FOG) != 0;
-    for(int i = 0; i < 3 * buf_vbo_num_tris; i++)
-    {
-        *dst++ = buf_vbo[offset + 1];
-        *dst++ = -buf_vbo[offset + 0];
-        *dst++ = -buf_vbo[offset + 2];
-        *dst++ = buf_vbo[offset + 3];
-        int vtxOffs = 4;
-        if(hasTex)
-            vtxOffs += 2;
-        *dst++ = 0;
-        *dst++ = 0;
-        *dst++ = buf_vbo[offset + vtxOffs++];
-        *dst++ = buf_vbo[offset + vtxOffs++];
-        *dst++ = buf_vbo[offset + vtxOffs++];
-        *dst++ = buf_vbo[offset + vtxOffs++];
-        
-        offset += sVtxUnitSize;
+static void applyDrawId(void) {
+    if (sDrawId != 0) {
+        C3D_StencilTest(true, GPU_ALWAYS, sDrawId, 0xFF, 0xFF);
+        C3D_StencilOp(GPU_STENCIL_KEEP, GPU_STENCIL_KEEP, GPU_STENCIL_REPLACE);
+    } else {
+        C3D_StencilTest(false, GPU_ALWAYS, 0, 0xFF, 0x00);
     }
-
-	C3D_DrawArrays(GPU_TRIANGLES, sBufIdx, buf_vbo_num_tris * 3);
-    sBufIdx += buf_vbo_num_tris * 3;
-
-    updateShader(false);
-    applyBlend();
-    updateDepth();
-}
-
-static void renderTwoColorTris(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris)
-{
-    int offset = 0;
-    float* dst = &((float*)sVboBuffer)[sBufIdx * 10];
-    bool hasTex = sShaderProgramPool[sCurShader].used_textures[0] || sShaderProgramPool[sCurShader].used_textures[1];
-    bool hasColor = sShaderProgramPool[sCurShader].num_inputs > 0;
-    bool hasAlpha = (sShaderProgramPool[sCurShader].shader_id & SHADER_OPT_ALPHA) != 0;
-    bool hasFog = (sShaderProgramPool[sCurShader].shader_id & SHADER_OPT_FOG) != 0;
-    if (hasFog)
-        C3D_TexEnvColor(C3D_GetTexEnv(2), vec4ToU32Color(buf_vbo[hasTex ? 6 : 4], buf_vbo[hasTex ? 7 : 5], buf_vbo[hasTex ? 8 : 6], buf_vbo[hasTex ? 9 : 7]));
-    u32 firstColor0, firstColor1;
-    bool color0Constant = true;
-    bool color1Constant = true;
-    //determine which color is constant over all vertices
-    for(int i = 0; i < buf_vbo_num_tris * 3 && color0Constant && color1Constant; i++)
-    {    
-        int vtxOffs = 4;
-        if(hasTex)
-            vtxOffs += 2;
-        if(hasFog)
-            vtxOffs += 4;
-        u32 color0 = vec4ToU32Color(
-            buf_vbo[offset + vtxOffs], 
-            buf_vbo[offset + vtxOffs + 1],
-            buf_vbo[offset + vtxOffs + 2],
-            hasAlpha ? buf_vbo[offset + vtxOffs + 3] : 1.0f);
-        vtxOffs += hasAlpha ? 4 : 3;
-        u32 color1 = vec4ToU32Color(
-            buf_vbo[offset + vtxOffs], 
-            buf_vbo[offset + vtxOffs + 1],
-            buf_vbo[offset + vtxOffs + 2],
-            hasAlpha ? buf_vbo[offset + vtxOffs + 3] : 1.0f);
-        if(i == 0)
-        {
-            firstColor0 = color0;
-            firstColor1 = color1;
-        }
-        else
-        {
-            if(firstColor0 != color0)
-                color0Constant = false;
-            if(firstColor1 != color1)
-                color1Constant = false;
-        }
-        offset += sVtxUnitSize;
-    }
-    offset = 0;
-    /* The vertex loop below SKIPS colour0 iff color0Constant — so PRIMARY_COLOR
-     * carries colour1 in that case and the TEV CONSTANT must be colour0 (and the
-     * inputs swap). The old code keyed both choices on color1Constant, so when
-     * BOTH colours were constant (every HUD texrect: PRIM+ENV fixed) the CONSTANT
-     * was set to colour1 while PRIMARY also carried colour1 — colour0 (e.g. the
-     * hearts' PRIM red) was dropped entirely and the interpolation degenerated to
-     * the flat ENV tint. Key on which colour is actually packed per-vertex. */
-    updateShader(color0Constant);
-    {
-        u32 constCol = color0Constant ? firstColor0 : firstColor1;
-        C3D_TexEnvColor(C3D_GetTexEnv(0), constCol);
-        C3D_TexEnvColor(C3D_GetTexEnv(1), constCol); /* cycle-1 postmul stage reads it too */
-    }
-    for(int i = 0; i < 3 * buf_vbo_num_tris; i++)
-    {
-        *dst++ = buf_vbo[offset + 1];
-        *dst++ = -buf_vbo[offset + 0];
-        *dst++ = -buf_vbo[offset + 2];
-        *dst++ = buf_vbo[offset + 3];
-        int vtxOffs = 4;
-        if(hasTex)
-        {
-            *dst++ = buf_vbo[offset + vtxOffs++] * sTexturePoolScaleS[sCurTex];
-            *dst++ = 1 - (buf_vbo[offset + vtxOffs++] * sTexturePoolScaleT[sCurTex]);
-        }
-        else
-        {
-            *dst++ = 0;
-            *dst++ = 0;
-        }
-        if(hasFog)
-            vtxOffs += 4;
-        if(color0Constant)
-            vtxOffs += hasAlpha ? 4 : 3;
-        if(hasColor)
-        {
-            *dst++ = buf_vbo[offset + vtxOffs++];
-            *dst++ = buf_vbo[offset + vtxOffs++];
-            *dst++ = buf_vbo[offset + vtxOffs++];
-            if(hasAlpha)
-                *dst++ = buf_vbo[offset + vtxOffs++];
-            else
-                *dst++ = 1.0f;
-        }
-        else
-        {
-            *dst++ = 1.0f;
-            *dst++ = 1.0f;
-            *dst++ = 1.0f;
-            *dst++ = 1.0f;
-        }
-        
-        offset += sVtxUnitSize;
-    }
-
-	C3D_DrawArrays(GPU_TRIANGLES, sBufIdx, buf_vbo_num_tris * 3);
-    sBufIdx += buf_vbo_num_tris * 3;
-
-    if(hasFog)
-        renderFog(buf_vbo, buf_vbo_len, buf_vbo_num_tris);
 }
 
 static void gfx_citro3d_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris)
 {
-    if(sBufIdx * 10 > 2 * 1024 * 1024 / 4)
+    if (sBufIdx * VTX_FLOATS + buf_vbo_len > 2 * 1024 * 1024 / 4)
     {
         printf("Poly buf over!\n");
         return;
     }
-
-    /* Invariant: gfx_pc.c packed buf_vbo_num_tris * 3 vertices of exactly the current shader's
-     * stride. A mismatch means the front end and this backend disagree on the vertex layout; reading
-     * with the wrong stride walks off the buffer (unmapped reads, found by the tools/statediff tour in
-     * the Treasure Chest Shop). Log it once with the details and skip the draw. */
-    if (buf_vbo_len != buf_vbo_num_tris * 3 * (size_t)sVtxUnitSize) {
+    /* Invariant: gfx_pc.c packs VTX_FLOATS per vertex. A mismatch means the front end and this backend
+     * disagree on the vertex layout; reading with the wrong stride walks off the buffer. */
+    if (buf_vbo_len != buf_vbo_num_tris * 3 * VTX_FLOATS) {
         static int sReported;
         if (sReported < 4) {
             extern void PortDbgX(const char* label, unsigned val);
             sReported++;
-            PortDbgX("VTX-STRIDE MISMATCH shader_id", sShaderProgramPool[sCurShader].shader_id);
-            PortDbgX("  cur shader slot", (unsigned)sCurShader);
-            PortDbgX("  pool size", (unsigned)sShaderProgramPoolSize);
-            PortDbgX("  backend stride", (unsigned)sVtxUnitSize);
-            PortDbgX("  buf_vbo_len", (unsigned)buf_vbo_len);
+            PortDbgX("VTX-STRIDE MISMATCH buf_vbo_len", (unsigned)buf_vbo_len);
             PortDbgX("  tris", (unsigned)buf_vbo_num_tris);
         }
         return;
     }
     applyAlphaTest();
-    if(sShaderProgramPool[sCurShader].num_inputs >= 2)
+
+    const struct ShaderProgram* prg = &sShaderProgramPool[sCurShader];
+    /* texcoords are normalized to the uploaded texture; scale into the power-of-two PICA texture */
+    float s0 = sTexturePoolScaleS[sTexUnits[0]], t0 = sTexturePoolScaleT[sTexUnits[0]];
+    float s1 = sTexturePoolScaleS[sTexUnits[1]], t1 = sTexturePoolScaleT[sTexUnits[1]];
+    const float* src = buf_vbo;
+    float* dst = &((float*)sVboBuffer)[sBufIdx * VTX_FLOATS];
+    for (size_t i = 0; i < 3 * buf_vbo_num_tris; i++, src += VTX_FLOATS)
     {
-        renderTwoColorTris(buf_vbo, buf_vbo_len, buf_vbo_num_tris);
-        return;
+        *dst++ = src[1];
+        *dst++ = -src[0];
+        *dst++ = -src[2];
+        *dst++ = src[3];
+        *dst++ = src[4] * s0;
+        *dst++ = 1 - (src[5] * t0);
+        *dst++ = src[6] * s1;
+        *dst++ = 1 - (src[7] * t1);
+        *dst++ = src[8];
+        *dst++ = src[9];
+        *dst++ = src[10];
+        *dst++ = src[11];
     }
 
-    int offset = 0;
-    float* dst = &((float*)sVboBuffer)[sBufIdx * 10];
-    bool hasTex = sShaderProgramPool[sCurShader].used_textures[0] || sShaderProgramPool[sCurShader].used_textures[1];
-    bool hasColor = sShaderProgramPool[sCurShader].num_inputs > 0;
-    bool hasAlpha = (sShaderProgramPool[sCurShader].shader_id & SHADER_OPT_ALPHA) != 0;
-    bool hasFog = (sShaderProgramPool[sCurShader].shader_id & SHADER_OPT_FOG) != 0;
-    for(int i = 0; i < 3 * buf_vbo_num_tris; i++)
-    {
-        *dst++ = buf_vbo[offset + 1];
-        *dst++ = -buf_vbo[offset + 0];
-        *dst++ = -buf_vbo[offset + 2];
-        *dst++ = buf_vbo[offset + 3];
-        int vtxOffs = 4;
-        if(hasTex)
-        {
-            *dst++ = buf_vbo[offset + vtxOffs++] * sTexturePoolScaleS[sCurTex];
-            *dst++ = 1 - (buf_vbo[offset + vtxOffs++] * sTexturePoolScaleT[sCurTex]);
-        }
-        else
-        {
-            *dst++ = 0;
-            *dst++ = 0;
-        }
-        if(hasFog)
-            vtxOffs += 4;
-        if(hasColor)
-        {
-            *dst++ = buf_vbo[offset + vtxOffs++];
-            *dst++ = buf_vbo[offset + vtxOffs++];
-            *dst++ = buf_vbo[offset + vtxOffs++];
-            if(hasAlpha)
-                *dst++ = buf_vbo[offset + vtxOffs++];
-            else
-                *dst++ = 1.0f;
-        }
-        else
-        {
-            *dst++ = 1.0f;
-            *dst++ = 1.0f;
-            *dst++ = 1.0f;
-            *dst++ = 1.0f;
-        }
-        
-        offset += sVtxUnitSize;
-    }
-
-	C3D_DrawArrays(GPU_TRIANGLES, sBufIdx, buf_vbo_num_tris * 3);
+    applyDrawId();
+    C3D_DrawArrays(GPU_TRIANGLES, sBufIdx, buf_vbo_num_tris * 3);
     sBufIdx += buf_vbo_num_tris * 3;
-
-    if(hasFog)
-        renderFog(buf_vbo, buf_vbo_len, buf_vbo_num_tris);
 }
 
 static void gfx_citro3d_init(void)
@@ -888,6 +815,7 @@ static void gfx_citro3d_init(void)
 	AttrInfo_AddLoader(attrInfo, 0, GPU_FLOAT, 4); // v0=position
 	AttrInfo_AddLoader(attrInfo, 1, GPU_FLOAT, 2); // v1=texcoord
 	AttrInfo_AddLoader(attrInfo, 2, GPU_FLOAT, 4); // v2=color
+	AttrInfo_AddLoader(attrInfo, 3, GPU_FLOAT, 2); // v3=texcoord1
 
 	// Create the VBO (vertex buffer object)
 	sVboBuffer = linearAlloc(2 * 1024 * 1024);
@@ -895,7 +823,7 @@ static void gfx_citro3d_init(void)
 	// Configure buffers
 	C3D_BufInfo* bufInfo = C3D_GetBufInfo();
 	BufInfo_Init(bufInfo);
-	BufInfo_Add(bufInfo, sVboBuffer, 10 * 4, 3, 0x210);
+	BufInfo_Add(bufInfo, sVboBuffer, VTX_FLOATS * 4, 4, 0x2310); // pos, uv0, uv1, color
 
     C3D_CullFace(GPU_CULL_NONE);
     C3D_DepthMap(true, -1.0f, 0);
@@ -914,6 +842,7 @@ struct GfxRenderingAPI gfx_citro3d_api = {
     gfx_citro3d_create_and_load_new_shader,
     gfx_citro3d_lookup_shader,
     gfx_citro3d_shader_get_info,
+    gfx_citro3d_set_combine_consts,
     gfx_citro3d_new_texture,
     gfx_citro3d_select_texture,
     gfx_citro3d_upload_texture,
