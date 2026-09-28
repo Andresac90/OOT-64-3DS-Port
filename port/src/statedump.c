@@ -136,6 +136,11 @@ void PortRngTrace_Frame(uint32_t frame, uint32_t state) {
     }
 }
 
+/* extra named blob for the current capture (sd_<name>_<index>.bin) */
+void PortStateDump_Blob(const char* name, const void* data, unsigned size) {
+    write_file(dump_path(name), data, size);
+}
+
 void PortStateDump_End(void) {
     extern void PortDbg(const char* str);
     if (sActors != NULL) {

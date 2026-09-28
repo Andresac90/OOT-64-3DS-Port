@@ -213,7 +213,10 @@ static int sSramLoaded = 0;
 static void SramLoad(void) {
     void* f = fopen(SRAM_FILE, "rb");
     if (f != NULL) { fread(sSram, 1, PORT_SRAM_SIZE, f); fclose(f); }
-    else { memset(sSram, 0, PORT_SRAM_SIZE); } /* no file -> blank cart; game re-inits */
+    /* no file -> a fresh cartridge: SRAM reads 0xFF (as ares' blank SRAM). PORT (2026-09-28): it was zeroed,
+     * and an all-zero slot passes the game's checksum (0 == 0), so file select loaded empty "valid" saves
+     * instead of initializing new ones (tools/statediff/bootflow.py: 86 SaveContext differences) */
+    else { memset(sSram, 0xFF, PORT_SRAM_SIZE); }
     sSramLoaded = 1;
 }
 static void SramFlush(void) {

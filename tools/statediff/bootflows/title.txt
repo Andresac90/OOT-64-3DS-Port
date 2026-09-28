@@ -1,0 +1,11 @@
+# Normal boot: Nintendo logo -> title screen (Hyrule Field cutscene + logo) -> START -> file select.
+# Frames = GameState_Update calls since boot (same on both sides).
+0    0      0 0
+capture 60
+capture 200
+capture 400
+capture 600
+700  START  0 0
+703  0      0 0
+capture 760
+capture 850

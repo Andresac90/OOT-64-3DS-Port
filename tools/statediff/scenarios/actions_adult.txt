@@ -1,0 +1,11 @@
+# SCENE capture_frame end_frame script   (frames from the entry's start, including its transition)
+# Adult Link in Hyrule Field: C-button items (bow aim/shot, bomb, C-right item), shield, Z-target,
+# then walking, sword swings and a jump attack; each entry captures a different moment.
+SCENE_HYRULE_FIELD 35  60  items
+SCENE_HYRULE_FIELD 70  95  items
+SCENE_HYRULE_FIELD 110 135 items
+SCENE_HYRULE_FIELD 150 175 items
+SCENE_HYRULE_FIELD 172 200 items
+SCENE_HYRULE_FIELD 60  90  walk_slash
+SCENE_HYRULE_FIELD 80  110 walk_slash
+SCENE_HYRULE_FIELD 105 135 walk_slash

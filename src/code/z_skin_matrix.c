@@ -522,6 +522,17 @@ void SkinMatrix_Vec3sToVec3f(Vec3s* src, Vec3f* dest) {
 }
 
 void SkinMatrix_MtxFToMtx(MtxF* src, Mtx* dest) {
+#ifdef __3DS__
+    /* PORT: same fix as Matrix_MtxFToMtx (sys_matrix.c): pack with guMtxF2L, the layout the renderer
+     * decodes on this little-endian host. The halfword-by-halfword N64 packing below came out pairwise
+     * swapped, so every skinned model (Epona and the other horses) was drawn with a garbage matrix:
+     * invisible/scattered (tools/statediff/bootflow.py title screen: gSkinLimbMatrices identical, the
+     * horse's vertices beyond the far plane). */
+    extern void guMtxF2L(float mf[4][4], Mtx* m);
+    guMtxF2L(src->mf, dest);
+    return;
+#endif
+    {
     s32 temp;
     u16* m1 = (u16*)&dest->m[0][0];
     u16* m2 = (u16*)&dest->m[2][0];
@@ -589,6 +600,7 @@ void SkinMatrix_MtxFToMtx(MtxF* src, Mtx* dest) {
     temp = src->ww * 0x10000;
     m1[15] = (temp >> 0x10);
     m2[15] = temp & 0xFFFF;
+    }
 }
 
 Mtx* SkinMatrix_MtxFToNewMtx(GraphicsContext* gfxCtx, MtxF* src) {

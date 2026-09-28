@@ -230,7 +230,8 @@ def read_n64_state(g, syms, layout, play):
 # ---------------------------------------------------------------- 3DS (Azahar) capture
 def build_3ds(game_extra):
     # make doesn't track flags: drop the objects of every game file that reacts to these defines
-    hooked = sh("grep -rlE 'PORT_STATEDUMP|PORT_START_ENTRANCE' src", capture_output=True, text=True).stdout.split()
+    hooked = sh("grep -rlE 'PORT_STATEDUMP|PORT_START_ENTRANCE|STATEDIFF_BOOTFLOW|PORT_NORMAL_BOOT' src",
+                capture_output=True, text=True).stdout.split()
     for src in hooked:
         o = os.path.join(REPO, "build/3ds", os.path.splitext(src)[0] + ".o")
         if os.path.exists(o):

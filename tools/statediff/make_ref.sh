@@ -12,6 +12,8 @@ ENTR="${1:-}"
 SCRIPT_H="${2:-}"          # generated input_script.h (scripted controller input); tour_script.h beside it
 TAG="${3:-${ENTR:-default}}"
 AGE="${4:-}"               # optional LINK_AGE_* for the boot (scene tour)
+MODE="${5:-}"              # "bootflow": normal boot (no bypass) + bootflow_input.h hook in GameState_Update
+GC=src/code/game.c
 export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v miniconda | paste -sd: -)   # conda's libxml2 breaks tools/audio
 
 if [ ! -d "$WT" ]; then
@@ -24,7 +26,7 @@ fi
 F=src/overlays/gamestates/ovl_opening/z_opening.c
 G=src/code/graph.c
 P=src/code/z_play.c
-git -C "$WT" checkout -q "$UPSTREAM" -- "$F" "$G" "$P"
+git -C "$WT" checkout -q "$UPSTREAM" -- "$F" "$G" "$P" "$GC"
 # same as the port's PORT_STATEDUMP builds: fixed RNG seed instead of osGetTime()
 sed -i '' 's/    Rand_Seed((u32)osGetTime());/    Rand_Seed(0x5EED0000);/' "$WT/$P"
 grep -q "Rand_Seed(0x5EED0000)" "$WT/$P" || { echo "upstream z_play.c changed"; exit 1; }
@@ -52,6 +54,19 @@ old = '        gameState = SYSTEM_ARENA_MALLOC(size, "../graph.c", 1196);\n'
 assert s.count(old) == 1, "upstream graph.c changed"
 open(p, "w").write(s.replace(old, old + "        if (gameState != NULL) {\n            bzero(gameState, size);\n        }\n"))
 PY2
+if [ "$MODE" = "bootflow" ]; then
+  cp "$REPO/tools/statediff/bootflow_input.h" "$WT/src/code/bootflow_input.h"
+  cp "$REPO/build/statediff/bootflow_script.h" "$WT/src/code/bootflow_script.h"
+  python3 - "$WT/$GC" <<'PY4'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+head = "void GameState_Update(GameState* gameState) {\n    GraphicsContext* gfxCtx = gameState->gfxCtx;\n"
+assert s.count(head) == 1, "upstream GameState_Update changed"
+s = s.replace(head, '#include "bootflow_input.h"\n\n' + head + "\n    BootFlow_Inject(gameState);\n")
+open(p, "w").write(s)
+PY4
+else
 python3 - "$WT/$F" "$ENTR" "$AGE" <<'PY'
 import sys
 p, entr, age = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -80,9 +95,11 @@ if age:
 assert s.count(old) == 1, "upstream z_opening.c changed"
 open(p, "w").write(s.replace(old, new))
 PY
+fi
 gmake -C "$WT" rom VERSION=ntsc-1.0 REGION=US -j8 >"$REPO/build/statediff/ref_build.log" 2>&1 || { tail -20 "$REPO/build/statediff/ref_build.log"; exit 1; }
-git -C "$WT" checkout -q "$UPSTREAM" -- "$F" "$G" "$P"
-rm -f "$WT/src/code/statediff_input.h" "$WT/src/code/input_script.h" "$WT/src/code/tour_script.h"
+git -C "$WT" checkout -q "$UPSTREAM" -- "$F" "$G" "$P" "$GC"
+rm -f "$WT/src/code/statediff_input.h" "$WT/src/code/input_script.h" "$WT/src/code/tour_script.h" \
+      "$WT/src/code/bootflow_input.h" "$WT/src/code/bootflow_script.h"
 mkdir -p "$REPO/build/statediff"
 cp "$WT/build/ntsc-1.0/oot-ntsc-1.0.z64" "$REPO/build/statediff/ref_$TAG.z64"
 cp "$WT/build/ntsc-1.0/oot-ntsc-1.0.elf" "$REPO/build/statediff/ref_$TAG.elf"

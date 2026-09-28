@@ -18,3 +18,4 @@
 ^play\.(mainCamera|subCameras\[\d+\])\.paramData \[UNION MIXED  # camera params: same bytes under another function's view (stale until RELOAD_PARAMS); the active view is checked when it agrees
 ^play\.msgCtx\.font\.anon[01] \[UNION views agree: force_structure_alignment_(charTex|icon)  # glyph/icon textures DMA'd as native u64 (port texture layout); only passed to the renderer, never read by the CPU
 ^play\.msgCtx\.anon0 \[UNION views agree: msgBufDecoded \|  # decoded text is bytes for English (msgBufDecoded); the wide view is the JP path
+^save\.info\.checksum\.value$          # the game sums the save as native u16 words: another value on LE, but computed and verified the same way on the port

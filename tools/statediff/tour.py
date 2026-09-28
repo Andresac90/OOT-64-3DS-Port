@@ -129,6 +129,11 @@ def capture_n64(tour, age, layout, tag):
 def capture_3ds(tour, age):
     extra = SD.game_extra("0x%03X" % tour[0][1], -1, "idle", age=str(age), tour=True)
     SD.build_3ds(extra)
+    return capture_3ds_built(tour)
+
+
+def capture_3ds_built(tour):
+    """run the already-built comparison ROM until it has dumped len(tour) captures; collect them"""
     for f in glob.glob(os.path.join(TOUR_SD, "*.bin")) + [os.path.join(SD.SD, "boot.log")]:
         if os.path.exists(f):
             os.remove(f)
@@ -162,7 +167,7 @@ def capture_3ds(tour, age):
         gp = os.path.join(TOUR_SD, "sd_glob_%d.bin" % i)
         caps[i] = {"play": open(paths[0], "rb").read(), "save": open(paths[1], "rb").read(), "actors": actors,
                    "glob": open(gp, "rb").read() if os.path.exists(gp) else b""}
-        for k in ("depth", "color0", "color1", "depthst0", "depthst1", "draws0", "draws1"):
+        for k in ("depth", "color0", "color1", "depthst0", "depthst1", "draws0", "draws1", "skin"):
             dp = os.path.join(TOUR_SD, "sd_%s_%d.bin" % (k, i))
             caps[i][k] = open(dp, "rb").read() if os.path.exists(dp) else b""
     shutil.copy(os.path.join(SD.REPO, "build/3ds/oot.elf"), os.path.join(SD.OUT, "3ds_tour.elf"))  # addresses in dumps
@@ -172,18 +177,18 @@ def capture_3ds(tour, age):
 
 def save_caps(path, caps):
     for i, c in caps.items():  # depth buffers next to the json (large, raw)
-        for k in ("zbuf", "depth", "fbdisp", "fb0", "fb1", "color0", "color1", "depthst0", "depthst1", "draws0", "draws1"):
+        for k in ("zbuf", "depth", "fbdisp", "fb0", "fb1", "color0", "color1", "depthst0", "depthst1", "draws0", "draws1", "skin"):
             if c.get(k):
                 open(path.replace(".json", "_%s_%d.bin" % (k, i)), "wb").write(c[k])
     json.dump({str(i): {"play": c["play"].hex(), "save": c["save"].hex(), "forced": c.get("forced", False),
-                        "glob": c.get("glob", b"").hex(),
+                        "glob": c.get("glob", b"").hex(), "state": c.get("state", ""),
                         "actors": [[a, d.hex()] for a, d in c["actors"]]} for i, c in caps.items()}, open(path, "w"))
 
 
 def load_caps(path):
     caps = _load_caps(path)
     for i, c in caps.items():
-        for k in ("zbuf", "depth", "fbdisp", "fb0", "fb1", "color0", "color1", "depthst0", "depthst1", "draws0", "draws1"):
+        for k in ("zbuf", "depth", "fbdisp", "fb0", "fb1", "color0", "color1", "depthst0", "depthst1", "draws0", "draws1", "skin"):
             f = path.replace(".json", "_%s_%d.bin" % (k, i))
             c[k] = open(f, "rb").read() if os.path.exists(f) else b""
     return caps
@@ -191,7 +196,7 @@ def load_caps(path):
 
 def _load_caps(path):
     return {int(i): {"play": bytes.fromhex(c["play"]), "save": bytes.fromhex(c["save"]), "forced": c.get("forced", False),
-                     "glob": bytes.fromhex(c.get("glob", "")),
+                     "glob": bytes.fromhex(c.get("glob", "")), "state": c.get("state", ""),
                      "actors": [(a, bytes.fromhex(d)) for a, d in c["actors"]]} for i, c in json.load(open(path)).items()}
 
 

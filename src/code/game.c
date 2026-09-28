@@ -293,8 +293,17 @@ void GameState_ReqPadData(GameState* gameState) {
     PadMgr_RequestPadData(&gPadMgr, gameState->input, true);
 }
 
+#ifdef STATEDIFF_BOOTFLOW
+// PORT: tools/statediff/bootflow.py - scripted input + captures across all game states (same file on the N64 side)
+#include "bootflow_input.h"
+#endif
+
 void GameState_Update(GameState* gameState) {
     GraphicsContext* gfxCtx = gameState->gfxCtx;
+
+#ifdef STATEDIFF_BOOTFLOW
+    BootFlow_Inject(gameState);
+#endif
 
     GameState_SetFrameBuffer(gfxCtx);
 

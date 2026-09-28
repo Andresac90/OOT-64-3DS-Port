@@ -16,12 +16,12 @@
 /* #include "file_select_state.h"  // restore for PORT_FS_TEST */
 
 void TitleSetup_SetupTitleScreen(TitleSetupState* this) {
-#ifdef __3DS__
-    // Boot bypass: cutscene system works; D7 heap-vs-segment-8 collision FIXED (seg_addr +
-    // PortSegmentedToVirtual) so the file-select no longer runs away (0 guards), but its
-    // content still renders black (separate textures/combiner/draw issue). Boot into playable
-    // Hyrule Field. To test the file-select: restore file_select_state.h + GAMEMODE_FILE_SELECT
-    // + SET_NEXT_GAMESTATE(FileSelect_Init, FileSelectState).
+#if defined(__3DS__) && !defined(PORT_NORMAL_BOOT) && \
+    (defined(PORT_STATEDUMP) || defined(PORT_START_ENTRANCE) || defined(PORT_DEBUG_BOOT))
+    // PORT: debug boot straight into Play with the debug save, for tools (tools/statediff tours set
+    // PORT_STATEDUMP / PORT_START_ENTRANCE) or GAME_EXTRA=-DPORT_DEBUG_BOOT. Normal builds run the real
+    // flow (console logo, title screen, file select): it matches the N64 state for state
+    // (tools/statediff/bootflow.py title, 2026-09-28).
     gSaveContext.gameMode = GAMEMODE_NORMAL;
     this->state.running = false;
     gSaveContext.save.linkAge = LINK_AGE_ADULT;

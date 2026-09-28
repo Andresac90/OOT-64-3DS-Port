@@ -200,6 +200,12 @@ static int lowerChannel(Opnd a, Opnd b, Opnd c, Opnd d, int ch, int cycle, ChanO
         if (isK(c, KC_ONE)) return emit(out, n, GPU_ADD, nb, d, z);
         return emit(out, n, GPU_MULTIPLY_ADD, nb, c, d);
     }
+    if (isK(b, KC_ONE) && a.kind != OK_PREV) { /* (A-1)*C+D = D - (1-A)*C: no intermediate above 1 */
+        Opnd na = a;
+        na.inv = 1;
+        n = emit(out, n, GPU_MODULATE, na, c, z);
+        return emit(out, n, GPU_SUBTRACT, d, prev, z);
+    }
     if (isK(d, KC_ZERO)) { /* max(A-B, 0)*C is exact: C >= 0 and the N64 clamps the result */
         n = emit(out, n, GPU_SUBTRACT, a, b, z);
         if (isK(c, KC_ONE)) return n;

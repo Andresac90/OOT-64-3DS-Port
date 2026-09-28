@@ -132,7 +132,11 @@ def main():
     if a.scenes:
         scenes = [t for t in scenes if t[0] in a.scenes.split(",")]
     names = {i: t[0] for i, t in enumerate(scenes)}
-    if a.tour.startswith("scen_"):  # scen_<age>_<scenario>: entries listed in scenarios/<scenario>.txt
+    if a.tour.startswith("boot_"):  # boot flow captures: named by capture frame
+        caps = [l.split()[1] for l in open(os.path.join(HERE, "bootflows", a.tour[5:] + ".txt"))
+                if l.split("#")[0].strip().startswith("capture")]
+        names = {i: "boot@%s" % f for i, f in enumerate(sorted(caps, key=int))}
+    elif a.tour.startswith("scen_"):  # scen_<age>_<scenario>: entries listed in scenarios/<scenario>.txt
         lines = [l.split("#")[0].split() for l in open(os.path.join(HERE, "scenarios", a.tour.split("_", 2)[2] + ".txt"))]
         names = {i: "%s/%s" % (l[0], l[3]) for i, l in enumerate(x for x in lines if x)}
     order = None
