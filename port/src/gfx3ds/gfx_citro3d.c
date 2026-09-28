@@ -497,8 +497,18 @@ static void gfx_citro3d_load_shader(struct ShaderProgram *new_prg) {
 }
 
 static void gfx_citro3d_set_combine_consts(const struct GfxCombineConsts *consts) {
+    /* only the constant colors change: rewrite them, not the whole TEV program */
+    const struct ShaderProgram* prg = &sShaderProgramPool[sCurShader];
+    int s;
     sConsts = *consts;
-    updateShader();
+    for (s = 0; s < prg->num_stages; s++) {
+        if (prg->stages[s].konst[0] != KC_NONE || prg->stages[s].konst[1] != KC_NONE) {
+            C3D_TexEnvColor(C3D_GetTexEnv(s), konstColor(prg->stages[s].konst[0], prg->stages[s].konst[1]));
+        }
+    }
+    if (prg->buf_konst[0] != KC_NONE || prg->buf_konst[1] != KC_NONE) {
+        C3D_TexEnvBufColor(konstColor(prg->buf_konst[0], prg->buf_konst[1]));
+    }
 }
 
 static struct ShaderProgram *gfx_citro3d_create_and_load_new_shader(uint64_t shader_id0, uint32_t shader_id1) {

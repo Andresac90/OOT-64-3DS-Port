@@ -225,6 +225,36 @@ static unsigned long get_time(void) {
     return (unsigned long)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
 }
 
+/* PORT PERF (2026-09-28): stage timers (opt-in, see PORT_PERF_STAGES) for the frame profiler (3ds_main.c Port3ds_PerfReport), in
+ * 268 MHz ticks: texture import, vertex transform, triangle setup (excluding flushes), backend draws. */
+#ifdef __3DS__
+#include <3ds/svc.h>
+u64 gPortPerfTex, gPortPerfVtx, gPortPerfTri, gPortPerfFlush;
+u32 gPortPerfTexImports;
+#ifdef PORT_PERF_STAGES /* opt-in (PORT_EXTRA=-DPORT_PERF_STAGES): one system call per triangle */
+#define PERF_T() svcGetSystemTick()
+#else
+#define PERF_T() 0
+#endif
+#else
+#define PERF_T() 0
+static uint64_t gPortPerfTex, gPortPerfVtx, gPortPerfTri, gPortPerfFlush;
+static uint32_t gPortPerfTexImports;
+#endif
+static void gfx_flush_impl(void);
+static void import_texture_impl(int unit, int tile_index);
+static void gfx_flush(void) {
+    uint64_t t0 = PERF_T();
+    gfx_flush_impl();
+    gPortPerfFlush += PERF_T() - t0;
+}
+static void import_texture(int unit, int tile_index) {
+    uint64_t t0 = PERF_T();
+    import_texture_impl(unit, tile_index);
+    gPortPerfTex += PERF_T() - t0;
+    gPortPerfTexImports++;
+}
+
 #ifdef __3DS__
 /* PORT (2026-09-24): minimal render-target routing. The citro3d backend has ONE target (the
  * screen), but OoT renders into other color images too: the pause menu's Link preview
@@ -364,7 +394,7 @@ void PortGfx_WriteDrawLog(int back, const char* path) {
 }
 #endif
 
-static void gfx_flush(void) {
+static void gfx_flush_impl(void) {
     if (buf_vbo_len > 0) {
         int num = buf_vbo_num_tris;
         unsigned long t0 = get_time();
@@ -807,7 +837,7 @@ static void texdump_record(const uint8_t* addr, uint8_t fmt, uint8_t siz, uint32
 }
 #endif
 
-static void import_texture(int unit, int tile_index) {
+static void import_texture_impl(int unit, int tile_index) {
     sImpTile = &rdp.tiles[tile_index];
     int tile = sImpTile->tmem != 0; /* TMEM slot: the importers below index loaded_texture[] with it */
     uint8_t fmt = sImpTile->fmt;
@@ -1014,7 +1044,14 @@ static float gfx_adjust_x_for_aspect_ratio(float x) {
     return x * (4.0f / 3.0f) / ((float)gfx_current_dimensions.width / (float)gfx_current_dimensions.height);
 }
 
+static void gfx_sp_vertex_impl(size_t n_vertices, size_t dest_index, const Vtx *vertices);
 static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *vertices) {
+    uint64_t t0 = PERF_T();
+    gfx_sp_vertex_impl(n_vertices, dest_index, vertices);
+    gPortPerfVtx += PERF_T() - t0;
+}
+
+static void gfx_sp_vertex_impl(size_t n_vertices, size_t dest_index, const Vtx *vertices) {
     for (size_t i = 0; i < n_vertices; i++, dest_index++) {
         const Vtx_t *v = &vertices[i].v;
         const Vtx_tn *vn = &vertices[i].n;
@@ -1196,10 +1233,11 @@ static void pvtx_mid_screen(const PVtx* a, const PVtx* b, PVtx* m) {
 
 /* how much an edge needs splitting: screen length in N64 pixels, if its w ratio is significant */
 static float pvtx_edge_score(const PVtx* a, const PVtx* b) {
-    float r = a->w > b->w ? a->w / b->w : b->w / a->w;
-    if (r < SUBDIV_MAX_RATIO) {
+    float hi = a->w > b->w ? a->w : b->w, lo = a->w > b->w ? b->w : a->w;
+    if (hi < SUBDIV_MAX_RATIO * lo) { /* common case: no division */
         return 0.0f;
     }
+    float r = hi / lo;
     float dx = (a->x / a->w - b->x / b->w) * (SCREEN_WIDTH / 2), dy = (a->y / a->w - b->y / b->w) * (SCREEN_HEIGHT / 2);
     float len = sqrtf(dx * dx + dy * dy);
     return len < SUBDIV_MIN_PIXELS ? 0.0f : len * (r - 1.0f);
@@ -1348,7 +1386,14 @@ static void gfx_select_target(void) {
 #endif
 }
 
+static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx);
 static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
+    uint64_t t0 = PERF_T(), f0 = gPortPerfFlush;
+    gfx_sp_tri1_impl(vtx1_idx, vtx2_idx, vtx3_idx);
+    gPortPerfTri += (PERF_T() - t0) - (gPortPerfFlush - f0);
+}
+
+static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
     gfx_select_target();
     gfx_port_tri_count++;
     struct LoadedVertex *v1 = &rsp.loaded_vertices[vtx1_idx];
@@ -1394,10 +1439,12 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
     if (nocull == -2) nocull = getenv("PORT_NOCULL") ? 1 : 0;
     if (nocull) { /* skip */ } else
     if ((rsp.geometry_mode & G_CULL_BOTH) != 0) {
-        float dx1 = v1->x / (v1->w) - v2->x / (v2->w);
-        float dy1 = v1->y / (v1->w) - v2->y / (v2->w);
-        float dx2 = v3->x / (v3->w) - v2->x / (v2->w);
-        float dy2 = v3->y / (v3->w) - v2->y / (v2->w);
+        /* PORT PERF: one reciprocal per vertex (VFP divides are slow on the ARM11) */
+        float q1 = 1.0f / v1->w, q2 = 1.0f / v2->w, q3 = 1.0f / v3->w;
+        float dx1 = v1->x * q1 - v2->x * q2;
+        float dy1 = v1->y * q1 - v2->y * q2;
+        float dx2 = v3->x * q3 - v2->x * q2;
+        float dy2 = v3->y * q3 - v2->y * q2;
         float cross = dx1 * dy2 - dy1 * dx2;
         
         if ((v1->w < 0) ^ (v2->w < 0) ^ (v3->w < 0)) {
@@ -1470,8 +1517,18 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
     bool use_alpha = blend || texture_edge;
     bool cutout = texture_edge || (alpha_threshold && blend);
 
-    uint64_t cc_id0 = gfx_cc_key(two_cycle, use_alpha);
-    uint32_t usage = gfx_cc_usage(cc_id0);
+    /* the key only changes with the combine words and the two flags: decode once per change */
+    static uint64_t sKeyRaw = ~0ull, sKeyVal;
+    static uint32_t sKeyFlags = ~0u, sKeyUsage;
+    uint32_t keyFlags = (two_cycle ? 1 : 0) | (use_alpha ? 2 : 0);
+    if (rdp.combine_mode != sKeyRaw || keyFlags != sKeyFlags) {
+        sKeyRaw = rdp.combine_mode;
+        sKeyFlags = keyFlags;
+        sKeyVal = gfx_cc_key(two_cycle, use_alpha);
+        sKeyUsage = gfx_cc_usage(sKeyVal);
+    }
+    uint64_t cc_id0 = sKeyVal;
+    uint32_t usage = sKeyUsage;
     uint32_t cc_id1 = (usage & (SHADER_OPT_TEX0 | SHADER_OPT_TEX1)) | (use_alpha ? SHADER_OPT_ALPHA : 0) |
                       (use_fog ? SHADER_OPT_FOG : 0) | (cutout ? SHADER_OPT_TEXTURE_EDGE : 0);
     if (rendering_state.shader_program == NULL || cc_id0 != rendering_state.cc_id0 || cc_id1 != rendering_state.cc_id1) {
@@ -1563,6 +1620,8 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
     port_draw_snapshot(); /* first triangle of a batch: record the state it's drawn with */
 #endif
     
+    const float inv_tex_w[2] = { 1.0f / tex_width[0], 1.0f / tex_width[1] };
+    const float inv_tex_h[2] = { 1.0f / tex_height[0], 1.0f / tex_height[1] };
     PVtx pv[3];
     for (int i = 0; i < 3; i++) {
         PVtx* p = &pv[i];
@@ -1590,17 +1649,17 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
                     u += 0.5f;
                     v += 0.5f;
                 }
-                u /= tex_width[t];
-                v /= tex_height[t];
+                u *= inv_tex_w[t];
+                v *= inv_tex_h[t];
             }
             p->uv[t][0] = u;
             p->uv[t][1] = v;
         }
         /* shade (with G_FOG the RSP's fog factor replaces shade alpha, as on the N64) */
-        p->c[0] = v_arr[i]->color.r / 255.0f;
-        p->c[1] = v_arr[i]->color.g / 255.0f;
-        p->c[2] = v_arr[i]->color.b / 255.0f;
-        p->c[3] = v_arr[i]->color.a / 255.0f;
+        p->c[0] = v_arr[i]->color.r * (1.0f / 255.0f);
+        p->c[1] = v_arr[i]->color.g * (1.0f / 255.0f);
+        p->c[2] = v_arr[i]->color.b * (1.0f / 255.0f);
+        p->c[3] = v_arr[i]->color.a * (1.0f / 255.0f);
     }
     gfx_emit_tri(&pv[0], &pv[1], &pv[2], z_is_from_0_to_1);
 }

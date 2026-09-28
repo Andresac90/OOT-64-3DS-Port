@@ -783,8 +783,19 @@ s32 EnGoma_OverrideLimbDraw(PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* 
         rot->x += this->eyePitch;
         rot->y += this->eyeYaw;
     } else if (limbIndex == GOMA_LIMB_BODY && this->hurtTimer != 0) {
+#ifdef __3DS__
+        {
+            // PORT: C leaves the order of these Rand calls unspecified; this is IDO's order (tools/statediff/evalorder.py)
+            s16 g = Rand_ZeroOne() * 255.0f;
+            s16 r = Rand_ZeroOne() * 255.0f;
+            s16 b = Rand_ZeroOne() * 255.0f;
+
+            gDPSetEnvColor(POLY_OPA_DISP++, r, g, b, 255);
+        }
+#else
         gDPSetEnvColor(POLY_OPA_DISP++, (s16)(Rand_ZeroOne() * 255.0f), (s16)(Rand_ZeroOne() * 255.0f),
                        (s16)(Rand_ZeroOne() * 255.0f), 255);
+#endif
     }
 
     CLOSE_DISPS(play->state.gfxCtx, "../z_en_goma.c", 2011);

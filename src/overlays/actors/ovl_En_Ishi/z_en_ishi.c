@@ -214,7 +214,17 @@ void EnIshi_SpawnFragmentsLarge(EnIshi* this, PlayState* play) {
         }
         rand = Rand_ZeroOne() * 10.0f;
         velocity.x += rand * Math_SinS(angle);
+#ifdef __3DS__
+        {
+            // PORT: C leaves the order of these Rand calls unspecified; this is IDO's order (tools/statediff/evalorder.py)
+            f32 second = Rand_ZeroOne();
+            f32 first = Rand_ZeroOne();
+
+            velocity.y += (first * 4.0f) + ((second * i) * 0.7f);
+        }
+#else
         velocity.y += (Rand_ZeroOne() * 4.0f) + ((Rand_ZeroOne() * i) * 0.7f);
+#endif
         velocity.z += rand * Math_CosS(angle);
         if (i == 0) {
             phi_v0 = 41;

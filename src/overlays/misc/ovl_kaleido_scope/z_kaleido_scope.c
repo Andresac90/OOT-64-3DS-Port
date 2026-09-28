@@ -1873,6 +1873,16 @@ void KaleidoScope_DrawUIOverlay(PlayState* play) {
         j = (pauseCtx->cursorSpecialPos - PAUSE_CURSOR_PAGE_LEFT + UI_OVERLAY_QUAD_BUTTON_LEFT) * 4;
         pauseCtx->cursorVtx[0].v.ob[0] = pauseCtx->uiOverlayVtx[j].v.ob[0];
         pauseCtx->cursorVtx[0].v.ob[1] = pauseCtx->uiOverlayVtx[j].v.ob[1];
+#ifdef __3DS__
+        {
+            // PORT: cursorVtx is not double-buffered. The N64's RSP runs a frame behind the CPU and reads it
+            // after the next update has rebuilt the corner quads around this position; the port renders
+            // right after this draw, so rebuild them now (stale corners made inverted, culled quads: the
+            // Z/R bracket was missing, tools/statediff fbdiff)
+            void KaleidoScope_UpdateCursorVtx(PlayState * play);
+            KaleidoScope_UpdateCursorVtx(play);
+        }
+#endif
         KaleidoScope_DrawCursor(play, pauseCtx->pageIndex);
     }
 

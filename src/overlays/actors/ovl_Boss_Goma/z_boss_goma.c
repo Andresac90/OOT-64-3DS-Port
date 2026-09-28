@@ -1728,8 +1728,21 @@ void BossGoma_CeilingMoveToCenter(BossGoma* this, PlayState* play) {
             angle = this->actor.wallYaw + absDiff / 2;
         }
 
+#ifdef __3DS__
+        {
+            // PORT: C leaves the order of these Rand calls unspecified; this is IDO's order (tools/statediff/evalorder.py)
+            f32 centered = Rand_CenteredFloat(2.0f);
+            f32 zeroOne = Rand_ZeroOne();
+
+            this->actor.world.pos.z += Math_CosS(angle) * (5.0f + zeroOne * 5.0f) + centered;
+            centered = Rand_CenteredFloat(2.0f);
+            zeroOne = Rand_ZeroOne();
+            this->actor.world.pos.x += Math_SinS(angle) * (5.0f + zeroOne * 5.0f) + centered;
+        }
+#else
         this->actor.world.pos.z += Math_CosS(angle) * (5.0f + Rand_ZeroOne() * 5.0f) + Rand_CenteredFloat(2.0f);
         this->actor.world.pos.x += Math_SinS(angle) * (5.0f + Rand_ZeroOne() * 5.0f) + Rand_CenteredFloat(2.0f);
+#endif
     }
 
     // timer setup to 30-60
@@ -2000,8 +2013,19 @@ s32 BossGoma_OverrideLimbDraw(PlayState* play, s32 limbIndex, Gfx** dList, Vec3f
             if (this->eyeState == EYESTATE_IRIS_FOLLOW_BONUS_IFRAMES && this->eyeLidBottomRotX < -0xA8C) {
                 *dList = NULL;
             } else if (this->invincibilityFrames != 0) {
+#ifdef __3DS__
+                {
+                    // PORT: C leaves the order of these Rand calls unspecified; this is IDO's order (tools/statediff/evalorder.py)
+                    s16 g = Rand_ZeroOne() * 255.0f;
+                    s16 r = Rand_ZeroOne() * 255.0f;
+                    s16 b = Rand_ZeroOne() * 255.0f;
+
+                    gDPSetEnvColor(POLY_OPA_DISP++, r, g, b, 63);
+                }
+#else
                 gDPSetEnvColor(POLY_OPA_DISP++, (s16)(Rand_ZeroOne() * 255.0f), (s16)(Rand_ZeroOne() * 255.0f),
                                (s16)(Rand_ZeroOne() * 255.0f), 63);
+#endif
             } else {
                 gDPSetEnvColor(POLY_OPA_DISP++, (s16)this->eyeEnvColor[0], (s16)this->eyeEnvColor[1],
                                (s16)this->eyeEnvColor[2], 63);

@@ -146,6 +146,17 @@ static void Port3ds_PerfReport(unsigned frames) {
         PortDbgX("perf us/frame gpu wait", (unsigned)(gPortPerfGpuWait / div));
         gPortPerfGpuWait = 0;
     }
+    {
+        extern u64 gPortPerfTex, gPortPerfVtx, gPortPerfTri, gPortPerfFlush;
+        extern u32 gPortPerfTexImports;
+        PortDbgX("perf us/frame  dl.tex", (unsigned)(gPortPerfTex / div));
+        PortDbgX("perf us/frame  dl.vtx", (unsigned)(gPortPerfVtx / div));
+        PortDbgX("perf us/frame  dl.tri", (unsigned)(gPortPerfTri / div));
+        PortDbgX("perf us/frame  dl.flush", (unsigned)(gPortPerfFlush / div));
+        PortDbgX("perf tex imports/frame", gPortPerfTexImports / frames);
+        gPortPerfTex = gPortPerfVtx = gPortPerfTri = gPortPerfFlush = 0;
+        gPortPerfTexImports = 0;
+    }
     PortDbgX("perf us/frame swap", (unsigned)(sPerfSwap / div));
     PortDbgX("perf us/frame pace", (unsigned)(sPerfPace / div));
     PortDbgX("perf tris/frame", gPortPerfTris / frames);
@@ -319,6 +330,9 @@ int main(int argc, char** argv) {
     (void)argc; (void)argv;
     { extern void PortOverlayStatics_Init(void); PortOverlayStatics_Init(); } /* before any game code */
     DBG("PORT: main() entered");
+    /* PORT PERF (2026-09-28): New 3DS: run the app core at 804 MHz with the L2 cache (default is the
+     * original 268 MHz mode, ~3x slower). No effect on an original 3DS. */
+    osSetSpeedupEnable(true);
     gfxInitDefault();
     DBG("PORT: gfxInitDefault done");
     consoleInit(GFX_BOTTOM, NULL);

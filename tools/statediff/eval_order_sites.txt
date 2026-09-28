@@ -1,7 +1,9 @@
 # Statements with >=2 Rand_* calls: C leaves their evaluation order unspecified, so IDO (N64) and GCC
 # (3DS) may draw the random numbers into different slots with identical RNG state. Verified so far:
 #   EnGanonMant_Tear (fixed: IDO draws the joint index first), BgSpot18Basket_SpawnDustClouds (same order).
-# Check a site by comparing the Rand call -> use order in both disassemblies (scratch randorder.py).
+# 2026-09-28: ALL sites verified exactly with tools/statediff/evalorder.py (compiles each statement with
+#   IDO and GCC with its Rand calls renamed to stubs and compares the call order). 6 differed and are
+#   fixed with IDO-order temporaries under __3DS__: EnGanonMant_Tear, Boss_Goma (3), En_Goma, En_Ishi.
 src/overlays/actors/ovl_Bg_Breakwall/z_bg_breakwall.c:187  actor = Actor_Spawn(&play->actorCtx, play, ACTOR_EN_A_OBJ, Rand_CenteredFloat(20.0f) + actorPos.x, Rand_CenteredFloat(20.0f) + actorPos.y, R
 src/overlays/actors/ovl_Bg_Ganon_Otyuka/z_bg_ganon_otyuka.c:289  func_8002836C(play, &pos, &velocity, &accel, &sDustPrimColor, &sDustEnvColor, (s16)Rand_ZeroFloat(100.0f) + 250, 5, (s16)Rand_ZeroFloat(5.0f
 src/overlays/actors/ovl_Bg_Haka_Zou/z_bg_haka_zou.c:89  thisx->world.rot.y = thisx->shape.rot.y * ((Rand_ZeroOne() < 0.5f) ? -1 : 1) + Rand_CenteredFloat(0x1000);
@@ -9,7 +11,7 @@ src/overlays/actors/ovl_Bg_Haka_Zou/z_bg_haka_zou.c:91  thisx->world.rot.x = Ran
 src/overlays/actors/ovl_Bg_Haka_Zou/z_bg_haka_zou.c:92  thisx->world.rot.z = Rand_S16Offset(0x400, 0x800) * ((Rand_ZeroOne() < 0.5f) ? -1 : 1);
 src/overlays/actors/ovl_Bg_Heavy_Block/z_bg_heavy_block.c:479  case HEAVYBLOCK_UNBREAKABLE_OUTSIDE_CASTLE: BgHeavyBlock_SpawnDust(play, Rand_CenteredFloat(30.0f) + 1678.0f, Rand_ZeroFloat(100.0f) + 1286.
 src/overlays/actors/ovl_Bg_Heavy_Block/z_bg_heavy_block.c:482  BgHeavyBlock_SpawnDust(play, Rand_CenteredFloat(30.0f) + 1729.0f, Rand_ZeroFloat(80.0f) + 1269.0f, Rand_CenteredFloat(30.0f) + 600.0f, 0.0f,
-src/overlays/actors/ovl_Bg_Heavy_Block/z_bg_heavy_block.c:485  case HEAVYBLOCK_UNBREAKABLE: BgHeavyBlock_SpawnDust(play, Rand_CenteredFloat(100.0f) + -735.0f, 29.0f, Rand_CenteredFloat(100.0f) + -3418.0f
+src/overlays/actors/ovl_Bg_Heavy_Block/z_bg_heavy_block.c:487  BgHeavyBlock_SpawnDust(play, Rand_CenteredFloat(100.0f) + -735.0f, 29.0f,
 src/overlays/actors/ovl_Bg_Jya_Ironobj/z_bg_jya_ironobj.c:131  Actor* actor = Actor_Spawn(&play->actorCtx, play, ACTOR_BG_JYA_HAHENIRON, this->dyna.actor.world.pos.x, Rand_ZeroOne() * 80.0f + this->dyna.
 src/overlays/actors/ovl_Bg_Jya_Ironobj/z_bg_jya_ironobj.c:160  vel.x = 2.0f * ((Rand_ZeroOne() * 6.0f) - 3.0f) + (Rand_ZeroOne() * sins * 8.0f * temp_f22);
 src/overlays/actors/ovl_Bg_Jya_Ironobj/z_bg_jya_ironobj.c:162  vel.z = 2.0f * ((Rand_ZeroOne() * 6.0f) - 3.0f) + (Rand_ZeroOne() * coss * 8.0f * temp_f22);
