@@ -684,10 +684,13 @@ void KaleidoScope_DrawEquipment(PlayState* play) {
 
     KaleidoScope_DrawPlayerWork(play);
 
+#ifndef __3DS__ // PORT: Player_DrawPause renders straight into the preview texture (z_player_lib.c)
     if ((pauseCtx->mainState == PAUSE_MAIN_STATE_EQUIP_CHANGED) && (sEquipTimer == 10)) {
         KaleidoScope_SetupPlayerPreRender(play);
     }
+#endif
 
+#ifndef __3DS__ // PORT: no copy to filter (see above)
     if ((pauseCtx->mainState == PAUSE_MAIN_STATE_EQUIP_CHANGED) && (sEquipTimer == 9)) {
 #ifndef AVOID_UB
         //! @bug: This function shouldn't take any arguments
@@ -696,6 +699,7 @@ void KaleidoScope_DrawEquipment(PlayState* play) {
         KaleidoScope_ProcessPlayerPreRender();
 #endif
     }
+#endif
 
     gSPSegment(POLY_OPA_DISP++, 0x07, PAUSE_PLAYER_SEGMENT_RENDER_TEXTURE(pauseCtx->playerSegment));
     gSPSegment(POLY_OPA_DISP++, 0x08, pauseCtx->iconItemSegment);

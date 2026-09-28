@@ -203,15 +203,29 @@ def main():
     ap.add_argument("--skip-n64", action="store_true")
     ap.add_argument("--skip-3ds", action="store_true")
     ap.add_argument("--show", type=int, default=4, help="differences shown per scene")
+    ap.add_argument("--scenario", default="", help="tools/statediff/scenarios/<name>.txt: scripted entries")
     args = ap.parse_args()
-    tour = retail_scene_entrances(args.age)
-    if args.scenes:
-        want = args.scenes.split(",")
-        tour = [t for t in tour if t[0] in want]
+    scenario = None
+    if args.scenario:
+        # lines: SCENE_NAME capture_frame end_frame script   (entrance = the scene's tour entrance)
+        by_name = {t[0]: t for t in retail_scene_entrances(args.age)}
+        tour, scenario = [], []
+        for line in open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "scenarios", args.scenario + ".txt")):
+            line = line.split("#")[0].strip()
+            if line:
+                scene, cap, end, script = line.split()
+                tour.append(by_name[scene])
+                scenario.append((int(cap), int(end), script))
+        tag = "scen_%s_%s" % (args.age, args.scenario)
+    else:
+        tour = retail_scene_entrances(args.age)
+        if args.scenes:
+            want = args.scenes.split(",")
+            tour = [t for t in tour if t[0] in want]
+        tag = "tour_%s_%d_%d" % (args.age, args.frames, len(tour))
     age = AGES[args.age]
-    tag = "tour_%s_%d_%d" % (args.age, args.frames, len(tour))
     SD.write_script_header("idle")
-    SD.write_tour_header([t[1] for t in tour], args.frames)
+    SD.write_tour_header([t[1] for t in tour], args.frames, scenario)
     layout, actor_layouts = SD.load_layout(), SD.load_actor_layouts()
     pn, p3 = os.path.join(SD.OUT, "n64_%s.json" % tag), os.path.join(SD.OUT, "3ds_%s.json" % tag)
     n64 = load_caps(pn) if args.skip_n64 else capture_n64(tour, age, layout, tag)

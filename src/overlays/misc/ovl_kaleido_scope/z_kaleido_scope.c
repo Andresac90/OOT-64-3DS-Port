@@ -3884,7 +3884,9 @@ void KaleidoScope_Update(PlayState* play) {
                                     PAUSE_PLAYER_SEGMENT_RENDER_TEXTURE(pauseCtx->playerSegment), NULL, sPreRenderCvg);
 
             KaleidoScope_DrawPlayerWork(play);
+#ifndef __3DS__ // PORT: Player_DrawPause renders straight into the preview texture (z_player_lib.c)
             KaleidoScope_SetupPlayerPreRender(play);
+#endif
 
             // World map points
 

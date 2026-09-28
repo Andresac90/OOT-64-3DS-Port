@@ -688,7 +688,13 @@ static void gfx_citro3d_set_zmode_decal(bool zmode_decal) {
  * button drawn over the hearts, found by tools/statediff fbdiff). */
 #define TOP_W 400
 
+extern int Port3ds_IsOffscreen(void);
+
 static void gfx_citro3d_set_viewport(int x, int y, int width, int height) {
+    if (Port3ds_IsOffscreen()) { /* 1x 320x240-space off-screen target (gfx_3ds.c) */
+        C3D_SetViewport(y, 320 - (x + width), height, width);
+        return;
+    }
     x = TOP_W - (x + width);
     if (gGfx3DSMode == GFX_3DS_MODE_AA_22 || gGfx3DSMode == GFX_3DS_MODE_WIDE_AA_12)
         C3D_SetViewport(y * 2, x * 2, height * 2, width * 2);
@@ -700,6 +706,10 @@ static void gfx_citro3d_set_viewport(int x, int y, int width, int height) {
 
 static void gfx_citro3d_set_scissor(int x, int y, int width, int height)
 {
+    if (Port3ds_IsOffscreen()) {
+        C3D_SetScissor(GPU_SCISSOR_NORMAL, y, 320 - (x + width), y + height, 320 - x);
+        return;
+    }
     x = TOP_W - (x + width);
     if (gGfx3DSMode == GFX_3DS_MODE_NORMAL)
         C3D_SetScissor(GPU_SCISSOR_NORMAL, y, x, y + height, x + width);
@@ -800,6 +810,11 @@ static void gfx_citro3d_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size
     applyDrawId();
     C3D_DrawArrays(GPU_TRIANGLES, sBufIdx, buf_vbo_num_tris * 3);
     sBufIdx += buf_vbo_num_tris * 3;
+    {
+        extern u32 gPortPerfTris, gPortPerfDraws;
+        gPortPerfTris += buf_vbo_num_tris;
+        gPortPerfDraws++;
+    }
 }
 
 static void gfx_citro3d_init(void)

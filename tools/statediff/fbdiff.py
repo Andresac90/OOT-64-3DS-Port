@@ -132,6 +132,9 @@ def main():
     if a.scenes:
         scenes = [t for t in scenes if t[0] in a.scenes.split(",")]
     names = {i: t[0] for i, t in enumerate(scenes)}
+    if a.tour.startswith("scen_"):  # scen_<age>_<scenario>: entries listed in scenarios/<scenario>.txt
+        lines = [l.split("#")[0].split() for l in open(os.path.join(HERE, "scenarios", a.tour.split("_", 2)[2] + ".txt"))]
+        names = {i: "%s/%s" % (l[0], l[3]) for i, l in enumerate(x for x in lines if x)}
     order = None
     for i in sorted(set(n64) & set(ds)):
         if only is not None and i not in only:

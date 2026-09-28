@@ -246,9 +246,160 @@ static void gfx_3ds_read_back_color(void) {
     sColorLatest = slot;
 }
 
+/* PORT (2026-09-28): framebuffer capture for PreRender (pause-menu background, transition tiles). On the
+ * N64 the RDP copies the rendered frame into fbufSave (gZBuffer memory) and the CPU/RDP read it back
+ * later. Here the frame is read back after the GPU finishes it, box-filtered from the 2x2 supersamples,
+ * the pillarbox dropped, and written as 320x240 RGBA5551 in the texture memory layout (u64-swizzled:
+ * 16-bit pixel k at native index k ^ 3), so the game's own restore draws it like any texture. */
+static void* sCaptureDst;
+
+void Port3ds_CaptureFrame5551(void* dst) {
+    sCaptureDst = dst;
+}
+
+static void gfx_3ds_capture_frame(void) {
+    extern void gfx_texture_cache_invalidate_range(const void* start, uint32_t size);
+    static u32* sLin;
+    int W = sTarget->frameBuf.width, H = sTarget->frameBuf.height, sx = H / 400, sy = W / 240, x, y, ox, oy;
+    size_t size = (size_t)W * H * 4;
+    uint16_t* dst = (uint16_t*)sCaptureDst;
+
+    if (dst == NULL) {
+        return;
+    }
+    sCaptureDst = NULL;
+    if (sLin == NULL && (sLin = linearAlloc(size)) == NULL) {
+        return;
+    }
+    C3D_SyncDisplayTransfer((u32*)sTarget->frameBuf.colorBuf, GX_BUFFER_DIM(W, H), sLin, GX_BUFFER_DIM(W, H),
+                            GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
+                                GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+                                GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+    GSPGPU_InvalidateDataCache(sLin, size);
+    for (y = 0; y < 240; y++) {
+        for (x = 0; x < 320; x++) {
+            unsigned r = 0, g = 0, b = 0, n = (unsigned)(sx * sy);
+            for (ox = 0; ox < sx; ox++) {
+                for (oy = 0; oy < sy; oy++) {
+                    u32 w = sLin[((x + 40) * sx + ox) * W + (W - 1 - (y * sy + oy))]; /* 0xRRGGBBAA */
+                    r += (w >> 24) & 0xFF;
+                    g += (w >> 16) & 0xFF;
+                    b += (w >> 8) & 0xFF;
+                }
+            }
+            r /= n;
+            g /= n;
+            b /= n;
+            dst[(y * 320 + x) ^ 3] = (uint16_t)(((r >> 3) << 11) | ((g >> 3) << 6) | ((b >> 3) << 1) | 1);
+        }
+    }
+    gfx_texture_cache_invalidate_range(dst, 320 * 240 * 2);
+}
+
+/* PORT (2026-09-28): off-screen color images (the pause menu's Link preview, Player_DrawPause, and any other
+ * gDPSetColorImage to a non-framebuffer address). Draws go to a 1x 320x240-space render target (portrait,
+ * like the screen, no pillarbox); after the frame the drawn region (0..width x 0..height, from the
+ * scissor) is read back into the game's buffer as RGBA5551 in texture layout, so the game draws or
+ * processes it like the N64's RDP output - one frame later than on the N64. */
+#define OFFSCREEN_MAX 4
+static struct {
+    void* addr;
+    C3D_RenderTarget* rt;
+    int width, height; /* image size in pixels written back */
+    int used;          /* drawn this frame */
+} sOff[OFFSCREEN_MAX];
+static int sOffCur = -1; /* current target, -1 = screen */
+
+int Port3ds_IsOffscreen(void) {
+    return sOffCur >= 0;
+}
+
+void Port3ds_SetDrawTarget(void* addr, int width, int height) {
+    int i, slot = -1;
+    if (addr == NULL) {
+        if (sOffCur >= 0) {
+            C3D_FrameDrawOn(sTarget);
+            sOffCur = -1;
+        }
+        return;
+    }
+    for (i = 0; i < OFFSCREEN_MAX; i++) {
+        if (sOff[i].addr == addr) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        for (i = 0; i < OFFSCREEN_MAX && slot < 0; i++) {
+            if (sOff[i].addr == NULL || !sOff[i].used) {
+                slot = i;
+            }
+        }
+        if (slot < 0) {
+            return;
+        }
+        if (sOff[slot].rt == NULL) {
+            sOff[slot].rt = C3D_RenderTargetCreate(240, 320, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+            if (sOff[slot].rt == NULL) {
+                return;
+            }
+        }
+        sOff[slot].addr = addr;
+        sOff[slot].used = 0;
+    }
+    if (width > 0) {
+        sOff[slot].width = width > 320 ? 320 : width;
+    }
+    if (height > sOff[slot].height) {
+        sOff[slot].height = height > 240 ? 240 : height;
+    }
+    if (!sOff[slot].used) {
+        C3D_RenderTargetClear(sOff[slot].rt, C3D_CLEAR_ALL, 0x000000FF, 0xFFFFFFFF);
+        sOff[slot].used = 1;
+    }
+    C3D_FrameDrawOn(sOff[slot].rt);
+    sOffCur = slot;
+}
+
+static void gfx_3ds_read_back_offscreen(void) {
+    extern void gfx_texture_cache_invalidate_range(const void* start, uint32_t size);
+    static u32* sLin;
+    int i, x, y;
+    const int W = 240, H = 320;
+    if (sLin == NULL && (sLin = linearAlloc(W * H * 4)) == NULL) {
+        return;
+    }
+    for (i = 0; i < OFFSCREEN_MAX; i++) {
+        uint16_t* dst = (uint16_t*)sOff[i].addr;
+        int w = sOff[i].width, h = sOff[i].height;
+        if (!sOff[i].used || dst == NULL || w <= 0 || h <= 0) {
+            continue;
+        }
+        sOff[i].used = 0;
+        C3D_SyncDisplayTransfer((u32*)sOff[i].rt->frameBuf.colorBuf, GX_BUFFER_DIM(W, H), sLin, GX_BUFFER_DIM(W, H),
+                                GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
+                                    GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+                                    GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+                                    GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+        GSPGPU_InvalidateDataCache(sLin, W * H * 4);
+        for (y = 0; y < h; y++) {
+            for (x = 0; x < w; x++) {
+                u32 p = sLin[x * W + (W - 1 - y)]; /* 0xRRGGBBAA */
+                dst[(y * w + x) ^ 3] = (uint16_t)(((((p >> 24) & 0xFF) >> 3) << 11) | ((((p >> 16) & 0xFF) >> 3) << 6) |
+                                                  ((((p >> 8) & 0xFF) >> 3) << 1) | 1);
+            }
+        }
+        gfx_texture_cache_invalidate_range(dst, (uint32_t)(w * h * 2));
+    }
+}
+
+u64 gPortPerfGpuWait; /* ticks in C3D_FrameBegin: waiting for the previous frame's GPU work */
+
 static bool gfx_3ds_start_frame(void)
 {
+    u64 t0 = svcGetSystemTick();
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+    gPortPerfGpuWait += svcGetSystemTick() - t0;
     C3D_RenderTargetClear(sTarget, C3D_CLEAR_ALL, 0x000000FF, 0xFFFFFFFF);
 	C3D_FrameDrawOn(sTarget);
     return true;
@@ -264,6 +415,9 @@ static void gfx_3ds_swap_buffers_begin(void)
      * Navi's glow in the adult Water Temple flipped.) */
     gfx_3ds_read_back_depth();
     gfx_3ds_read_back_color();
+    gfx_3ds_capture_frame();
+    gfx_3ds_read_back_offscreen();
+    sOffCur = -1;
     sFrameSlot ^= 1; /* next frame's readbacks go to the other slot */
     /* PORT (2026-09-24): no vblank wait here -- Port3ds_PaceFrame (3ds_main.c) paces updates to the
      * game's R_UPDATE_RATE retraces and pumps audio per retrace. */

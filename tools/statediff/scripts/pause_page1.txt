@@ -1,0 +1,8 @@
+# Pause menu: open, rotate right 1 time(s) with R, hold, close with START. Frames from the entry's start (incl. the transition).
+0   0      0 0
+80  START  0 0
+83  0      0 0
+110  R      0 0
+113  0      0 0
+200 START  0 0
+203 0      0 0

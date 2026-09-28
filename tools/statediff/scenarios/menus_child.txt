@@ -1,0 +1,7 @@
+# SCENE capture_frame end_frame script   (frames counted from the entry's start, including its transition)
+# Pause menu pages over Kokiri Forest (captured while fully open), then a shop conversation text box.
+SCENE_KOKIRI_FOREST 160 240 pause_page0
+SCENE_KOKIRI_FOREST 190 270 pause_page1
+SCENE_KOKIRI_FOREST 220 300 pause_page2
+SCENE_KOKIRI_FOREST 250 330 pause_page3
+SCENE_BAZAAR        76  140 bazaar_talk

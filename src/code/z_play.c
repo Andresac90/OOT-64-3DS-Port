@@ -1335,7 +1335,11 @@ void Play_Draw(PlayState* this) {
             // content and can be used by `PreRender_ApplyFilters` below.
             Sched_FlushTaskQueue();
 
+#ifndef __3DS__
+            // PORT: skipped - the captured image is already antialiased (2x2 supersampled), and the CPU
+            // filter would read the texture-layout pixels permuted (see Port3ds_CaptureFrame5551)
             PreRender_ApplyFilters(&this->pauseBgPreRender);
+#endif
 
             R_PAUSE_BG_PRERENDER_STATE = PAUSE_BG_PRERENDER_READY;
         } else if (R_PAUSE_BG_PRERENDER_STATE >= PAUSE_BG_PRERENDER_MAX) {
@@ -1345,20 +1349,7 @@ void Play_Draw(PlayState* this) {
         if (R_PAUSE_BG_PRERENDER_STATE == PAUSE_BG_PRERENDER_READY) {
             Gfx* gfxP = POLY_OPA_DISP;
 
-#ifndef __3DS__
             PreRender_RestoreFramebuffer(&this->pauseBgPreRender, &gfxP);
-#else
-            /* PORT (2026-09-24): the port has no framebuffer capture (roadmap G10), so the
-             * saved pause background is empty; copying it paints 40 full-width strips over
-             * the whole screen and hides the menu. Emit only the state the copy leaves behind
-             * (render target = framebuffer, full-screen scissor) -- Player_DrawPause narrowed
-             * the scissor to its 64x112 preview, and the menu relies on this reset. */
-            gDPPipeSync(gfxP++);
-            gDPSetColorImage(gfxP++, G_IM_FMT_RGBA, G_IM_SIZ_16b, this->pauseBgPreRender.width,
-                             this->pauseBgPreRender.fbuf);
-            gDPSetScissor(gfxP++, G_SC_NON_INTERLACE, 0, 0, this->pauseBgPreRender.width,
-                          this->pauseBgPreRender.height);
-#endif
             POLY_OPA_DISP = gfxP;
 
             goto Play_Draw_DrawOverlayElements;
@@ -1482,10 +1473,21 @@ void Play_Draw(PlayState* this) {
             // The zbuffer must then stay untouched until unpausing
             this->pauseBgPreRender.fbuf = gfxCtx->curFrameBuffer;
             this->pauseBgPreRender.fbufSave = (u16*)gZBuffer;
+#ifdef __3DS__
+            {
+                // PORT: no RDP copy into RAM; the renderer reads this frame back into fbufSave when it
+                // finishes (gfx_3ds.c Port3ds_CaptureFrame5551)
+                extern void Port3ds_CaptureFrame5551(void* dst);
+                Port3ds_CaptureFrame5551(this->pauseBgPreRender.fbufSave);
+            }
+#else
             PreRender_SaveFramebuffer(&this->pauseBgPreRender, &gfxP);
+#endif
             if (R_PAUSE_BG_PRERENDER_STATE == PAUSE_BG_PRERENDER_SETUP) {
                 this->pauseBgPreRender.cvgSave = (u8*)gfxCtx->curFrameBuffer;
+#ifndef __3DS__
                 PreRender_DrawCoverage(&this->pauseBgPreRender, &gfxP);
+#endif
 
                 R_PAUSE_BG_PRERENDER_STATE = PAUSE_BG_PRERENDER_PROCESS;
             } else {

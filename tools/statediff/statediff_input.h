@@ -19,6 +19,12 @@ s32 gStateDiffCaptureIdx = 0;
  * gStateDiffForcedMask so the report can flag it. */
 s32 gStateDiffFramesSinceCapture = 0;
 u32 gStateDiffForcedMask[4] = { 0, 0, 0, 0 };
+#ifdef STATEDIFF_TOUR_SCRIPTED
+/* Scripted tour (tour.py --scenario): entry gStateDiffCaptureIdx runs its own steps, indexed by the frames
+ * since the entry started (Play_Update calls: unlike gameplayFrames this keeps counting while paused);
+ * captured at sStateDiffTourCapture[], left for the next entrance at sStateDiffTourEnd[]. */
+s32 gStateDiffEntryFrame = 0;
+#endif
 
 void StateDiff_Captured(PlayState* play) {
 }
@@ -39,15 +45,26 @@ static void StateDiff_InjectInput(PlayState* play) {
     s32 cur = -1;
     s32 buttonDiff;
 
+    input->prev = sStateDiffPrevPad;
+#ifdef STATEDIFF_TOUR_SCRIPTED
+    for (i = 0; i < (s32)(sizeof(sStateDiffTourSteps) / sizeof(sStateDiffTourSteps[0])); i++) {
+        if ((sStateDiffTourSteps[i][0] == gStateDiffCaptureIdx) && (sStateDiffTourSteps[i][1] <= gStateDiffEntryFrame)) {
+            cur = i;
+        }
+    }
+    input->cur.button = (cur >= 0) ? (u16)sStateDiffTourSteps[cur][2] : 0;
+    input->cur.stick_x = (cur >= 0) ? (s8)sStateDiffTourSteps[cur][3] : 0;
+    input->cur.stick_y = (cur >= 0) ? (s8)sStateDiffTourSteps[cur][4] : 0;
+#else
     for (i = 0; i < (s32)(sizeof(sStateDiffScript) / sizeof(sStateDiffScript[0])); i++) {
         if (sStateDiffScript[i][0] <= (s32)play->gameplayFrames) {
             cur = i;
         }
     }
-    input->prev = sStateDiffPrevPad;
     input->cur.button = (cur >= 0) ? (u16)sStateDiffScript[cur][1] : 0;
     input->cur.stick_x = (cur >= 0) ? (s8)sStateDiffScript[cur][2] : 0;
     input->cur.stick_y = (cur >= 0) ? (s8)sStateDiffScript[cur][3] : 0;
+#endif
     input->cur.errno = 0;
     buttonDiff = input->prev.button ^ input->cur.button;
     input->press.button = input->cur.button & buttonDiff;
@@ -68,6 +85,29 @@ static void StateDiff_InjectInput(PlayState* play) {
         // Message_DrawText, e.g. Death Mountain Crater, Volvagia) - a debug-save artifact.
         gSaveContext.envHazardTextTriggerFlags |= ENV_HAZARD_TEXT_TRIGGER_HOTROOM | ENV_HAZARD_TEXT_TRIGGER_UNDERWATER;
     }
+#ifdef STATEDIFF_TOUR_SCRIPTED
+    if (gStateDiffCaptureIdx < STATEDIFF_TOUR_LEN) {
+        if (gStateDiffEntryFrame == sStateDiffTourCapture[gStateDiffCaptureIdx]) {
+            StateDiff_Captured(play);
+#ifdef __3DS__
+            StateDiff_PortDump(play, gStateDiffCaptureIdx);
+#endif
+        }
+        if ((gStateDiffEntryFrame >= sStateDiffTourEnd[gStateDiffCaptureIdx]) && (play->transitionTrigger == TRANS_TRIGGER_OFF)) {
+            gStateDiffCaptureIdx++;
+            gStateDiffEntryFrame = -1;
+            if (gStateDiffCaptureIdx < STATEDIFF_TOUR_LEN) {
+                gSaveContext.save.cutsceneIndex = 0;
+                gSaveContext.cutsceneTrigger = 0;
+                play->nextEntranceIndex = sStateDiffTour[gStateDiffCaptureIdx];
+                play->transitionTrigger = TRANS_TRIGGER_START;
+                play->transitionType = TRANS_TYPE_INSTANT;
+            }
+        }
+        gStateDiffEntryFrame++;
+    }
+    return;
+#endif
     if ((STATEDIFF_TOUR_LEN > 0) && (gStateDiffCaptureIdx < STATEDIFF_TOUR_LEN) &&
         ((((s32)play->gameplayFrames == STATEDIFF_TOUR_FRAMES) && (play->transitionTrigger == TRANS_TRIGGER_OFF)) ||
          (gStateDiffFramesSinceCapture >= STATEDIFF_TOUR_FRAMES + 300))) {

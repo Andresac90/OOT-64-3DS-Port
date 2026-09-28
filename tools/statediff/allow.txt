@@ -2,6 +2,7 @@
 # One Python regex per line (matched against the reported path), then " # reason". Keep reasons honest.
 \.dmaRequest\w*\.notifyQueue$         # port DMA is synchronous: requests never get a notify queue
 \.loadQueue\.(mtqueue|fullqueue)$     # same: object/room load queues are never waited on
+\.dmaRequest\.vromAddr$              # N64 object DMAs are chunked and still in flight at capture (pause/text load); the port copies at once
 ^play\.animTaskQueue\.tasks\[\d+\]\.data  # Link anim frames are memcpy'd from native data (z_skelanime.c __3DS__), no DMA request
 ^play\.msgCtx\.font\.(msgOffset|msgLength)$  # z_kanfont.c reads message 0xFFFC in place; overwritten when a real message loads
 ^play\.msgCtx\.font\.anon\d+ \[UNION views agree: msgBufWide  # text stored as native u16 words (read as u16 on both)

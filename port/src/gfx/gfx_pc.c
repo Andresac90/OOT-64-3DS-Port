@@ -189,6 +189,9 @@ static struct RDP {
     bool viewport_or_scissor_changed;
     void *z_buf_address;
     void *color_image_address;
+    uint32_t color_image_width;
+    float vp_raw[4];          /* N64 viewport: x, y (bottom origin), width, height, in N64 pixels */
+    uint32_t scissor_raw[4];  /* G_SETSCISSOR ulx, uly, lrx, lry (10.2) */
 } rdp;
 
 static struct RenderingState {
@@ -232,7 +235,9 @@ static unsigned long get_time(void) {
 extern uintptr_t sSysCfbFbPtr[2];
 static inline int gfx_cimg_is_screen(void) {
     uintptr_t a = (uintptr_t)rdp.color_image_address;
-    return a == 0 || a == sSysCfbFbPtr[0] || a == sSysCfbFbPtr[1];
+    /* a framebuffer address with another width is a different image (Player_DrawPause's 64-wide one) */
+    return a == 0 || ((a == sSysCfbFbPtr[0] || a == sSysCfbFbPtr[1]) &&
+                      (rdp.color_image_width == 0 || rdp.color_image_width == SCREEN_WIDTH));
 }
 #else
 static inline int gfx_cimg_is_screen(void) { return 1; }
@@ -1313,8 +1318,38 @@ static void gfx_emit_tri(const PVtx* a, const PVtx* b, const PVtx* c, bool zf) {
     }
 }
 
+/* PORT (2026-09-28): route draws to the color image's target: the screen, or an off-screen render target
+ * read back into the game's buffer after the frame (gfx_3ds.c Port3ds_SetDrawTarget). Off-screen targets
+ * are a 1:1 320x240 N64-pixel space: no pillarbox, no aspect squeeze, no supersampling. */
+static void* sDrawTarget; /* NULL = screen */
+static void gfx_apply_viewport(void);
+static void gfx_apply_scissor(void);
+static void gfx_select_target(void) {
+#ifdef __3DS__
+    extern void Port3ds_SetDrawTarget(void* addr, int width, int height);
+    void* want = gfx_cimg_is_screen() ? NULL : rdp.color_image_address;
+    if (want == sDrawTarget) {
+        return;
+    }
+    gfx_flush();
+    sDrawTarget = want;
+    if (want != NULL) {
+        gfx_current_dimensions.width = SCREEN_WIDTH;
+        gfx_current_dimensions.height = SCREEN_HEIGHT;
+    } else {
+        gfx_wapi->get_dimensions(&gfx_current_dimensions.width, &gfx_current_dimensions.height);
+    }
+    gfx_current_dimensions.aspect_ratio = (float)gfx_current_dimensions.width / (float)gfx_current_dimensions.height;
+    Port3ds_SetDrawTarget(want, (int)rdp.color_image_width, (int)((rdp.scissor_raw[3] + 3) / 4));
+    gfx_apply_viewport();
+    gfx_apply_scissor();
+    memset(&rendering_state.viewport, 0xFF, sizeof(rendering_state.viewport)); /* force re-send */
+    memset(&rendering_state.scissor, 0xFF, sizeof(rendering_state.scissor));
+#endif
+}
+
 static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
-    if (!gfx_cimg_is_screen()) return;
+    gfx_select_target();
     gfx_port_tri_count++;
     struct LoadedVertex *v1 = &rsp.loaded_vertices[vtx1_idx];
     struct LoadedVertex *v2 = &rsp.loaded_vertices[vtx2_idx];
@@ -1583,6 +1618,16 @@ static void gfx_calc_and_set_viewport(const Vp_t *viewport) {
     float y = SCREEN_HEIGHT - ((viewport->vtrans[1] / 4.0f) + height / 2.0f);
     rsp.half_px_x = width > 0.0f ? 1.0f / width : 0.0f;
     rsp.half_px_y = height > 0.0f ? 1.0f / height : 0.0f;
+    rdp.vp_raw[0] = x;
+    rdp.vp_raw[1] = y;
+    rdp.vp_raw[2] = width;
+    rdp.vp_raw[3] = height;
+    gfx_apply_viewport();
+}
+
+/* rdp.viewport from the raw N64 viewport, for the current target's dimensions */
+static void gfx_apply_viewport(void) {
+    float x = rdp.vp_raw[0], y = rdp.vp_raw[1], width = rdp.vp_raw[2], height = rdp.vp_raw[3];
     
     /* PORT (2026-09-25): N64 screen x maps to x * RATIO_Y + pillar (4:3 content centered in the wider
      * target), and gfx_sp_vertex squeezes clip x by the aspect ratio around the viewport's center, so
@@ -1674,6 +1719,15 @@ static void gfx_sp_texture(uint16_t sc, uint16_t tc, uint8_t level, uint8_t tile
 }
 
 static void gfx_dp_set_scissor(uint32_t mode, uint32_t ulx, uint32_t uly, uint32_t lrx, uint32_t lry) {
+    rdp.scissor_raw[0] = ulx;
+    rdp.scissor_raw[1] = uly;
+    rdp.scissor_raw[2] = lrx;
+    rdp.scissor_raw[3] = lry;
+    gfx_apply_scissor();
+}
+
+static void gfx_apply_scissor(void) {
+    uint32_t ulx = rdp.scissor_raw[0], uly = rdp.scissor_raw[1], lrx = rdp.scissor_raw[2], lry = rdp.scissor_raw[3];
     /* PORT (2026-09-25): pixels map like the content (x * RATIO_Y + pillar), except that a full-width
      * scissor keeps the whole target so the widened 3D view still fills the sides */
     float x = ulx / 4.0f * RATIO_Y + GFX_PILLAR_X;
@@ -1866,7 +1920,7 @@ static void gfx_dp_set_fill_color(uint32_t packed_color) {
 }
 
 static void gfx_draw_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry) {
-    if (!gfx_cimg_is_screen()) return;
+    gfx_select_target();
     uint32_t saved_other_mode_h = rdp.other_mode_h;
     uint32_t cycle_type = (rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE));
     
@@ -2045,6 +2099,7 @@ static void gfx_dp_set_z_image(void *z_buf_address) {
 
 static void gfx_dp_set_color_image(uint32_t format, uint32_t size, uint32_t width, void* address) {
     rdp.color_image_address = address;
+    rdp.color_image_width = width + 1; /* the command carries width - 1 */
 }
 
 static void gfx_sp_set_other_mode(uint32_t shift, uint32_t num_bits, uint64_t mode) {
@@ -2494,6 +2549,7 @@ void gfx_init(struct GfxWindowManagerAPI *wapi, struct GfxRenderingAPI *rapi) {
 
 void gfx_start_frame(void) {
     gfx_wapi->handle_events();
+    sDrawTarget = NULL; /* the backend starts each frame on the screen */
     gfx_wapi->get_dimensions(&gfx_current_dimensions.width, &gfx_current_dimensions.height);
     if (gfx_current_dimensions.height == 0) {
         // Avoid division by zero

@@ -2108,6 +2108,14 @@ void Player_DrawPause(PlayState* play, u8* segment, SkelAnime* skelAnime, Vec3f*
     Player_DrawPauseImpl(play, PAUSE_PLAYER_SEGMENT_GAMEPLAY_KEEP_START(segment),
                          PAUSE_PLAYER_SEGMENT_LINK_OBJECT(segment), skelAnime, pos, rot, scale, sword, tunic, shield,
                          boots, PAUSE_EQUIP_PLAYER_WIDTH, PAUSE_EQUIP_PLAYER_HEIGHT, &eye, &at, 60.0f,
+#ifdef __3DS__
+                         // PORT: render straight into the preview texture (an off-screen target the renderer
+                         // reads back into RAM, gfx_3ds.c): the N64 renders into the framebuffer's memory and
+                         // copies it with the RDP + CPU filters (KaleidoScope_*PlayerPreRender), which never
+                         // hold real pixels here
+                         PAUSE_PLAYER_SEGMENT_RENDER_TEXTURE(segment),
+#else
                          play->state.gfxCtx->curFrameBuffer,
+#endif
                          play->state.gfxCtx->curFrameBuffer + (PAUSE_EQUIP_PLAYER_WIDTH * PAUSE_EQUIP_PLAYER_HEIGHT));
 }

@@ -130,15 +130,48 @@ static void Port3ds_PaceFrame(void) {
     sLast = now;
 }
 
+/* PORT PERF (2026-09-28): per-frame CPU breakdown in 268 MHz system ticks, logged every 300 frames as
+ * average microseconds per frame: game = everything between two graph tasks (game logic + DL build),
+ * dl = display-list interpretation (gfx_run), swap = frame end/GPU wait, pace = retrace waits + audio;
+ * plus triangles and draw calls sent to the GPU per frame (gfx_pc.c counters). */
+u32 gPortPerfTris, gPortPerfDraws;
+static u64 sPerfGame, sPerfDl, sPerfSwap, sPerfPace, sPerfLastEnd;
+static void Port3ds_PerfReport(unsigned frames) {
+    extern void PortDbgX(const char*, unsigned);
+    const u64 div = (u64)frames * (SYSCLOCK_ARM11 / 1000000); /* ticks -> us per frame */
+    PortDbgX("perf us/frame game", (unsigned)(sPerfGame / div));
+    {
+        extern u64 gPortPerfGpuWait;
+        PortDbgX("perf us/frame dl (cpu)", (unsigned)((sPerfDl - gPortPerfGpuWait) / div));
+        PortDbgX("perf us/frame gpu wait", (unsigned)(gPortPerfGpuWait / div));
+        gPortPerfGpuWait = 0;
+    }
+    PortDbgX("perf us/frame swap", (unsigned)(sPerfSwap / div));
+    PortDbgX("perf us/frame pace", (unsigned)(sPerfPace / div));
+    PortDbgX("perf tris/frame", gPortPerfTris / frames);
+    PortDbgX("perf draws/frame", gPortPerfDraws / frames);
+    sPerfGame = sPerfDl = sPerfSwap = sPerfPace = 0;
+    gPortPerfTris = gPortPerfDraws = 0;
+}
+
 void PortGfx_RunTask(OSTask* task) {
+    u64 tA = svcGetSystemTick(), tB, tC, tD;
+    if (sPerfLastEnd != 0) sPerfGame += tA - sPerfLastEnd;
     if (!sGfxInited) PortGfx_Init();
     Port3ds_PollInput();
     { extern void Port3ds_PumpInput(void); Port3ds_PumpInput(); } /* live buttons -> game PadMgr */
     { extern void Audio_PortEnsureNullChannels(void); Audio_PortEnsureNullChannels(); } /* keep uninit audio channels non-NULL so direct game audio calls don't crash */
     gfx_start_frame();
     gfx_run((Gfx*)task->t.data_ptr);
+    tB = svcGetSystemTick();
     gfx_end_frame();
+    tC = svcGetSystemTick();
     Port3ds_PaceFrame();
+    tD = svcGetSystemTick();
+    sPerfDl += tB - tA;
+    sPerfSwap += tC - tB;
+    sPerfPace += tD - tC;
+    sPerfLastEnd = tD;
     /* Frame-rate log: game updates per second measured on the wall clock (x10), every 300 frames.
      * OoT's logic is designed for 20/s (R_UPDATE_RATE=3 VI retraces per update at 60 Hz). */
     { static u64 t0 = 0; static unsigned n = 0;
@@ -149,6 +182,7 @@ void PortGfx_RunTask(OSTask* task) {
           if (gRegEditor) PortDbgX("perf R_UPDATE_RATE", (unsigned)*(short*)((char*)gRegEditor + 0x14 + 126 * 2));
           PortDbgX("perf audio pumps/s x10", (unsigned)((u64)sPortAudioPumps * 10000ull / (t1 - t0 ? t1 - t0 : 1)));
           sPortAudioPumps = 0;
+          Port3ds_PerfReport(n);
           n = 0; t0 = t1; } }
 }
 
