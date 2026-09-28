@@ -59,11 +59,16 @@ uint16_t PortZBuf_Read(int x, int y) {
      * tools/statediff): the pixel's first x subsample and the window-y subsample just above it agree
      * best (3.7% of pixels off by >64 z units, vs 4.3% one subsample lower and 8.0% for the last
      * subsample; the latter flipped a torch glow at an object edge in Gerudo Training Ground). */
-    u = w - (y * sy);
-    if (u > w - 1) {
-        u = w - 1;
+    /* PORT (2026-09-27): 3D geometry moved half an N64 pixel right/down (gfx_pc.c gfx_sp_vertex, measured
+     * RDP triangle offset), so the same samples are one subsample further along both axes */
+    u = w - 1 - (y * sy);
+    if (u < 0) {
+        u = 0;
     }
-    v = (x + 40) * sx;
+    v = (x + 40) * sx + 1;
+    if (v > h - 1) {
+        v = h - 1;
+    }
     d = depth[v * w + u] & 0xFFFFFF;
     if (d >= 0xFFFFFF) {
         return N64_Z_FAR;

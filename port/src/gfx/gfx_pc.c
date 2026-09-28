@@ -135,6 +135,7 @@ static struct RSP {
     uint32_t geometry_mode;
     int16_t fog_mul, fog_offset;
     uint8_t clip_ratio; /* G_MW_CLIP guard band (FRUSTRATIO_n) */
+    float half_px_x, half_px_y; /* half an N64 pixel of the current viewport, in NDC */
     
     struct {
         // U0.16
@@ -1019,6 +1020,12 @@ static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
         float z = v->ob[0] * rsp.MP_matrix[0][2] + v->ob[1] * rsp.MP_matrix[1][2] + v->ob[2] * rsp.MP_matrix[2][2] + rsp.MP_matrix[3][2];
         float w = v->ob[0] * rsp.MP_matrix[0][3] + v->ob[1] * rsp.MP_matrix[1][3] + v->ob[2] * rsp.MP_matrix[2][3] + rsp.MP_matrix[3][3];
         
+        /* PORT (2026-09-27): the RDP rasterizes triangles half a pixel down-right of texture rectangles at
+         * the same coordinates; drawing both with one convention put all 3D geometry half an N64 pixel
+         * up-left of the N64's (measured with tools/statediff/fbshift.py: minimum at exactly one 2x2
+         * supersample in both axes in 3D scenes, none for 2D backgrounds). */
+        x += rsp.half_px_x * w;
+        y -= rsp.half_px_y * w;
         x = gfx_adjust_x_for_aspect_ratio(x);
         
         short U = v->tc[0] * rsp.texture_scaling_factor.s >> 16;
@@ -1574,6 +1581,8 @@ static void gfx_calc_and_set_viewport(const Vp_t *viewport) {
     float height = 2.0f * viewport->vscale[1] / 4.0f;
     float x = (viewport->vtrans[0] / 4.0f) - width / 2.0f;
     float y = SCREEN_HEIGHT - ((viewport->vtrans[1] / 4.0f) + height / 2.0f);
+    rsp.half_px_x = width > 0.0f ? 1.0f / width : 0.0f;
+    rsp.half_px_y = height > 0.0f ? 1.0f / height : 0.0f;
     
     /* PORT (2026-09-25): N64 screen x maps to x * RATIO_Y + pillar (4:3 content centered in the wider
      * target), and gfx_sp_vertex squeezes clip x by the aspect ratio around the viewport's center, so
@@ -1947,6 +1956,15 @@ static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int3
         lry += 1 << 2;
     }
     
+    /* PORT (2026-09-27): at exactly 1 texel per pixel the RDP's bilinear filter samples texel centers,
+     * i.e. returns the texels unfiltered; here 2x2 supersamples land a quarter texel off-center and
+     * bilinear smeared 1-pixel HUD/minimap lines (tools/statediff fbdiff). Point-sample instead. */
+    uint32_t saved_omh_filter = rdp.other_mode_h;
+    bool one_to_one = (dsdx == (1 << 10) || dsdx == -(1 << 10)) && (dtdy == (1 << 10) || dtdy == -(1 << 10));
+    if (one_to_one) {
+        rdp.other_mode_h = (rdp.other_mode_h & ~(3U << G_MDSFT_TEXTFILT)) | G_TF_POINT;
+    }
+
     // uls and ult are S10.5
     // dsdx and dtdy are S5.10
     // lrx, lry, ulx, uly are U10.2
@@ -1983,6 +2001,9 @@ static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int3
     gfx_draw_rectangle(ulx, uly, lrx, lry);
     rdp.combine_mode = saved_combine_mode;
     rdp.drawing_rect = false;
+    if (one_to_one) {
+        rdp.other_mode_h = (rdp.other_mode_h & ~(3U << G_MDSFT_TEXTFILT)) | (saved_omh_filter & (3U << G_MDSFT_TEXTFILT));
+    }
     if (rdp.first_tile != saved_first_tile) {
         rdp.textures_changed[0] = true;
         rdp.textures_changed[1] = true;
@@ -2158,6 +2179,8 @@ static void gfx_s2dex_bg_rect(const uObjBg* bg, bool copy) {
     }
 }
 
+static uint32_t rdp_half1; /* G_RDPHALF_1 word for G_BRANCH_Z */
+
 static void gfx_run_dl(Gfx* cmd) {
     int dummy = 0;
 #ifdef __3DS__
@@ -2267,6 +2290,34 @@ static void gfx_run_dl(Gfx* cmd) {
                 break;
             case (uint8_t)G_ENDDL:
                 return;
+#ifdef F3DEX_GBI_2
+            /* PORT (2026-09-27): F3DEX2 LOD commands, unhandled before: close-range geometry behind
+             * gsSPBranchLessZraw never drew (Gerudo Valley's waterfall; tools/statediff fbdiff).
+             * G_RDPHALF_1 carries the branch target; G_BRANCH_Z branches (no return) when the vertex's
+             * depth is <= zval, compared in clip-space z like libultraship (Ship of Harkinian). */
+            case (uint8_t)G_RDPHALF_1:
+                rdp_half1 = cmd->words.w1;
+                break;
+            case (uint8_t)G_BRANCH_Z: {
+                uint32_t vi = C0(0, 12) / 2;
+                if (vi < MAX_VERTICES && rsp.loaded_vertices[vi].z <= (float)(int32_t)cmd->words.w1) {
+                    cmd = (Gfx *)seg_addr(rdp_half1);
+                    --cmd; // increase after break
+                }
+                break;
+            }
+            case (uint8_t)G_CULLDL: { /* end the DL if vertices v0..vn are all outside one plane */
+                uint32_t v0 = C0(0, 16) / 2, vn = cmd->words.w1 / 2, k;
+                uint8_t rej = 0xFF;
+                for (k = v0; k <= vn && k < MAX_VERTICES; k++) {
+                    rej &= rsp.loaded_vertices[k].clip_rej;
+                }
+                if (v0 <= vn && vn < MAX_VERTICES && rej != 0) {
+                    return;
+                }
+                break;
+            }
+#endif
 #ifdef F3DEX_GBI_2
             case G_GEOMETRYMODE:
                 gfx_sp_geometry_mode(~C0(0, 24), cmd->words.w1);

@@ -37,7 +37,7 @@ def ds_rgb(blob, order):
         for x in range(320):
             acc = [0, 0, 0]
             for oy in range(sy):
-                u = min(W - 1, W - (y * sy + oy))
+                u = W - 1 - (y * sy + oy)  # measured: row y's supersamples (was W - ..., half a pixel off)
                 for ox in range(sx):
                     w = words[((x + 40) * sx + ox) * W + u]
                     for c in range(3):
@@ -76,7 +76,7 @@ def attribute(cap, color_key, nv, dv, top, by_err=False):
     bad, total, sums, errs = {}, {}, {}, {}
     for y in range(240):
         for x in range(320):
-            sid = words[((x + 40) * sx) * W + min(W - 1, W - y * sy)] >> 24
+            sid = words[((x + 40) * sx) * W + W - 1 - y * sy] >> 24
             p, q = nv[y * 320 + x], dv[y * 320 + x]
             e = max(abs(p[0] - q[0]), abs(p[1] - q[1]), abs(p[2] - q[2]))
             total[sid] = total.get(sid, 0) + 1
