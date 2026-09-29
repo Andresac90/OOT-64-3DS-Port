@@ -254,10 +254,41 @@ void Audio_AdsrInit(AdsrState* adsr, EnvelopePoint* envelope, s16* volOut) {
     // removed, but the function parameter was forgotten and remains.)
 }
 
+#ifdef __3DS__
+/* PORT (2026-09-30): envelopes come from soundfont data (byteswapped to native at load) or, for channels
+ * and layers that set one with a sequence command (ASEQ_OP_CHAN_ENVELOPE / ASEQ_OP_LAYER_ENVELOPE - all
+ * sound effects), point straight into the big-endian sequence data. Read those points byteswapped;
+ * otherwise sound effects got garbage envelopes (much too quiet or cut short). */
+static s32 Audio_EnvInSeqData(EnvelopePoint* env) {
+    s32 i;
+    for (i = 0; i < (s32)gAudioCtx.audioBufferParameters.numSequencePlayers; i++) {
+        SequencePlayer* seqPlayer = &gAudioCtx.seqPlayers[i];
+        AudioTableEntry* entry;
+        if (seqPlayer->seqData == NULL || gAudioCtx.sequenceTable == NULL) {
+            continue;
+        }
+        entry = &gAudioCtx.sequenceTable->entries[seqPlayer->seqId];
+        if (entry->size == 0) { /* alias: romAddr holds the real sequence id */
+            entry = &gAudioCtx.sequenceTable->entries[entry->romAddr];
+        }
+        if ((u8*)env >= seqPlayer->seqData && (u8*)env < seqPlayer->seqData + entry->size) {
+            return true;
+        }
+    }
+    return false;
+}
+#define ENV_S16(v) (sEnvBE ? (s16)__builtin_bswap16((u16)(v)) : (v))
+#else
+#define ENV_S16(v) (v)
+#endif
+
 /**
  * original name: Nas_EnvProcess
  */
 f32 Audio_AdsrUpdate(AdsrState* adsr) {
+#ifdef __3DS__
+    s32 sEnvBE = (adsr->action.s.state == ADSR_STATE_DISABLED) ? false : Audio_EnvInSeqData(adsr->envelope);
+#endif
     u8 state = adsr->action.s.state;
 
     switch (state) {
@@ -276,7 +307,7 @@ f32 Audio_AdsrUpdate(AdsrState* adsr) {
         retry:;
             FALLTHROUGH;
         case ADSR_STATE_LOOP:
-            adsr->delay = adsr->envelope[adsr->envIndex].delay;
+            adsr->delay = ENV_S16(adsr->envelope[adsr->envIndex].delay);
             switch (adsr->delay) {
                 case ADSR_DISABLE:
                     adsr->action.s.state = ADSR_STATE_DISABLED;
@@ -287,7 +318,7 @@ f32 Audio_AdsrUpdate(AdsrState* adsr) {
                     break;
 
                 case ADSR_GOTO:
-                    adsr->envIndex = adsr->envelope[adsr->envIndex].arg;
+                    adsr->envIndex = ENV_S16(adsr->envelope[adsr->envIndex].arg);
                     goto retry;
 
                 case ADSR_RESTART:
@@ -299,7 +330,7 @@ f32 Audio_AdsrUpdate(AdsrState* adsr) {
                     if (adsr->delay == 0) {
                         adsr->delay = 1;
                     }
-                    adsr->target = adsr->envelope[adsr->envIndex].arg / 32767.0f;
+                    adsr->target = ENV_S16(adsr->envelope[adsr->envIndex].arg) / 32767.0f;
                     adsr->target = SQ(adsr->target);
                     adsr->velocity = (adsr->target - adsr->current) / adsr->delay;
                     adsr->action.s.state = ADSR_STATE_FADE;
