@@ -36,10 +36,12 @@ static void Sched_RunTask(OSScTask* task) {
             osViSwapBuffer(task->framebuffer->swapBuffer);
         }
     }
-    /* audio tasks: execute the Acmd list on the CPU (C reimpl of aspMain). */
+    /* audio tasks: execute the Acmd list (C reimpl of aspMain) on the audio worker core, like the RSP
+     * running beside the CPU (port/src/audio_3ds.c) */
     if (task->list.t.type == M_AUDTASK) {
-        extern void PortAudio_RunTask(OSTask * task);
-        PortAudio_RunTask(&task->list);
+        extern void Port3ds_AudioTaskRun(void* task);
+        _Static_assert(sizeof(OSTask) == 64, "audio_3ds.c copies OSTask as 64 bytes");
+        Port3ds_AudioTaskRun(&task->list);
     }
     if (task->msgQueue != NULL) {
         osSendMesg(task->msgQueue, task->msg, OS_MESG_NOBLOCK);

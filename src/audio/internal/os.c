@@ -51,6 +51,18 @@ s32 osAiSetNextBuffer(void* buf, u32 size) {
     //! @bug The original __osAiDeviceBusy call was above the hardware bug workaround to ensure that it was only
     //! performed when a transfer was guaranteed to start. If this condition passes and this function returns without
     //! submitting a buffer for DMA, the code above will lose track of when to apply the workaround.
+#ifdef __3DS__
+    // 3DS: no N64 audio interface (reading AI_STATUS_REG at 0x0450000C faults on hardware). Hand
+    // the finished AI buffer (native s16 stereo, produced by port/src/audio_microcode.c) to ndsp.
+    {
+        extern void Port3ds_AudioSubmitAi(const s16* stereo, int nframes);
+
+        (void)status;
+        (void)bufAdjusted;
+        Port3ds_AudioSubmitAi((const s16*)buf, (int)(size / 4));
+        return 0;
+    }
+#endif
     status = IO_READ(AI_STATUS_REG);
     if (status & AI_STATUS_FIFO_FULL) {
         return -1;

@@ -105,7 +105,12 @@ s32 osEPiStartDma(OSPiHandle* h, OSIoMesg* mb, s32 direction) {
 /* osAiSetNextBuffer is provided by the game's own src/audio/internal/os.c. */
 static u32 sAiFreq = 32000;
 s32 osAiSetFrequency(u32 freq) { sAiFreq = freq; return freq; }
-u32 osAiGetLength(void) { return 0; }
+/* bytes still queued for playback (N64: left in the current AI DMA); drives the engine's
+ * per-frame audio length feedback (AudioThread_UpdateImpl) so production tracks ndsp's rate */
+u32 osAiGetLength(void) {
+    extern int Port3ds_AudioQueuedFrames(void);
+    return (u32)Port3ds_AudioQueuedFrames() * 4;
+}
 
 /* ------------------------------------------------------------------ */
 /* Controller Pak — absent; every call reports no pak.                 */

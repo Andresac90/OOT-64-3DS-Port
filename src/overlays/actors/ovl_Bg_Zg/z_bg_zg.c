@@ -81,7 +81,7 @@ s32 func_808C0CC8(BgZg* this) {
 }
 
 void func_808C0CD4(BgZg* this, PlayState* play) {
-#if PLATFORM_N64
+#if PLATFORM_N64 && !defined(__3DS__) /* 3DS: no N64 RDRAM at 0x2E8 (reading it faults on hardware) */
     // Anti-piracy check, bars will not open if the check fails.
     // The address 0x000002E8 is near the start of RDRAM, and is written when IPL3 copies itself to
     // RDRAM after RDRAM has been initialized. Specifically, this is an instruction from some

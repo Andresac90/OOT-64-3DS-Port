@@ -209,6 +209,8 @@ def main():
     ap.add_argument("--skip-3ds", action="store_true")
     ap.add_argument("--show", type=int, default=4, help="differences shown per scene")
     ap.add_argument("--scenario", default="", help="tools/statediff/scenarios/<name>.txt: scripted entries")
+    ap.add_argument("--daytime", default="", help="fixed time of day HH:MM for every entry (default: the debug save's midnight)")
+    ap.add_argument("--entrances", default="", help="comma-separated ENTR_ names to tour instead of one per scene")
     args = ap.parse_args()
     scenario = None
     if args.scenario:
@@ -224,13 +226,23 @@ def main():
         tag = "scen_%s_%s" % (args.age, args.scenario)
     else:
         tour = retail_scene_entrances(args.age)
-        if args.scenes:
+        if args.entrances:
+            rows = {m.group(2): (int(m.group(1), 16), m.group(3)) for m in re.finditer(
+                r"/\* 0x([0-9A-F]+) \*/ DEFINE_ENTRANCE\((ENTR_\w+), (SCENE_\w+), \d+,",
+                open(os.path.join(SD.REPO, "include/tables/entrance_table.h")).read())}
+            tour = [(rows[e][1], rows[e][0], e) for e in args.entrances.split(",")]
+        elif args.scenes:
             want = args.scenes.split(",")
             tour = [t for t in tour if t[0] in want]
-        tag = "tour_%s_%d_%d" % (args.age, args.frames, len(tour))
+        tag = "tour_%s_%d_%d" % (args.age, args.frames, len(tour)) + ("_entr" if args.entrances else "")
     age = AGES[args.age]
     SD.write_script_header("idle")
-    SD.write_tour_header([t[1] for t in tour], args.frames, scenario)
+    daytime = None
+    if args.daytime:
+        hh, mm = (int(x) for x in args.daytime.split(":"))
+        daytime = int((hh * 60 + mm) * 0x10000 // (24 * 60)) & 0xFFFF  # CLOCK_TIME(hh, mm)
+        tag += "_t%02d%02d" % (hh, mm)
+    SD.write_tour_header([t[1] for t in tour], args.frames, scenario, daytime)
     layout, actor_layouts = SD.load_layout(), SD.load_actor_layouts()
     pn, p3 = os.path.join(SD.OUT, "n64_%s.json" % tag), os.path.join(SD.OUT, "3ds_%s.json" % tag)
     n64 = load_caps(pn) if args.skip_n64 else capture_n64(tour, age, layout, tag)

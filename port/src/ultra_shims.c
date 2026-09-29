@@ -231,42 +231,6 @@ extern AudioMgr sAudioMgr;                         /* global instance in main.c 
 extern void AudioMgr_HandleRetrace(AudioMgr* audioMgr);
 extern void PortDbgX(const char* label, unsigned val);
 void Port3ds_PumpAudio(void) {
-    static unsigned c = 0;
-    if ((++c & 127) == 1) {
-        PortDbgX("apump actLvl", (unsigned)R_AUDIOMGR_ACTIVITY_LEVEL);
-        PortDbgX("apump rspTask", (unsigned)(uintptr_t)sAudioMgr.rspTask);
-        PortDbgX("apump specUnk4", (unsigned)gAudioCtx.audioBufferParameters.specUnk4);
-        PortDbgX("apump totalTask", (unsigned)gAudioCtx.totalTaskCount);
-        PortDbgX("apump seq0en", (unsigned)gAudioCtx.seqPlayers[0].enabled);
-        PortDbgX("apump seq2en", (unsigned)gAudioCtx.seqPlayers[2].enabled);
-        PortDbgX("apump numNotes", (unsigned)gAudioCtx.numNotes);
-        PortDbgX("apump resetStatus", (unsigned)gAudioCtx.resetStatus);
-        PortDbgX("apump cmdWr", (unsigned)gAudioCtx.threadCmdWritePos);
-        PortDbgX("apump cmdRd", (unsigned)gAudioCtx.threadCmdReadPos);
-        PortDbgX("apump numSeqPlayers", (unsigned)gAudioCtx.audioBufferParameters.numSequencePlayers);
-        PortDbgX("seqTbl addr", (unsigned)(uintptr_t)gAudioCtx.sequenceTable);
-        PortDbgX("seqTbl numEnt", (unsigned)gAudioCtx.sequenceTable->header.numEntries);
-        PortDbgX("fontTbl addr", (unsigned)(uintptr_t)gAudioCtx.soundFontTable);
-        PortDbgX("fontTbl numEnt", (unsigned)gAudioCtx.soundFontTable->header.numEntries);
-        PortDbgX("sampTbl addr", (unsigned)(uintptr_t)gAudioCtx.sampleBankTable);
-        PortDbgX("sampTbl numEnt", (unsigned)gAudioCtx.sampleBankTable->header.numEntries);
-    }
-    /* DIAGNOSTIC: force-start field BGM (seqId 2) and retry every 256 frames until
-     * seq player 0 is enabled, to test whether soundfonts+synthesis produce PCM
-     * (fonts relocate post-byteswap; sample data validated). */
-    if (c >= 16 && (c & 0xF) == 0 && !gAudioCtx.seqPlayers[0].enabled) {
-        extern void Audio_StartSequence(unsigned char, unsigned char, unsigned char, unsigned short);
-        Audio_StartSequence(0, 2, 0, 10);
-        if ((c & 0x3F) == 0) PortDbgX("FORCED field BGM retry c", c);
-    }
-    if ((c & 0x3F) == 0) {
-        s32 an = 0, i2;
-        for (i2 = 0; i2 < gAudioCtx.numNotes; i2++) {
-            if (gAudioCtx.sampleStates[i2].bitField0.enabled) an++;
-        }
-        PortDbgX("active notes", (unsigned)an);
-        PortDbgX("an seq0en", (unsigned)gAudioCtx.seqPlayers[0].enabled);
-    }
     /* The threadless port never runs cic6105/AudioMgr_ThreadEntry which set this
      * to ALL, so it can be stuck inhibiting audio updates. Force ALL each frame. */
     R_AUDIOMGR_ACTIVITY_LEVEL = AUDIOMGR_ACTIVITY_LEVEL_ALL;

@@ -187,9 +187,18 @@ void Audio_ProcessNotes(void) {
         sampleState2 = &gAudioCtx.sampleStates[gAudioCtx.sampleStateOffset + i];
         playbackState = &note->playbackState;
         if (playbackState->parentLayer != NO_LAYER) {
+#ifdef __3DS__
+            // N64 sanity check "is this a KSEG0 (0x80xxxxxx) pointer". Every 3DS pointer is below
+            // 0x7FFFFFFF, so the original test skipped every note with a layer: no envelope/volume/
+            // pitch updates and the per-update copy never refreshed -> notes only sounded in bursts.
+            if (playbackState->parentLayer == NULL) {
+                continue;
+            }
+#else
             if ((u32)playbackState->parentLayer < 0x7FFFFFFF) {
                 continue;
             }
+#endif
 
             if (note != playbackState->parentLayer->note && playbackState->unk_04 == 0) {
                 playbackState->adsr.action.s.release = true;

@@ -51,7 +51,9 @@ extern char __end__[];
 #define TEXB(base, k) ((base)[(k)])
 #define TEXP(base, k) ((base)[(uintptr_t)(k) ^ 7u])
 #define TEX_SRC_BYTE(p) (*(const uint8_t*)((uintptr_t)(p) ^ 7u)) /* absolute-address unswizzle */
+#define TEX_SRC_BYTE_X(p, x) (*(const uint8_t*)((uintptr_t)(p) ^ (x)))
 #else
+#define TEX_SRC_BYTE_X(p, x) (*(const uint8_t*)(p))
 #define TEXB(base, k) ((base)[(k)])
 #define TEXP(base, k) ((base)[(k)])
 #define TEX_SRC_BYTE(p) (*(const uint8_t*)(p))
@@ -779,6 +781,49 @@ static void import_texture_rgba32(int tile) {
     gfx_upload_texture(rgba32_buf, width, height);
 }
 
+/* PORT (2026-09-29): the unswizzle for a texture/TLUT source. u64[] asset arrays and game-written RAM keep
+ * logical byte k at address ^ 7; the few asset arrays the decomp emits as u32[] (Kokiri, other townsfolk:
+ * textures only 4-byte aligned in the ROM) keep it at address ^ 3. Reading those with ^ 7 scrambled
+ * their palettes and texels (striped hair, camouflage skin). Table: port/src_gen/u32_asset_ranges.c. */
+#ifdef __3DS__
+#include "port_u32_assets.h"
+static uintptr_t gfx_src_swizzle(const void* p) {
+    static const PortU32Asset* sSorted[256];
+    static int sN = -1;
+    uintptr_t a = (uintptr_t)p;
+    int lo, hi;
+    if (sN < 0) { /* sort the linked arrays by address once */
+        int i, j;
+        sN = 0;
+        for (i = 0; i < gPortU32AssetCount && sN < 256; i++) {
+            if (gPortU32Assets[i].addr != NULL) {
+                const PortU32Asset* e = &gPortU32Assets[i];
+                for (j = sN++; j > 0 && (uintptr_t)sSorted[j - 1]->addr > (uintptr_t)e->addr; j--) {
+                    sSorted[j] = sSorted[j - 1];
+                }
+                sSorted[j] = e;
+            }
+        }
+    }
+    lo = 0;
+    hi = sN - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        uintptr_t b = (uintptr_t)sSorted[mid]->addr;
+        if (a < b) {
+            hi = mid - 1;
+        } else if (a >= b + sSorted[mid]->size) {
+            lo = mid + 1;
+        } else {
+            return 3u;
+        }
+    }
+    return 7u;
+}
+#else
+#define gfx_src_swizzle(p) 0u
+#endif
+
 /* PORT (2026-09-24): copy the loaded texture into a staging buffer laid out like TMEM (each loaded
  * row at the render tile's line stride), in logical byte order. Handles LOADTILE sub-rects (source
  * stride = full image width) and unswizzles natively-compiled assets by ABSOLUTE address, which is
@@ -790,9 +835,10 @@ static uint32_t gfx_gather_texture(int tile) {
     uint32_t row = rdp.loaded_texture[tile].line_size_bytes;
     uint32_t full = rdp.loaded_texture[tile].full_image_line_size_bytes;
     uint32_t dst_stride, rows, x, y;
+    uintptr_t sw = gfx_src_swizzle(src);
     if (row == 0 || full == 0 || row == full) { /* contiguous (LOADBLOCK) */
         if (size > sizeof(sTexStage)) return 0;
-        for (x = 0; x < size; x++) sTexStage[x] = TEX_SRC_BYTE(src + x);
+        for (x = 0; x < size; x++) sTexStage[x] = TEX_SRC_BYTE_X(src + x, sw);
         return size;
     }
     rows = size / row;
@@ -800,7 +846,7 @@ static uint32_t gfx_gather_texture(int tile) {
     if (dst_stride < row) dst_stride = row;
     if (rows * dst_stride > sizeof(sTexStage)) return 0;
     for (y = 0; y < rows; y++) {
-        for (x = 0; x < row; x++) sTexStage[y * dst_stride + x] = TEX_SRC_BYTE(src + y * full + x);
+        for (x = 0; x < row; x++) sTexStage[y * dst_stride + x] = TEX_SRC_BYTE_X(src + y * full + x, sw);
         for (; x < dst_stride; x++) sTexStage[y * dst_stride + x] = 0;
     }
     return rows * dst_stride;
@@ -1785,15 +1831,21 @@ static void gfx_dp_set_scissor(uint32_t mode, uint32_t ulx, uint32_t uly, uint32
     gfx_apply_scissor();
 }
 
+/* PORT (2026-09-29): 0 (default) = the N64's 4:3 image centered with black side bars, like the
+ * original. 1 = "hor+" widescreen: full-width scissors are widened to the whole 400-pixel target so
+ * 3D also draws into the sides; OoT was not designed for it (pre-rendered backgrounds, fades and
+ * cutscene fills stay 4:3, geometry outside the N64 view shows), so it is opt-in. */
+int gPortWidescreen = 0;
+
 static void gfx_apply_scissor(void) {
     uint32_t ulx = rdp.scissor_raw[0], uly = rdp.scissor_raw[1], lrx = rdp.scissor_raw[2], lry = rdp.scissor_raw[3];
-    /* PORT (2026-09-25): pixels map like the content (x * RATIO_Y + pillar), except that a full-width
-     * scissor keeps the whole target so the widened 3D view still fills the sides */
+    /* PORT (2026-09-25): pixels map like the content (x * RATIO_Y + pillar), except that in widescreen
+     * mode a full-width scissor keeps the whole target so the widened 3D view fills the sides */
     float x = ulx / 4.0f * RATIO_Y + GFX_PILLAR_X;
     float y = (SCREEN_HEIGHT - lry / 4.0f) * RATIO_Y;
     float width = (lrx - ulx) / 4.0f * RATIO_Y;
     float height = (lry - uly) / 4.0f * RATIO_Y;
-    if (ulx == 0 && lrx >= SCREEN_WIDTH * 4 - 4) {
+    if (gPortWidescreen && ulx == 0 && lrx >= SCREEN_WIDTH * 4 - 4) {
         x = 0.0f;
         width = gfx_current_dimensions.width;
     }
@@ -1854,8 +1906,9 @@ static void gfx_dp_load_tlut(uint8_t tile, uint32_t high_index) {
     if (src == NULL) {
         return;
     }
+    uintptr_t sw = gfx_src_swizzle(src);
     for (i = 0; i < count && dest + i < 256; i++) {
-        rdp.tlut[dest + i] = (TEX_SRC_BYTE(src + i * 2) << 8) | TEX_SRC_BYTE(src + i * 2 + 1);
+        rdp.tlut[dest + i] = (TEX_SRC_BYTE_X(src + i * 2, sw) << 8) | TEX_SRC_BYTE_X(src + i * 2 + 1, sw);
     }
     rdp.textures_changed[0] = true;
     rdp.textures_changed[1] = true;

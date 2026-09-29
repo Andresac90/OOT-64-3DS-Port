@@ -424,7 +424,14 @@ void AudioThread_QueueCmdS32(u32 opArgs, s32 data) {
  * original name: Nap_SetS8
  */
 void AudioThread_QueueCmdS8(u32 opArgs, s8 data) {
+#ifdef __3DS__
+    // The value is read back through AudioCmd.asSbyte, the union's FIRST byte: the high byte on
+    // the big-endian N64 (hence << 0x18), the low byte on the little-endian 3DS. Shifting here
+    // made every s8 command (SFX IO ports, pan, mute, reverb...) arrive as 0.
+    u32 uData = (u8)data;
+#else
     u32 uData = data << 0x18;
+#endif
 
     AudioThread_QueueCmd(opArgs, (void**)&uData);
 }
@@ -433,7 +440,11 @@ void AudioThread_QueueCmdS8(u32 opArgs, s8 data) {
  * original name: Nap_SetU16
  */
 void AudioThread_QueueCmdU16(u32 opArgs, u16 data) {
+#ifdef __3DS__
+    u32 uData = data; // read back through AudioCmd.asUShort (first 2 bytes): see QueueCmdS8
+#else
     u32 uData = data << 0x10;
+#endif
 
     AudioThread_QueueCmd(opArgs, (void**)&uData);
 }

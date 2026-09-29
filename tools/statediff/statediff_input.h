@@ -78,6 +78,24 @@ static void StateDiff_InjectInput(PlayState* play) {
     osWritebackDCacheAll();
     StateDiff_Sync(play);
 
+#ifdef STATEDIFF_TOUR_DAYTIME
+    // Optional fixed time of day (tour.py --daytime): the debug save starts at midnight. The first scene
+    // loaded before this hook ran, so reload it once with the clock set; then keep the clock pinned so
+    // every entry loads with the same time (and actors) on both sides.
+    {
+        static s32 sTourDayInit = false;
+
+        gSaveContext.save.dayTime = STATEDIFF_TOUR_DAYTIME;
+        if (!sTourDayInit && (STATEDIFF_TOUR_LEN > 0)) {
+            sTourDayInit = true;
+            play->nextEntranceIndex = sStateDiffTour[0];
+            play->transitionTrigger = TRANS_TRIGGER_START;
+            play->transitionType = TRANS_TYPE_INSTANT;
+            gStateDiffFramesSinceCapture = 0;
+            return;
+        }
+    }
+#endif
     gStateDiffFramesSinceCapture++;
     if (STATEDIFF_TOUR_LEN > 0) {
         // Scene tour: mark Navi's hot-room / underwater warnings as already shown (both sides). Drawing

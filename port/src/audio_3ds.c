@@ -2,7 +2,7 @@
  * audio_3ds.c — M3a: ndsp output plumbing (see PORT_ROADMAP.md §8.2).
  * One stereo PCM16 channel at 32000 Hz (the OoT engine rate; ndsp resamples
  * internally). Provides:
- *   Port3ds_AudioInit()   — boot init + 0.3 s proof-of-life tone
+ *   Port3ds_AudioInit()   — boot init
  *   Port3ds_AudioSubmit() — future M3c/M3d sink: interleaved s16 LR frames
  *   Port3ds_AudioReady()  — whether ndsp is up
  *
@@ -16,7 +16,7 @@
 #include <math.h>
 
 #define PORT_AUDIO_RATE   32000
-#define PORT_AUDIO_NBUFS  3
+#define PORT_AUDIO_NBUFS  4
 #define PORT_AUDIO_MAXSAMPLES 1600 /* per submit; engine frames are ~544-736 */
 
 static bool sNdspOk = false;
@@ -24,8 +24,6 @@ static ndspWaveBuf sWaveBufs[PORT_AUDIO_NBUFS];
 static s16* sWaveData[PORT_AUDIO_NBUFS];
 static int sNextBuf = 0;
 
-static ndspWaveBuf sBeepBuf;
-static s16* sBeepData;
 
 void Port3ds_AudioInit(void) {
     extern void PortDbg(const char*);
@@ -54,25 +52,7 @@ void Port3ds_AudioInit(void) {
         sWaveBufs[i].status = NDSP_WBUF_DONE;
     }
 
-    /* Proof-of-life: 0.3 s 440 Hz tone so the user can hear the pipe works. */
-    {
-        int n = PORT_AUDIO_RATE * 3 / 10;
-        sBeepData = (s16*)linearAlloc(n * 2 * sizeof(s16));
-        if (sBeepData != NULL) {
-            for (int i = 0; i < n; i++) {
-                float env = (i < n - 800) ? 1.0f : (float)(n - i) / 800.0f;
-                s16 v = (s16)(2500.0f * env * sinf(2.0f * 3.14159265f * 440.0f * (float)i / (float)PORT_AUDIO_RATE));
-                sBeepData[2 * i] = v;
-                sBeepData[2 * i + 1] = v;
-            }
-            memset(&sBeepBuf, 0, sizeof(sBeepBuf));
-            sBeepBuf.data_vaddr = sBeepData;
-            sBeepBuf.nsamples = n;
-            DSP_FlushDataCache(sBeepData, n * 2 * sizeof(s16));
-            ndspChnWaveBufAdd(0, &sBeepBuf);
-        }
-    }
-    printf("[audio] ndsp up @32000Hz (beep = pipe OK)\n");
+    printf("[audio] ndsp up @32000Hz\n");
 }
 
 int Port3ds_AudioReady(void) {
@@ -103,24 +83,27 @@ void Port3ds_AudioSubmit(const s16* samples, int nsamples) {
 
 /* PORT (2026-09-21): capture the engine's mixed PCM to a WAV on the SD card, so the audio
  * can be VERIFIED/heard even when ndsp is unavailable (Azahar needs dspfirm.cdc, which ndspInit
- * requires). Writes ~6 s of 32 kHz stereo s16 to sdmc:/3ds/oot/oot_audio.wav then stops. */
+ * requires). Writes 20 s of 32 kHz stereo s16 (from the first audible frame) to sdmc:/3ds/oot/oot_audio.wav then stops. */
 static void wav_put32(FILE* f, unsigned v) { fputc(v&0xFF,f);fputc((v>>8)&0xFF,f);fputc((v>>16)&0xFF,f);fputc((v>>24)&0xFF,f); }
 static void wav_put16(FILE* f, unsigned v) { fputc(v&0xFF,f);fputc((v>>8)&0xFF,f); }
 static FILE* sWavFile = NULL;
 static unsigned sWavSamples = 0;
 static int sWavDone = 0;
-#define WAV_MAX_SAMPLES (32000u * 6u)
+#define WAV_MAX_SAMPLES (32000u * 20u)
 static void Port3ds_AudioDumpWav(const s16* le_stereo, int nsamples) {
     extern void PortDbg(const char*);
     int i;
     if (sWavDone) return;
     if (sWavFile == NULL) {
+        /* start at the first audible frame (the boot logo is silent, as on N64) */
+        for (i = 0; i < nsamples * 2 && le_stereo[i] == 0; i++) {}
+        if (i == nsamples * 2) return;
         sWavFile = fopen("sdmc:/3ds/oot/oot_audio.wav", "wb");
         if (sWavFile == NULL) { sWavDone = 1; return; }
         for (i = 0; i < 44; i++) fputc(0, sWavFile); /* header placeholder */
         PortDbg("[audio] WAV capture started -> sdmc:/3ds/oot/oot_audio.wav");
     }
-    for (i = 0; i < nsamples * 2; i++) wav_put16(sWavFile, (unsigned)(le_stereo[i] & 0xFFFF));
+    fwrite(le_stereo, 4, (size_t)nsamples, sWavFile); /* native LE s16 stereo == WAV PCM layout */
     sWavSamples += (unsigned)nsamples;
     if (sWavSamples >= WAV_MAX_SAMPLES) {
         unsigned dataBytes = sWavSamples * 4;
@@ -130,31 +113,114 @@ static void Port3ds_AudioDumpWav(const s16* le_stereo, int nsamples) {
         wav_put32(sWavFile, 32000); wav_put32(sWavFile, 32000 * 4); wav_put16(sWavFile, 4); wav_put16(sWavFile, 16);
         fputs("data", sWavFile); wav_put32(sWavFile, dataBytes);
         fclose(sWavFile); sWavFile = NULL; sWavDone = 1;
-        PortDbg("[audio] WAV capture COMPLETE (~6s) -> sdmc:/3ds/oot/oot_audio.wav");
+        PortDbg("[audio] WAV capture COMPLETE (20s) -> sdmc:/3ds/oot/oot_audio.wav");
     }
 }
 
-/* Microcode sink: the interpreter produces big-endian interleaved stereo s16
- * (the N64 DMEM representation). Byte-swap to little-endian, capture to WAV, then
- * (if ndsp is up) submit to the wave-buf path above. */
-void Port3ds_AudioSubmitFrame(const s16* be_stereo, int nsamples) {
-    static s16 le[PORT_AUDIO_MAXSAMPLES * 2];
-    const u8* src;
-    int n2, i;
-    if (be_stereo == NULL || nsamples <= 0) {
+/* AI sink, called from osAiSetNextBuffer with each finished engine audio frame (native s16
+ * interleaved stereo, like the N64 AI DMA): capture to WAV, then queue on ndsp. */
+void Port3ds_AudioSubmitAi(const s16* stereo, int nframes) {
+    if (stereo == NULL || nframes <= 0) {
         return;
     }
-    if (nsamples > PORT_AUDIO_MAXSAMPLES) {
-        nsamples = PORT_AUDIO_MAXSAMPLES;
+    if (nframes > PORT_AUDIO_MAXSAMPLES) {
+        nframes = PORT_AUDIO_MAXSAMPLES;
     }
-    src = (const u8*)be_stereo;
-    n2 = nsamples * 2; /* L+R */
-    for (i = 0; i < n2; i++) {
-        le[i] = (s16)((src[i * 2] << 8) | src[i * 2 + 1]);
-    }
-    Port3ds_AudioDumpWav(le, nsamples); /* capture regardless of ndsp availability */
+    Port3ds_AudioDumpWav(stereo, nframes); /* capture regardless of ndsp availability */
+    Port3ds_AudioSubmit(stereo, nframes);
+}
+
+/* Stereo frames queued on ndsp and not yet played (the N64 osAiGetLength equivalent). */
+int Port3ds_AudioQueuedFrames(void) {
+    int i, queued = 0;
     if (!sNdspOk) {
+        return 0;
+    }
+    for (i = 0; i < PORT_AUDIO_NBUFS; i++) {
+        if (sWaveBufs[i].status == NDSP_WBUF_QUEUED || sWaveBufs[i].status == NDSP_WBUF_PLAYING) {
+            queued += (int)sWaveBufs[i].nsamples;
+        }
+    }
+    if (queued > 0) {
+        queued -= (int)ndspChnGetSamplePos(0); /* position within the buffer now playing */
+    }
+    return queued > 0 ? queued : 0;
+}
+
+/* PORT (2026-09-29): the audio "RSP". On the N64 the RSP runs each audio task while the CPU builds the next
+ * one (AudioMgr_HandleRetrace dispatches task N, runs AudioThread_Update for N+1, then waits for N-1); the
+ * engine's DMA buffer lifetimes assume that overlap. Here the C microcode (PortAudio_RunTask) runs on a
+ * worker thread on another core - core 2 on New 3DS, the system core 1 (with an app CPU-time allowance) on
+ * Old 3DS - so it no longer eats the main thread's frame time. Dispatching a task first waits for the
+ * previous one, so tasks still run in order. If no worker can be created, tasks run synchronously. */
+/* OSTask (ultra64.h, which clashes with <3ds.h>) copied as opaque bytes; sched_shim.c checks the size */
+#define PORT_OSTASK_SIZE 64
+typedef struct { u8 bytes[PORT_OSTASK_SIZE]; } PortOSTask;
+extern void PortAudio_RunTask(void* task);
+
+static Thread sAudioWorker;
+static LightEvent sAudioJobStart, sAudioJobDone;
+static PortOSTask sAudioJob __attribute__((aligned(8)));
+static volatile bool sAudioJobBusy;
+static int sAudioAsync = -1; /* -1 = not tried yet */
+
+static void Port3ds_AudioWorkerMain(void* arg) {
+    (void)arg;
+    for (;;) {
+        LightEvent_Wait(&sAudioJobStart);
+        PortAudio_RunTask(&sAudioJob);
+        sAudioJobBusy = false;
+        LightEvent_Signal(&sAudioJobDone);
+    }
+}
+
+static void Port3ds_AudioWorkerStart(void) {
+    extern void PortDbg(const char*);
+    bool n3ds = false;
+    s32 prio = 0x30;
+    int core;
+
+    sAudioAsync = 0;
+    LightEvent_Init(&sAudioJobStart, RESET_ONESHOT);
+    LightEvent_Init(&sAudioJobDone, RESET_ONESHOT);
+    APT_CheckNew3DS(&n3ds);
+    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    core = n3ds ? 2 : 1;
+    if (!n3ds) {
+        APT_SetAppCpuTimeLimit(30); /* Old 3DS: let the app use up to 30% of the system core */
+    }
+    sAudioWorker = threadCreate(Port3ds_AudioWorkerMain, NULL, 16 * 1024, prio > 0x18 ? prio - 1 : prio, core, true);
+    if (sAudioWorker == NULL && n3ds) {
+        APT_SetAppCpuTimeLimit(30);
+        core = 1;
+        sAudioWorker = threadCreate(Port3ds_AudioWorkerMain, NULL, 16 * 1024, prio > 0x18 ? prio - 1 : prio, core, true);
+    }
+    if (sAudioWorker != NULL) {
+        sAudioAsync = 1;
+        PortDbg(core == 2 ? "[audio] microcode worker on core 2" : "[audio] microcode worker on core 1");
+    } else {
+        PortDbg("[audio] no microcode worker thread - running audio tasks synchronously");
+    }
+}
+
+/* wait until the previous audio task has finished */
+void Port3ds_AudioTaskWait(void) {
+    while (sAudioJobBusy) {
+        LightEvent_Wait(&sAudioJobDone);
+    }
+}
+
+/* run (or start) one audio task; returns once it may be treated as complete by the scheduler */
+void Port3ds_AudioTaskRun(void* task) {
+    if (sAudioAsync < 0) {
+        Port3ds_AudioWorkerStart();
+    }
+    if (sAudioAsync == 0) {
+        PortAudio_RunTask(task);
         return;
     }
-    Port3ds_AudioSubmit(le, nsamples);
+    Port3ds_AudioTaskWait();
+    memcpy(&sAudioJob, task, sizeof(sAudioJob)); /* the command list stays valid: the engine double-buffers it */
+    sAudioJobBusy = true;
+    LightEvent_Signal(&sAudioJobStart);
 }

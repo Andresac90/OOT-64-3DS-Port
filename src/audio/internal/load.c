@@ -728,13 +728,30 @@ u32 AudioLoad_TrySyncLoadSampleBank(u32 sampleBankId, u32* outMedium, s32 noLoad
  * native LE once, after DMA, before relocation. Offsets stay offsets (the
  * relocation converts them to pointers). A visited set (tagged by type) avoids
  * double-swapping shared samples/loops/books/envelopes. */
-static u32 sPbswSeen[1024];
+/* Visited set: open-addressing hash of type-tagged offsets. Must never "forget" an entry: a
+ * shared struct swapped twice is back to big-endian (garbage loops/codebooks -> noise). */
+#define PBSW_SEEN_SIZE 8192 /* power of 2, far above any font's struct count */
+static u32 sPbswSeen[PBSW_SEEN_SIZE];
 static s32 sPbswSeenN;
 static s32 pbsw_seen(u32 tag) {
-    s32 i;
-    for (i = 0; i < sPbswSeenN; i++) if (sPbswSeen[i] == tag) return 1;
-    if (sPbswSeenN < 1024) sPbswSeen[sPbswSeenN++] = tag;
+    u32 h = (tag * 2654435761u) & (PBSW_SEEN_SIZE - 1);
+    while (sPbswSeen[h] != 0) {
+        if (sPbswSeen[h] == tag) return 1;
+        h = (h + 1) & (PBSW_SEEN_SIZE - 1);
+    }
+    if (sPbswSeenN >= PBSW_SEEN_SIZE / 2) {
+        extern void PortDbgX(const char*, unsigned);
+        PortDbgX("[audio] font byteswap: visited set full", sPbswSeenN); /* never expected */
+        return 0;
+    }
+    sPbswSeen[h] = tag; /* tags are nonzero: offset | type bit */
+    sPbswSeenN++;
     return 0;
+}
+static void pbsw_seen_reset(void) {
+    s32 i;
+    for (i = 0; i < PBSW_SEEN_SIZE; i++) sPbswSeen[i] = 0;
+    sPbswSeenN = 0;
 }
 static void pbsw32(void* p) { u32* q = (u32*)p; *q = __builtin_bswap32(*q); }
 
@@ -772,7 +789,7 @@ static void pbsw_env(u8* base, u32 envOff) {
     for (k = 0; k < 128; k++) {
         delay = __builtin_bswap16((u16)e[k * 2]); e[k * 2] = delay;
         e[k * 2 + 1] = __builtin_bswap16((u16)e[k * 2 + 1]);
-        if (delay == 0 || delay == -1 || delay == -2) break; /* ADSR_DISABLE/HANG/GOTO */
+        if (delay == ADSR_DISABLE || delay == ADSR_HANG || delay == ADSR_GOTO || delay == ADSR_RESTART) break;
     }
 }
 static void pbsw_ts(u8* base, u8* ts) { /* TunedSample {u32 sampleOff, f32 tuning} */
@@ -787,13 +804,13 @@ static void AudioLoad_ByteswapFont(u8* fontData, s32 fontId) {
     u32 drumListOff, sfxListOff, instOff, envOff, drumOff;
     u32* fd = (u32*)fontData;
     s32 i;
-    sPbswSeenN = 0;
+    pbsw_seen_reset();
     drumListOff = __builtin_bswap32(fd[0]); fd[0] = drumListOff;
     sfxListOff = __builtin_bswap32(fd[1]); fd[1] = sfxListOff;
     if (numInst > 126) numInst = 126;
     for (i = 2; i < 2 + numInst; i++) {
         instOff = __builtin_bswap32(fd[i]); fd[i] = instOff;
-        if (instOff != 0) {
+        if (instOff != 0 && !pbsw_seen(instOff | 0x50000000u)) { /* instruments can be shared */
             u8* inst = fontData + instOff;
             envOff = __builtin_bswap32(*(u32*)(inst + 4)); *(u32*)(inst + 4) = envOff;
             pbsw_env(fontData, envOff);
@@ -806,7 +823,7 @@ static void AudioLoad_ByteswapFont(u8* fontData, s32 fontId) {
         u32* dl = (u32*)(fontData + drumListOff);
         for (i = 0; i < numDrums; i++) {
             drumOff = __builtin_bswap32(dl[i]); dl[i] = drumOff;
-            if (drumOff != 0) {
+            if (drumOff != 0 && !pbsw_seen(drumOff | 0x60000000u)) { /* drums can be shared */
                 u8* drum = fontData + drumOff;
                 pbsw_ts(fontData, drum + 0x04);
                 envOff = __builtin_bswap32(*(u32*)(drum + 0x0C)); *(u32*)(drum + 0x0C) = envOff;
@@ -859,9 +876,6 @@ SoundFontData* AudioLoad_SyncLoadFont(u32 fontId) {
         return NULL;
     }
     if (didAllocate == true) {
-#ifdef __3DS__
-        AudioLoad_ByteswapFont((u8*)fontData, realFontId); /* BE soundfont -> native LE before reloc */
-#endif
         FLOG("FONT reloc START", realFontId);
         AudioLoad_RelocateFontAndPreloadSamples(realFontId, fontData, &sampleBankReloc, false);
         FLOG("FONT reloc DONE", realFontId);
@@ -1048,6 +1062,12 @@ void AudioLoad_RelocateFont(s32 fontId, SoundFontData* fontDataStartAddr, Sample
     s32 numInstruments = gAudioCtx.soundFontList[fontId].numInstruments;
     s32 numSfx = gAudioCtx.soundFontList[fontId].numSfx;
     u32* fontData = (u32*)fontDataStartAddr;
+#ifdef __3DS__
+    // BE soundfont -> native LE, once per load, before relocation. Every font load (sync or async)
+    // relocates exactly once here; swapping only in AudioLoad_SyncLoadFont would leave fonts loaded
+    // by the async path (AudioLoad_FinishAsyncLoad) big-endian.
+    AudioLoad_ByteswapFont((u8*)fontDataStartAddr, fontId);
+#endif
 
     // Relocate an offset (relative to the start of the font data) to a pointer (a ram address)
 #define RELOC_TO_RAM(offset) ((u32)(offset) + (u32)(fontDataStartAddr))

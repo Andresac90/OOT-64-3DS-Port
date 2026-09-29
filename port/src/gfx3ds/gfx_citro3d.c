@@ -237,9 +237,15 @@ static int arityOf(u8 func) {
 }
 
 /* buffer component c as constant k at stage s: its initial color is visible until the cycle-0
- * output lands in it (PICA: stage s reads buffer updates of stages <= s-2) */
+ * output lands in it (PICA: stage s reads buffer updates of stages <= s-2). PORT (2026-09-29): and
+ * only FROM STAGE 1: stage 0's PREVIOUS_BUFFER reads 0 (the buffer color register feeds the buffer
+ * that stage 1 sees; Citra/Azahar model it the same way). Using it at stage 0 turned the constant
+ * black, e.g. the hearts' (PRIM - ENV) * TEXEL0 + ENV drew a black outline instead of ENV. */
 static bool bufKonstOk(TevCompile* tc, int c, u8 k, int s) {
     struct ShaderProgram* prg = tc->prg;
+    if (s == 0) {
+        return false;
+    }
     if (prg->buf_konst[c] != KC_NONE && prg->buf_konst[c] != k) {
         return false;
     }
