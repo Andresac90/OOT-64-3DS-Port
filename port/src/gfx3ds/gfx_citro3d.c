@@ -44,7 +44,9 @@ static shaderProgram_s sShaderProgram;
 static void* sVboBuffer;
 
 extern const u8 shader_shbin[];
-extern const u32 shader_shbin_size;
+/* objcopy's _size symbol is ABSOLUTE (its address is the size): reading it as a u32 reads address
+ * 0xB0, which Azahar allows but real hardware faults on. Use end - start. */
+extern const u8 shader_shbin_end[];
 
 /* PORT (2026-09-25): N64 color combiner -> PICA TEV compiler.
  *
@@ -835,7 +837,7 @@ static void gfx_citro3d_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size
 
 static void gfx_citro3d_init(void)
 {
-    sVShaderDvlb = DVLB_ParseFile((u32*)shader_shbin, shader_shbin_size);
+    sVShaderDvlb = DVLB_ParseFile((u32*)shader_shbin, (u32)(shader_shbin_end - shader_shbin));
 	shaderProgramInit(&sShaderProgram);
 	shaderProgramSetVsh(&sShaderProgram, &sVShaderDvlb->DVLE[0]);
 	C3D_BindProgram(&sShaderProgram);

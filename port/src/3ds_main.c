@@ -340,8 +340,27 @@ static void WipeCrashDumps(void) {
  * reliable boot-progress tracing before the SD boot.log is even open. */
 #define DBG(s) svcOutputDebugString((s), sizeof(s) - 1)
 
+/* PORT (2026-09-29): first thing in main, before any engine code: prove the process started and record
+ * how it was launched and what memory it got (a hardware CIA launch showed nothing at all). */
+static void Port_EarlyBootMarker(void) {
+    FILE* f = fopen("sdmc:/3ds/oot/boot_early.log", "a"); /* own file: boot.log is recreated later */
+    if (f != NULL) {
+        bool isNew = false;
+        u64 programId = 0;
+        APT_CheckNew3DS(&isNew);
+        APT_GetProgramID(&programId);
+        fprintf(f, "=== main() reached: program %016llx, %s launch, %s 3DS, app mem %lu KB (free %lu KB), linear free %lu KB ===\n",
+                (unsigned long long)programId, envIsHomebrew() ? "3dsx" : "CIA/3ds", isNew ? "New" : "Old",
+                (unsigned long)(osGetMemRegionSize(MEMREGION_APPLICATION) / 1024),
+                (unsigned long)(osGetMemRegionFree(MEMREGION_APPLICATION) / 1024),
+                (unsigned long)(linearSpaceFree() / 1024));
+        fclose(f);
+    }
+}
+
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
+    Port_EarlyBootMarker();
     { extern void PortOverlayStatics_Init(void); PortOverlayStatics_Init(); } /* before any game code */
     DBG("PORT: main() entered");
     /* PORT PERF (2026-09-28): New 3DS: run the app core at 804 MHz with the L2 cache (default is the
