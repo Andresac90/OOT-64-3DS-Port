@@ -252,7 +252,13 @@ void Port3ds_PumpAudio(void) {
       } }
     /* NOTE: do NOT flush cmds here - Audio_Update (now unblocked) owns the
      * ScheduleProcessCmds flush; a second flush corrupts the read-pos/STOP state. */
-    AudioMgr_HandleRetrace(&sAudioMgr);
+    {
+        extern u64 gPortPerfAudioMain;
+        extern u64 svcGetSystemTick(void);
+        u64 t0 = svcGetSystemTick();
+        AudioMgr_HandleRetrace(&sAudioMgr);
+        gPortPerfAudioMain += svcGetSystemTick() - t0; /* engine + any wait for the previous task */
+    }
 }
 
 /* Rumble + Controller Pak: absent hardware */

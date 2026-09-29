@@ -92,8 +92,20 @@ static int sWavDone = 0;
 #define WAV_MAX_SAMPLES (32000u * 20u)
 static void Port3ds_AudioDumpWav(const s16* le_stereo, int nsamples) {
     extern void PortDbg(const char*);
+    static int sWavWanted = -1;
     int i;
     if (sWavDone) return;
+    if (sWavWanted < 0) {
+        /* opt-in (verification builds/emulator): writing to the SD card from the frame loop stalls real
+         * hardware for the whole capture, so only capture when sdmc:/3ds/oot/capture_audio exists */
+        FILE* flag = fopen("sdmc:/3ds/oot/capture_audio", "rb");
+        sWavWanted = flag != NULL;
+        if (flag != NULL) fclose(flag);
+    }
+    if (!sWavWanted) {
+        sWavDone = 1;
+        return;
+    }
     if (sWavFile == NULL) {
         /* start at the first audible frame (the boot logo is silent, as on N64) */
         for (i = 0; i < nsamples * 2 && le_stereo[i] == 0; i++) {}
@@ -164,11 +176,18 @@ static PortOSTask sAudioJob __attribute__((aligned(8)));
 static volatile bool sAudioJobBusy;
 static int sAudioAsync = -1; /* -1 = not tried yet */
 
+u64 gPortPerfAudioUcode, gPortPerfAudioWait; /* ticks: microcode (worker core), main thread waiting for it */
+u32 gPortPerfAudioTasks;
+
 static void Port3ds_AudioWorkerMain(void* arg) {
     (void)arg;
     for (;;) {
+        u64 t0;
         LightEvent_Wait(&sAudioJobStart);
+        t0 = svcGetSystemTick();
         PortAudio_RunTask(&sAudioJob);
+        gPortPerfAudioUcode += svcGetSystemTick() - t0;
+        gPortPerfAudioTasks++;
         sAudioJobBusy = false;
         LightEvent_Signal(&sAudioJobDone);
     }
@@ -205,9 +224,11 @@ static void Port3ds_AudioWorkerStart(void) {
 
 /* wait until the previous audio task has finished */
 void Port3ds_AudioTaskWait(void) {
+    u64 t0 = svcGetSystemTick();
     while (sAudioJobBusy) {
         LightEvent_Wait(&sAudioJobDone);
     }
+    gPortPerfAudioWait += svcGetSystemTick() - t0;
 }
 
 /* run (or start) one audio task; returns once it may be treated as complete by the scheduler */
@@ -216,7 +237,10 @@ void Port3ds_AudioTaskRun(void* task) {
         Port3ds_AudioWorkerStart();
     }
     if (sAudioAsync == 0) {
+        u64 t0 = svcGetSystemTick();
         PortAudio_RunTask(task);
+        gPortPerfAudioUcode += svcGetSystemTick() - t0;
+        gPortPerfAudioTasks++;
         return;
     }
     Port3ds_AudioTaskWait();

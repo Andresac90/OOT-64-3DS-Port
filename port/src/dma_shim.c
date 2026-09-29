@@ -25,6 +25,7 @@ static u32 sRomSize = 0;
 
 #ifdef __3DS__
 static void* sRomFile = NULL;   /* kept open; streamed per request */
+static void PortDma_CacheAudio(void);
 
 void PortDma_Init(const char* romPath) {
     sRomFile = fopen(romPath, "rb");
@@ -36,6 +37,7 @@ void PortDma_Init(const char* romPath) {
     sRomSize = (u32)ftell(sRomFile);
     fseek(sRomFile, 0, SEEK_SET);
     fprintf(stderr, "[dma] rom streaming: %u bytes\n", sRomSize);
+    PortDma_CacheAudio();
 }
 
 static void ReadRom(void* dst, uintptr_t vrom, u32 n) {
@@ -43,6 +45,43 @@ static void ReadRom(void* dst, uintptr_t vrom, u32 n) {
     fread(dst, 1, n, sRomFile);
 }
 #define ROM_READY() (sRomFile != NULL)
+
+/* PORT (2026-09-29): the audio engine streams cartridge-medium samples with many small DMAs every audio
+ * update (fast cart reads on N64). Served from the SD card each one was an fseek+fread, which made audio
+ * lag and stalled frames on hardware. The audio segments are contiguous in the ROM (sequences, soundfonts,
+ * sample table: ~4.8 MB), so they are read into linear memory once at boot and served from there.
+ * If the allocation fails, audio DMAs keep streaming. */
+extern u8 _AudiobankSegmentRomStart[];
+extern u8 _AudiotableSegmentRomEnd[];
+extern void* linearAlloc(u32 size);
+static u8* sAudioRom = NULL;
+static uintptr_t sAudioRomStart, sAudioRomEnd;
+
+static void PortDma_CacheAudio(void) {
+    u32 n;
+    sAudioRomStart = (uintptr_t)_AudiobankSegmentRomStart;
+    sAudioRomEnd = (uintptr_t)_AudiotableSegmentRomEnd;
+    if (sAudioRomEnd <= sAudioRomStart || sAudioRomEnd > sRomSize) {
+        return;
+    }
+    n = (u32)(sAudioRomEnd - sAudioRomStart);
+    sAudioRom = linearAlloc(n);
+    if (sAudioRom == NULL) {
+        fprintf(stderr, "[dma] no memory to cache audio (%u bytes): streaming it\n", n);
+        return;
+    }
+    ReadRom(sAudioRom, sAudioRomStart, n);
+    fprintf(stderr, "[dma] audio ROM cached in RAM: %u bytes\n", n);
+}
+
+/* audio-range request served from RAM? (then no SD read, and no texture cache can live there) */
+static int PortDma_ReadAudio(void* ram, uintptr_t vrom, u32 size) {
+    if (sAudioRom == NULL || vrom < sAudioRomStart || vrom + size > sAudioRomEnd || vrom + size < vrom) {
+        return 0;
+    }
+    memcpy(ram, sAudioRom + (vrom - sAudioRomStart), size);
+    return 1;
+}
 
 #else  /* PC: whole ROM in RAM */
 static u8* sRomImage = NULL;
@@ -93,6 +132,11 @@ extern void gfx_texture_cache_invalidate_range(const void* start, u32 size);
 static void Dma_Copy_Impl(void* ram, uintptr_t vrom, u32 size);
 /* Every DMA destination may hold a cached texture (buffers are reused in place): invalidate it. */
 static void Dma_Copy(void* ram, uintptr_t vrom, u32 size) {
+#ifdef __3DS__
+    if (PortDma_ReadAudio(ram, vrom, size)) {
+        return;
+    }
+#endif
     Dma_Copy_Impl(ram, vrom, size);
     gfx_texture_cache_invalidate_range(ram, size);
 }

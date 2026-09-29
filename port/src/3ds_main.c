@@ -136,6 +136,7 @@ static void Port3ds_PaceFrame(void) {
  * dl = display-list interpretation (gfx_run), swap = frame end/GPU wait, pace = retrace waits + audio;
  * plus triangles and draw calls sent to the GPU per frame (gfx_pc.c counters). */
 u32 gPortPerfTris, gPortPerfDraws;
+u64 gPortPerfAudioMain;
 static u64 sPerfGame, sPerfDl, sPerfSwap, sPerfPace, sPerfLastEnd;
 static void Port3ds_PerfReport(unsigned frames) {
     extern void PortDbgX(const char*, unsigned);
@@ -160,6 +161,16 @@ static void Port3ds_PerfReport(unsigned frames) {
     }
     PortDbgX("perf us/frame swap", (unsigned)(sPerfSwap / div));
     PortDbgX("perf us/frame pace", (unsigned)(sPerfPace / div));
+    {
+        extern u64 gPortPerfAudioUcode, gPortPerfAudioWait, gPortPerfAudioMain;
+        extern u32 gPortPerfAudioTasks;
+        PortDbgX("perf us/frame  audio main (engine+wait)", (unsigned)(gPortPerfAudioMain / div));
+        PortDbgX("perf us/frame  audio wait for ucode", (unsigned)(gPortPerfAudioWait / div));
+        PortDbgX("perf us/task   audio ucode (worker)",
+                 gPortPerfAudioTasks ? (unsigned)(gPortPerfAudioUcode / gPortPerfAudioTasks / (SYSCLOCK_ARM11 / 1000000)) : 0);
+        gPortPerfAudioUcode = gPortPerfAudioWait = gPortPerfAudioMain = 0;
+        gPortPerfAudioTasks = 0;
+    }
     PortDbgX("perf tris/frame", gPortPerfTris / frames);
     { /* memory budget (Old 3DS target: 96MB mode): linear free, regular heap in use (KB) */
         extern u32 linearSpaceFree(void);

@@ -1,6 +1,7 @@
 #ifdef TARGET_N3DS
 
 #include <3ds.h>
+#include <stdlib.h>
 #include <citro3d.h>
 #include "gfx_3ds.h"
 
@@ -128,9 +129,15 @@ static void gfx_3ds_get_dimensions(uint32_t *width, uint32_t *height)
     *height = 240;
 }
 
-static void gfx_3ds_handle_events(void) 
+/* PORT (2026-09-29): service the HOME button / sleep / power once per frame (the game's own loop never
+ * reaches gfx_3ds_main_loop, so nothing called aptMainLoop and HOME did nothing). aptMainLoop blocks
+ * while the HOME menu is open and returns false when the user closes the software. */
+static void gfx_3ds_handle_events(void)
 {
-    
+    if (!aptMainLoop()) {
+        ndspExit();
+        exit(0);
+    }
 }
 
 /* Depth readback for the game's CPU reads of the N64 z-buffer (point-light glows in z_lights.c, the

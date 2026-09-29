@@ -125,8 +125,14 @@ static int ext_range_ok(u32 addr, u32 len) {
     return end <= mi.base_addr + mi.size;
 }
 
+extern u8 gAudioHeap[];
+
 static void* ext_ptr(u32 addr, u32 len) {
     addr &= 0x7FFFFFFFu;
+    /* fast path: nearly everything (sample DMA buffers, states, reverb, AI buffers) is in the audio heap */
+    if (addr >= (u32)gAudioHeap && addr + len >= addr && addr + len <= (u32)gAudioHeap + 0x38000u) {
+        return (void*)(uintptr_t)addr;
+    }
     if (addr < 0x00100000u || !ext_range_ok(addr, len)) {
         static unsigned sBadN = 0;
         if ((sBadN++ & 1023) == 0) PortDbgX("[audio] ucode: out-of-range RDRAM addr (ignored)", addr);
