@@ -26,5 +26,9 @@ int _Printf() { return 0; }
  * pointers can't collide with OoT segments 8-0xF. The app heap now only serves newlib/
  * citro3d/libctru host allocations; linear holds gfx (VBO/framebuffers/textures ~12MB)
  * plus the whole game arena (scenes, objects, display-list pools, UI segments). */
-unsigned __ctru_heap_size = 16u * 1024 * 1024;
-unsigned __ctru_linear_heap_size = 52u * 1024 * 1024;
+/* PORT (2026-09-28): the regular heap needs little (measured ~0.5MB: newlib, JPEG decode buffers); the
+ * linear heap (game arena, GPU buffers, textures; measured ~11MB peak in play) takes all the rest, so
+ * the same binary fits the New 3DS 124MB mode (~66MB linear) and the Old 3DS 96MB mode (~39MB linear).
+ * The image itself is ~51MB (assets compiled in). Was a fixed 16MB + 52MB, which needs 124MB. */
+unsigned __ctru_heap_size = 6u * 1024 * 1024;
+unsigned __ctru_linear_heap_size = 0; /* 0 = everything left (libctru __system_allocateHeaps) */

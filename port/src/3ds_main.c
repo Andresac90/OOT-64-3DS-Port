@@ -1,3 +1,4 @@
+#include <malloc.h>
 /*
  * 3ds_main.c — Nintendo 3DS entry point (libctru). Replaces pc_main.c/pc_gfx.c.
  * Boots the port runtime, drives the OoT gamestate loop, and reads the real
@@ -160,6 +161,19 @@ static void Port3ds_PerfReport(unsigned frames) {
     PortDbgX("perf us/frame swap", (unsigned)(sPerfSwap / div));
     PortDbgX("perf us/frame pace", (unsigned)(sPerfPace / div));
     PortDbgX("perf tris/frame", gPortPerfTris / frames);
+    { /* memory budget (Old 3DS target: 96MB mode): linear free, regular heap in use (KB) */
+        extern u32 linearSpaceFree(void);
+        extern char* fake_heap_start;
+        extern char* fake_heap_end;
+        struct mallinfo mi = mallinfo();
+        static u32 sMinLinearFree = 0xFFFFFFFF;
+        u32 lf = linearSpaceFree();
+        if (lf < sMinLinearFree) sMinLinearFree = lf;
+        PortDbgX("mem linear free KB", lf / 1024);
+        PortDbgX("mem linear free min KB", sMinLinearFree / 1024);
+        PortDbgX("mem heap used KB", (unsigned)mi.uordblks / 1024);
+        PortDbgX("mem heap size KB", (unsigned)(fake_heap_end - fake_heap_start) / 1024);
+    }
     PortDbgX("perf draws/frame", gPortPerfDraws / frames);
     sPerfGame = sPerfDl = sPerfSwap = sPerfPace = 0;
     gPortPerfTris = gPortPerfDraws = 0;
