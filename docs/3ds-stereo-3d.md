@@ -59,3 +59,29 @@ mode (800px wide with anti-aliasing on hardware).
 - Switching from stereo back to mono (slider down) has only been exercised on hardware, not in the
   emulator.
 - Convergence and strength are constants; a settings option could expose them.
+
+## v2 (2026-09-30, after hardware feedback "not deep enough; Link pops out in 2D rooms")
+
+- **Eye sign:** e = 0 (the left eye, GFX_LEFT) gets **+shift**. The display transfer flips the 800-row
+  buffer, so in `stereo_fb.bin` dumps the left eye is the **second** half. An earlier "sign fix" read
+  the dump with the halves swapped, which made the whole world pop out (hardware v10).
+- **Convergence follows Link:** `gPortStereoFocusW` = the player's projectedW (z_play.c), smoothed in
+  `gfx_3ds_update_stereo`, clamped to 60..600. Link sits at the screen plane and the world recedes.
+  Closer things come forward, at most 35% of the full depth (`STEREO_POPOUT_LIMIT`).
+- **Shader:** `out.y += (eye.x · clamp(1 − conv/w, popLimit, 1) + eye.w) · w`, with no shift when w < 1.5
+  (2D/ortho). eye.w is a constant shift for flat layers.
+- **Depth modes** (G_NOOP tags `0x3D5E3D0m`):
+
+  | Mode | Use | Shift |
+  |---|---|---|
+  | 0 | 3D geometry | by distance |
+  | 1 | sky | full, constant |
+  | 2 | pre-rendered room picture | 0.4 × shift, just behind Link at the screen |
+  | 3 | the whole HUD (`Interface_Draw` tags itself) | flat at screen depth |
+
+- **Strength:** 0.04 NDC per eye at full slider, about 16 px at infinity. Measured in Hyrule Field:
+  castle wall −13 px (behind), Link +1 (screen), near ground +4 (front), HUD 0.
+- **PICA quirk:** viewport origins are **signed 10-bit**. A right-eye viewport starting at ≥ 512 on the
+  long axis (the A button's, at 524) wrapped negative and vanished from the right eye. Such viewports
+  start at 400, are made taller, and clip y is remapped in the shader (`remap` uniform:
+  `y' = a·y + b·w`, with `a = h/(dy+h)` and `b = dy/(dy+h)`).

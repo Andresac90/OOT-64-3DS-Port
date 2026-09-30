@@ -1,13 +1,19 @@
 ; Uniforms
-; PORT (2026-09-30): stereoscopic 3D. eye.x = this eye's horizontal shift (NDC units at infinity, signed),
-; eye.y = convergence distance (clip w at screen depth). Positions arrive in clip space (transformed on
-; the CPU), so the shift is eye.x * max(0, w - eye.y) on the screen's horizontal axis, which is clip y
-; here (the top-screen target is portrait). Anything at w <= eye.y (2D HUD, ortho, w = 1) stays at
-; screen depth; the world recedes into the screen. eye = 0 (mono, off-screen) leaves positions untouched.
+; PORT (2026-09-30): stereoscopic 3D. Positions arrive in clip space (transformed on the CPU); the
+; screen's horizontal axis is clip y here (the top-screen target is portrait). Per eye:
+;   out.y += (eye.x * f + eye.w) * w,   f = clamp(1 - eye.y / w, eye.z, 1),  f = 0 when w < 1.5
+; eye.x = shift at infinity (NDC, signed per eye), eye.y = convergence distance (clip w at screen
+; depth: Link's distance, so he sits at the screen and the world recedes), eye.z = the pop-out limit
+; (negative: closer than the convergence comes forward, at most this much), eye.w = a constant NDC
+; shift for flat layers (pre-rendered room backgrounds). w < 1.5 is the 2D HUD / ortho (w = 1): it
+; stays at screen depth. eye = 0 (mono, off-screen targets) leaves positions untouched.
 .fvec eye
+; remap: out.y = out.y * remap.x + w * remap.y (right-eye viewports whose origin would be >= 512 on the
+; long axis are moved down to 400 and made taller; this puts the geometry back on the same pixels)
+.fvec remap
 
 ; Constants
-.constf zeros(0.0, 0.0, 0.0, 0.0)
+.constf consts(1.0, 1.5, 0.0, 0.0)
 
 ; Outputs
 .out outpos position
@@ -24,11 +30,28 @@
 .proc main
 	mov r0, inpos
 	mov r1, eye
-	mov r3, -r1
-	add r2, r3.yyyy, inpos.wwww
-	max r2, zeros, r2
-	mul r2, r1.xxxx, r2
-	add r0.y, r0.yyyy, r2.yyyy
+	; f = 1 - conv / w
+	rcp r2.x, inpos.w
+	mul r2.x, r1.y, r2.x
+	mov r3.x, consts.x
+	add r2.x, r3.x, -r2.x
+	; clamp to [eye.z, 1]
+	max r2.x, r1.z, r2.x
+	min r2.x, r3.x, r2.x
+	; HUD / ortho (w < 1.5): no shift
+	mov r3.x, consts.y
+	sge r4.x, inpos.w, r3.x
+	mul r2.x, r2.x, r4.x
+	; (shift * f + constant) * w
+	mul r2.x, r1.x, r2.x
+	add r2.x, r1.w, r2.x
+	mul r2.x, inpos.w, r2.x
+	add r0.y, r0.y, r2.x
+	; viewport remap (identity (1, 0) except for the right eye's far viewports)
+	mov r5, remap
+	mul r6.x, r5.x, r0.y
+	mul r7.x, r5.y, r0.w
+	add r0.y, r6.x, r7.x
 	mov outpos, r0
 
     mov outtc0, intex

@@ -234,10 +234,14 @@ static unsigned long get_time(void) {
 #include <3ds/svc.h>
 u64 gPortPerfTex, gPortPerfVtx, gPortPerfTri, gPortPerfFlush, gPortPerfEmit, gPortPerfMtx;
 u32 gPortPerfTexImports;
-#ifdef PORT_PERF_STAGES /* opt-in (PORT_EXTRA=-DPORT_PERF_STAGES): one system call per triangle */
+/* opt-in: compile-time PORT_PERF_STAGES, or at run time with perf_stages=1 in settings.txt (one tick
+ * read per triangle while on) */
+int gPortPerfStagesOn;
+int gPortO3dsSim;
+#ifdef PORT_PERF_STAGES
 #define PERF_T() svcGetSystemTick()
 #else
-#define PERF_T() 0
+#define PERF_T() (gPortPerfStagesOn ? svcGetSystemTick() : 0)
 #endif
 #else
 #define PERF_T() 0
@@ -2541,7 +2545,7 @@ static void gfx_run_dl(Gfx* cmd) {
         switch (opcode) {
 #ifdef __3DS__
             /* PORT (2026-09-30): stereo depth tags (gDPNoOpTag 0x3D5E3D0m; z_vr_box_draw.c): m = 0 normal,
-             * 1 infinity (sky), 2 fixed middle depth (pre-rendered rooms). */
+             * 1 infinity (sky), 2 pre-rendered room picture, 3 flat at screen depth (HUD). */
             case (uint8_t)G_NOOP:
                 if ((cmd->words.w1 & 0xFFFFFF00u) == 0x3D5E3D00u) {
                     extern void gfx_citro3d_set_stereo_mode(int mode);

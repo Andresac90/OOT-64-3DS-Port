@@ -35,6 +35,8 @@ extern int gPortMinimapOnBottom; /* 1 = the touch panel shows the map; the top s
 extern const unsigned char* gPortHudIconSeg; /* interfaceCtx->iconItemSegment: B, C-left/down/right icons */
 extern unsigned int gPortHudSerial;           /* bumped by every Interface_Draw */
 extern int gPortHudKeys;                      /* small keys shown by the HUD, -1 = none */
+extern int gPortHudNavi;                      /* Navi wants to talk (the HUD's "Navi" C-up prompt) */
+extern int gPortHudTop;                       /* 1 = the N64 HUD on the top screen (default), 0 = hidden */
 extern volatile int gPortTouchOcarina, gPortTouchBoots; /* touch requests, consumed by z_player.c */
 extern volatile int gPortTouchPage; /* pause page for the next START (-1 = the game's own), z_kaleido_setup.c */
 

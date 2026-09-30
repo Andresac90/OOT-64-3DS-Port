@@ -4,6 +4,8 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
+#include <stdio.h>
 
 #ifndef _LANGUAGE_C
 #define _LANGUAGE_C
@@ -808,34 +810,54 @@ static void applyDrawId(void) {
     }
 }
 
-/* eye uniform (shader.v.pica): x = horizontal shift at infinity, y = convergence (clip w at screen
- * depth; about Link's distance from the camera is ~200-300, so the world mostly recedes) */
-#define STEREO_CONVERGENCE 80.0f
+/* eye uniform (shader.v.pica): (shift at infinity, convergence w, pop-out limit, constant shift).
+ * PORT (2026-09-30, v2 after hardware feedback "not deep enough, Link pops out in 2D rooms"): the
+ * convergence follows Link's distance (gPortStereoFocusW, smoothed in gfx_3ds.c), so Link sits at the
+ * screen plane, the world recedes behind him and closer things come forward a little (limit below);
+ * the 2D HUD (w < 1.5) stays at the screen. Before: a fixed convergence of 80 put Link almost as deep
+ * as the horizon (little relative depth) and nothing could come forward. */
+#define STEREO_POPOUT_LIMIT (-0.35f) /* closest things come forward at most 35% of the full depth */
+#define STEREO_ROOM_DEPTH 0.4f       /* pre-rendered room picture: just behind Link (at the screen) */
+extern float gPortStereoConv;        /* gfx_3ds.c: smoothed convergence distance */
 static int sEyeLoc = -1;
-static float sEyeCur = -1.0f;
+static float sEyeCur[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
 
 /* depth mode from gfx_pc.c (G_NOOP tags, S2DEX backgrounds): 0 = by distance, 1 = infinity (sky),
- * 2 = fixed middle depth (pre-rendered rooms) */
+ * 2 = pre-rendered room picture, 3 = flat at screen depth (the HUD) */
 static int sStereoMode;
-static int sEyeModeCur = -1;
 
 void gfx_citro3d_set_stereo_mode(int mode) {
     sStereoMode = mode;
 }
 
+static int sRemapLoc = -1;
+static float sRemapCur[2] = { -1.0f, -1.0f };
+
+static void setRemap(float a, float b) {
+    if (sRemapLoc >= 0 && (a != sRemapCur[0] || b != sRemapCur[1])) {
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sRemapLoc, a, b, 0.0f, 0.0f);
+        sRemapCur[0] = a;
+        sRemapCur[1] = b;
+    }
+}
+
 static void setEye(float shift) {
-    if (sEyeLoc >= 0 && (shift != sEyeCur || sStereoMode != sEyeModeCur)) {
-        /* shift * max(0, w - conv) in clip space = shift * (1 - conv / w) in NDC. Infinity: conv 0 (full
-         * shift at any w). Fixed: conv negative relative to w is not expressible, so emulate a constant
-         * NDC shift of 0.6 * shift with conv = 0 and the shift scaled (w-independent after the divide). */
-        float conv = sStereoMode == 0 ? STEREO_CONVERGENCE : 0.0f;
-        /* pre-rendered rooms at 0.9: behind the characters (fixed cameras put them at w ~ 300-800, i.e.
-         * 0.73-0.9 of the full shift), like a backdrop they stand in front of. At 0.6 the picture sat in
-         * FRONT of them, which read as characters sunk behind a flat wall. */
-        float s = sStereoMode == 2 ? shift * 0.9f : shift;
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, sEyeLoc, s, conv, 0.0f, 0.0f);
-        sEyeCur = shift;
-        sEyeModeCur = sStereoMode;
+    float u[4];
+    if (sEyeLoc < 0) {
+        return;
+    }
+    if (shift == 0.0f || sStereoMode == 3) { /* mono, or a flat screen-depth layer (the HUD) */
+        u[0] = u[1] = u[2] = u[3] = 0.0f;
+    } else if (sStereoMode == 1) { /* sky: the full shift, independent of the skybox box's own w */
+        u[0] = 0.0f, u[1] = 0.0f, u[2] = 0.0f, u[3] = shift;
+    } else if (sStereoMode == 2) { /* flat picture (w = 1): constant shift */
+        u[0] = 0.0f, u[1] = 0.0f, u[2] = 0.0f, u[3] = shift * STEREO_ROOM_DEPTH;
+    } else {
+        u[0] = shift, u[1] = gPortStereoConv, u[2] = STEREO_POPOUT_LIMIT, u[3] = 0.0f;
+    }
+    if (u[0] != sEyeCur[0] || u[1] != sEyeCur[1] || u[2] != sEyeCur[2] || u[3] != sEyeCur[3]) {
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sEyeLoc, u[0], u[1], u[2], u[3]);
+        memcpy(sEyeCur, u, sizeof(u));
     }
 }
 
@@ -888,16 +910,30 @@ static void gfx_citro3d_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size
         int e;
         for (e = 0; e < 2; e++) {
             int off = e * STEREO_EYE_OFFSET;
-            /* measured (stereo_fb.bin): +shift moves the image right on screen; far objects need the left
-             * eye's image left of the right eye's (uncrossed), so the left eye gets -shift */
-            setEye(e == 0 ? -gPortStereoSep : gPortStereoSep);
             int vx = TOP_W - (sVp[0] + sVp[2]), sx = TOP_W - (sSc[0] + sSc[2]);
-            C3D_SetViewport(sVp[1], vx + off, sVp[3], sVp[2]);
+            int vy = vx + off, vh = sVp[2];
+            /* e = 0 is the left eye (sEyeOut[0] -> GFX_LEFT). Note: the display transfer flips the 800-row
+             * buffer, so in stereo_fb.bin dumps the LEFT eye is the SECOND half. Measured that way: the
+             * left eye gets +shift = uncrossed disparity = the world behind the screen. (A sign "fix" read
+             * from the dump with the halves swapped made the world pop out - hardware v10.) */
+            setEye(e == 0 ? gPortStereoSep : -gPortStereoSep);
+            /* PICA viewport origins are signed 10-bit: a right-eye viewport starting at >= 512 on the long
+             * axis (the A button's at 524) wrapped negative and vanished. Start it at 400 instead, taller,
+             * and remap clip y in the shader so the geometry lands on the same pixels. */
+            if (vy > 511) {
+                int dy = vy - off;
+                setRemap((float)vh / (float)(dy + vh), (float)dy / (float)(dy + vh));
+                C3D_SetViewport(sVp[1], off, sVp[3], dy + vh);
+            } else {
+                setRemap(1.0f, 0.0f);
+                C3D_SetViewport(sVp[1], vy, sVp[3], vh);
+            }
             C3D_SetScissor(GPU_SCISSOR_NORMAL, sSc[1], sx + off, sSc[1] + sSc[3], sx + sSc[2] + off);
             C3D_DrawArrays(GPU_TRIANGLES, sBufIdx, buf_vbo_num_tris * 3);
         }
     } else {
         setEye(0.0f);
+        setRemap(1.0f, 0.0f);
         C3D_DrawArrays(GPU_TRIANGLES, sBufIdx, buf_vbo_num_tris * 3);
     }
     sBufIdx += buf_vbo_num_tris * 3;
@@ -915,7 +951,9 @@ static void gfx_citro3d_init(void)
 	shaderProgramSetVsh(&sShaderProgram, &sVShaderDvlb->DVLE[0]);
 	C3D_BindProgram(&sShaderProgram);
     sEyeLoc = shaderInstanceGetUniformLocation(sShaderProgram.vertexShader, "eye");
+    sRemapLoc = shaderInstanceGetUniformLocation(sShaderProgram.vertexShader, "remap");
     setEye(0.0f);
+    setRemap(1.0f, 0.0f);
 
 	// Configure attributes for use with the vertex shader
 	C3D_AttrInfo* attrInfo = C3D_GetAttrInfo();

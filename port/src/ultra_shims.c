@@ -274,6 +274,8 @@ int gPortMinimapOnBottom = 1;
 const unsigned char* gPortHudIconSeg;
 unsigned int gPortHudSerial;
 int gPortHudKeys = -1;
+int gPortHudNavi;
+int gPortHudTop = 1;
 volatile int gPortTouchOcarina, gPortTouchBoots;
 volatile int gPortTouchPage = -1;
 

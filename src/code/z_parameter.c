@@ -3232,6 +3232,10 @@ void Interface_Draw(PlayState* play) {
     gPortHudIconSeg = interfaceCtx->iconItemSegment;
     gPortHudSerial++;
     gPortHudKeys = -1; /* set below where the small-key counter is drawn */
+    gPortHudNavi = interfaceCtx->naviCalling && !IS_PAUSED(&play->pauseCtx) && (play->csCtx.state == CS_STATE_IDLE);
+    /* stereo: the whole HUD is a flat layer at screen depth, including its perspective-drawn parts
+     * (the spinning A button, the 3D rupee/heart effects) - G_NOOP tag, see gfx_pc.c */
+    gDPNoOpTag(OVERLAY_DISP++, 0x3D5E3D03);
 #endif
 
     gSPSegment(OVERLAY_DISP++, 0x02, interfaceCtx->parameterSegment);
@@ -3240,8 +3244,14 @@ void Interface_Draw(PlayState* play) {
     gSPSegment(OVERLAY_DISP++, 0x0B, interfaceCtx->mapSegment);
 
     if (pauseCtx->debugState == PAUSE_DEBUG_STATE_CLOSED) {
+#ifdef __3DS__
+        Gfx* portHudStart;
+#endif
         Interface_InitVertices(play);
         func_8008A994(interfaceCtx);
+#ifdef __3DS__
+        portHudStart = OVERLAY_DISP; /* see gPortHudTop below */
+#endif
         Health_DrawMeter(play);
 
         Gfx_SetupDL_39Overlay(play->state.gfxCtx);
@@ -3464,6 +3474,17 @@ void Interface_Draw(PlayState* play) {
             Interface_DrawActionLabel(play->state.gfxCtx, interfaceCtx->doActionSegment + DO_ACTION_TEX_SIZE);
         }
 
+#ifdef __3DS__
+        /* PORT (2026-09-30): optional "HUD off" (touch panel HUD pad): everything above still runs
+         * (minimap export, button states, the icon pointer the panel uses), only its drawing is dropped
+         * by rewinding the overlay list. Hearts, rupees, items and the map are on the touch screen. */
+        {
+            extern int gPortHudTop;
+            if (!gPortHudTop) {
+                OVERLAY_DISP = portHudStart;
+            }
+        }
+#endif
         gDPPipeSync(OVERLAY_DISP++);
 
         func_8008A994(interfaceCtx);
@@ -4043,6 +4064,9 @@ void Interface_Draw(PlayState* play) {
         gDPFillRectangle(OVERLAY_DISP++, 0, 0, gScreenWidth - 1, gScreenHeight - 1);
     }
 
+#ifdef __3DS__
+    gDPNoOpTag(OVERLAY_DISP++, 0x3D5E3D00); /* end of the flat HUD layer */
+#endif
     CLOSE_DISPS(play->state.gfxCtx, "../z_parameter.c", 4269);
 }
 

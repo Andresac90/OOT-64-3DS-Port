@@ -1052,6 +1052,15 @@ void Matrix_SetTranslateUniformScaleMtx(Mtx* mtx, f32 scale, f32 translateX, f32
 }
 
 void Matrix_SetTranslateUniformScaleMtx2(Mtx* mtx, f32 scale, f32 translateX, f32 translateY, f32 translateZ) {
+#ifdef __3DS__
+    /* PORT (2026-09-30): the u16 half-word packing below assumes big-endian halves; the port's Mtx is
+     * the guMtxF2L layout (see Matrix_MtxFToMtx), so build it the same way. */
+    MtxF mf;
+
+    Matrix_SetTranslateUniformScaleMtxF(&mf, scale, translateX, translateY, translateZ);
+    guMtxF2L(mf.mf, mtx);
+}
+#else
     u16* intPart = (u16*)&mtx->m[0][0];
     u16* fracPart = (u16*)&mtx->m[2][0];
     u32 fixedPoint;
@@ -1102,6 +1111,7 @@ void Matrix_SetTranslateUniformScaleMtx2(Mtx* mtx, f32 scale, f32 translateX, f3
     fracPart[11] = 0;
     fracPart[15] = 0;
 }
+#endif
 
 void Matrix_SetTranslateScaleMtx1(Mtx* mtx, f32 scaleX, f32 scaleY, f32 scaleZ, f32 translateX, f32 translateY,
                                   f32 translateZ) {
@@ -1158,6 +1168,19 @@ void Matrix_SetTranslateScaleMtx1(Mtx* mtx, f32 scaleX, f32 scaleY, f32 scaleZ, 
 
 void Matrix_SetTranslateScaleMtx2(Mtx* mtx, f32 scaleX, f32 scaleY, f32 scaleZ, f32 translateX, f32 translateY,
                                   f32 translateZ) {
+#ifdef __3DS__
+    /* PORT (2026-09-30): see Matrix_SetTranslateUniformScaleMtx2. On the little-endian 3DS the
+     * "intPart[1] = 0" below cleared the scale's integer part instead of the neighbour's: the HUD's
+     * beating heart (z_lifemeter.c) was scaled to nothing - the top screen showed one heart too few. */
+    MtxF mf;
+
+    mf.xx = scaleX, mf.yx = 0.0f, mf.zx = 0.0f, mf.wx = 0.0f;
+    mf.xy = 0.0f, mf.yy = scaleY, mf.zy = 0.0f, mf.wy = 0.0f;
+    mf.xz = 0.0f, mf.yz = 0.0f, mf.zz = scaleZ, mf.wz = 0.0f;
+    mf.xw = translateX, mf.yw = translateY, mf.zw = translateZ, mf.ww = 1.0f;
+    guMtxF2L(mf.mf, mtx);
+}
+#else
     Mtx_t* m = &mtx->m;
     u16* intPart = (u16*)&(*m)[0][0];
     u16* fracPart = (u16*)&(*m)[2][0];
@@ -1198,3 +1221,4 @@ void Matrix_SetTranslateScaleMtx2(Mtx* mtx, f32 scaleX, f32 scaleY, f32 scaleZ, 
     intPart[15] = 1;
     (*m)[3][3] = fixedPoint << 16;
 }
+#endif

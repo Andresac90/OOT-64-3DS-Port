@@ -1259,15 +1259,32 @@ void Play_Draw(PlayState* this) {
 
 #ifdef __3DS__
     {
+        /* PORT (2026-09-30): stereoscopic 3D converges on Link (gfx_3ds.c): his clip-space w from the
+         * previous draw (Actor_ProjectPos in the actor draw loop) */
+        extern float gPortStereoFocusW;
+        Player* player = GET_PLAYER(this);
+        gPortStereoFocusW = (player != NULL) ? player->actor.projectedW : 0.0f;
+    }
+    {
         /* PORT (2026-09-30): widescreen shows past the N64's 4:3 view. Scenes without a sky (skybox none /
          * UNSET_1D, e.g. Kokiri Forest) rely on geometry covering the whole 4:3 image, so the widened
-         * view showed the black clear where nothing was modeled; clear to the fog color there instead,
-         * which the distant geometry fades into. 4:3 keeps the N64's black clear. */
+         * view showed the black clear where nothing was modeled; fill with the fog color there instead,
+         * which the distant geometry fades into. 4:3 keeps the N64's black clear. Not via
+         * Gfx_SetupFrame's color: that also colors the letterbox (z-target bars came out white). */
         extern int gPortWidescreen;
-        if (gPortWidescreen && (!this->skyboxId || (this->skyboxId == SKYBOX_UNSET_1D) || this->envCtx.skyboxDisabled)) {
-            Gfx_SetupFrame(gfxCtx, this->lightCtx.fogColor[0], this->lightCtx.fogColor[1], this->lightCtx.fogColor[2]);
-        } else {
-            Gfx_SetupFrame(gfxCtx, 0, 0, 0);
+        Gfx_SetupFrame(gfxCtx, 0, 0, 0); /* black: it also draws the letterbox (z-target bars) */
+        if (gPortWidescreen && (!this->skyboxId || (this->skyboxId == SKYBOX_UNSET_1D) || this->envCtx.skyboxDisabled) &&
+            (R_PAUSE_BG_PRERENDER_STATE <= PAUSE_BG_PRERENDER_SETUP) && (gTransitionTileState <= TRANS_TILE_SETUP)) {
+            /* base fill in the fog color between the letterbox bars, like Gfx_SetupFrame's own fill */
+            s32 letterboxSize = Letterbox_GetSize();
+            u8 r = this->lightCtx.fogColor[0], g = this->lightCtx.fogColor[1], b = this->lightCtx.fogColor[2];
+
+            gDPPipeSync(POLY_OPA_DISP++);
+            gDPSetCycleType(POLY_OPA_DISP++, G_CYC_FILL);
+            gDPSetRenderMode(POLY_OPA_DISP++, G_RM_NOOP, G_RM_NOOP2);
+            gDPSetFillColor(POLY_OPA_DISP++, (GPACK_RGBA5551(r, g, b, 1) << 16) | GPACK_RGBA5551(r, g, b, 1));
+            gDPFillRectangle(POLY_OPA_DISP++, 0, letterboxSize, SCREEN_WIDTH - 1, SCREEN_HEIGHT - letterboxSize - 1);
+            gDPPipeSync(POLY_OPA_DISP++);
         }
     }
 #else

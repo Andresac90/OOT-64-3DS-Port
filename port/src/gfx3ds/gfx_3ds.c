@@ -45,6 +45,11 @@ static C3D_RenderTarget* sTarget;
  * output-only targets alias the halves, so citro3d's FrameEnd transfers them to the left/right
  * framebuffers itself. Slider down: back to the mono mode, zero extra cost. */
 float gPortStereoSep;
+/* convergence (clip w at screen depth) for the stereo shader: Link's distance from the camera, set by
+ * the game each frame (gPortStereoFocusW, z_play.c; 0 when there is no player), smoothed so camera
+ * cuts and Link's movement don't make the depth jump. */
+float gPortStereoFocusW;
+float gPortStereoConv = 150.0f;
 static Gfx3DSMode sMonoMode;
 static u32 sMonoFlags;
 static int sMonoW, sMonoH;
@@ -73,7 +78,8 @@ static bool checkN3DS()
 
 static void gfx_3ds_init(void) 
 {
-    if (checkN3DS())
+    extern int gPortO3dsSim;
+    if (checkN3DS() && !gPortO3dsSim)
 		osSetSpeedupEnable(true);
 
     gfxInitDefault();
@@ -148,7 +154,16 @@ static void gfx_3ds_update_stereo(void) {
     bool on = gGfx3DSMode == GFX_3DS_MODE_STEREO;
     int e;
 
-    gPortStereoSep = want ? slider * 0.03f : 0.0f;
+    /* full slider: 0.04 NDC per eye = ~16 px of disparity at infinity (v1 had 0.03 / 12 px and a
+     * fixed convergence: "not deep enough" on hardware) */
+    gPortStereoSep = want ? slider * 0.04f : 0.0f;
+    {
+        float target = gPortStereoFocusW;
+        if (target <= 0.0f) target = 150.0f; /* no player: a typical third-person distance */
+        if (target < 60.0f) target = 60.0f;  /* first person / close-ups: keep some depth */
+        if (target > 600.0f) target = 600.0f;
+        gPortStereoConv += (target - gPortStereoConv) * 0.2f;
+    }
     if (want == on) {
         return;
     }

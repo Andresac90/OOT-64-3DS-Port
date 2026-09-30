@@ -61,7 +61,14 @@ static void Port3ds_SaveSettings(void) {
     extern int gPortWidescreen;
     FILE* f = fopen(PORT_SETTINGS_PATH, "w");
     if (f != NULL) {
+        extern int gPortHudTop;
         fprintf(f, "widescreen=%d\n", gPortWidescreen ? 1 : 0);
+        fprintf(f, "hud=%d\n", gPortHudTop ? 1 : 0);
+        {
+            extern int gPortO3dsSim, gPortPerfStagesOn;
+            if (gPortO3dsSim) fprintf(f, "o3ds_sim=1\n");
+            if (gPortPerfStagesOn) fprintf(f, "perf_stages=1\n");
+        }
         fclose(f);
     }
 }
@@ -76,6 +83,21 @@ static void Port3ds_LoadSettings(void) {
         int v;
         if (sscanf(line, "widescreen=%d", &v) == 1) {
             gPortWidescreen = v != 0;
+        }
+        if (sscanf(line, "hud=%d", &v) == 1) {
+            extern int gPortHudTop;
+            gPortHudTop = v != 0;
+        }
+        /* measurement switches (docs/3ds-60fps-plan.md P0), hand-edited in settings.txt:
+         * o3ds_sim=1: New 3DS runs at the Old 3DS clock (268 MHz, no L2) - approximates an Old 3DS
+         * perf_stages=1: per-stage frame timers in boot.log (one tick read per triangle) */
+        if (sscanf(line, "o3ds_sim=%d", &v) == 1) {
+            extern int gPortO3dsSim;
+            gPortO3dsSim = v != 0;
+        }
+        if (sscanf(line, "perf_stages=%d", &v) == 1) {
+            extern int gPortPerfStagesOn;
+            gPortPerfStagesOn = v != 0;
         }
     }
     fclose(f);
@@ -106,7 +128,7 @@ static int sFbDirty;
 #define PANEL_ITEM_OCARINA_OF_TIME 0x08
 #define PANEL_ITEM_BOOTS_KOKIRI    0x44
 
-enum { P_VIEW, P_SCREEN, P_OCARINA, P_CLEFT, P_CDOWN, P_CRIGHT, P_BOOTS, P_GEAR, P_MAP, P_ITEMS, P_COUNT };
+enum { P_VIEW, P_SCREEN, P_HUD, P_OCARINA, P_CLEFT, P_CDOWN, P_CRIGHT, P_BOOTS, P_GEAR, P_MAP, P_ITEMS, P_COUNT };
 typedef struct {
     s16 x, y, w, h;
     const char* label;
@@ -116,7 +138,8 @@ typedef struct {
 } PanelPad;
 static const PanelPad sPads[P_COUNT] = {
     { 4, 4, 56, 52, "VIEW", BTN_CUP_, -1, 0, 0, 0 },
-    { 4, 116, 56, 36, "SCREEN", 0, -1, 0, 0, 0 },
+    { 4, 112, 56, 34, "SCREEN", 0, -1, 0, 0, 0 },
+    { 4, 148, 56, 32, "HUD", 0, -1, 0, 0, 0 },
     { 4, 184, 56, 52, "OCARINA", 0, -1, 0, 0, 0 },
     { 260, 4, 56, 56, "Y", BTN_CLEFT_, -1, 0, 0, 0 },
     { 260, 64, 56, 56, "ZL", BTN_CDOWN_, -1, 0, 0, 0 },
@@ -231,7 +254,7 @@ static void DrawIcon(int x, int y, const u8* rgba, int size, int dim) {
 /* ---- panel state (what is on screen) ---- */
 static int sHeldPad = -1;
 static PortHudInfo sShown;
-static int sShownWide = -1, sShownIconsOk = -1;
+static int sShownWide = -1, sShownIconsOk = -1, sShownNavi, sShownHud = -1;
 static const u8* sShownIconSeg;
 static unsigned sLastHudSerial, sLastMapSerial;
 static int sHudStale = 99, sMapStale = 99;
@@ -266,6 +289,26 @@ static void DrawPad(int i) {
         int have = sShown.ocarina == PANEL_ITEM_OCARINA_FAIRY || sShown.ocarina == PANEL_ITEM_OCARINA_OF_TIME;
         if (have) DrawIcon(cx - 20, p->y + 3, Port_GetItemIcon(sShown.ocarina), 40, 0);
         DrawTextC(cx, p->y + p->h - 12, "OCARINA", have ? COL_TEXT : COL_DIM);
+    } else if (i == P_VIEW && sShownNavi) {
+        /* Navi wants to talk (OoT3D swaps the VIEW eye for her): a glowing fairy, "NAVI" */
+        int fy = p->y + 20, dx, dy;
+        for (dy = -16; dy <= 16; dy++) {
+            for (dx = -24; dx <= 24; dx++) {
+                int d2 = dx * dx + dy * dy;
+                /* wings: two tilted ellipses on each side */
+                int wx = dx < 0 ? -dx : dx, wyU = dy + 5, wyD = dy - 7;
+                if ((wx > 5 && (wx - 13) * (wx - 13) * 9 + wyU * wyU * 49 <= 9 * 49 * 4) ||
+                    (wx > 5 && (wx - 11) * (wx - 11) * 16 + wyD * wyD * 64 <= 16 * 64 * 2)) {
+                    Px(cx + dx, fy + dy, Blend565(PxGet(cx + dx, fy + dy), 200, 235, 255, 150));
+                }
+                if (d2 <= 144) { /* glow */
+                    int a = 255 - d2 * 255 / 144;
+                    Px(cx + dx, fy + dy, Blend565(PxGet(cx + dx, fy + dy), 120, 200, 255, a));
+                }
+                if (d2 <= 16) Px(cx + dx, fy + dy, PRGB(250, 255, 255));
+            }
+        }
+        DrawTextC(cx, p->y + p->h - 13, "NAVI", PRGB(150, 220, 255));
     } else if (i == P_VIEW) {
         /* an eye, like OoT3D's VIEW button */
         int ey = p->y + 21, dx, dy;
@@ -278,8 +321,11 @@ static void DrawPad(int i) {
         }
         DrawTextC(cx, p->y + p->h - 13, "VIEW", COL_TEXT);
     } else if (i == P_SCREEN) {
-        DrawTextC(cx, p->y + 7, "SCREEN", COL_TEXT);
-        DrawTextC(cx, p->y + 20, gPortWidescreen ? "WIDE" : "4:3", PRGB(255, 230, 120));
+        DrawTextC(cx, p->y + 6, "SCREEN", COL_TEXT);
+        DrawTextC(cx, p->y + 19, gPortWidescreen ? "WIDE" : "4:3", PRGB(255, 230, 120));
+    } else if (i == P_HUD) {
+        DrawTextC(cx, p->y + 5, "TOP HUD", COL_TEXT);
+        DrawTextC(cx, p->y + 18, gPortHudTop ? "ON" : "OFF", PRGB(255, 230, 120));
     } else {
         /* tab: bold label */
         DrawText(cx - (int)strlen(p->label) * 4, p->y + 12, p->label, COL_TEXT);
@@ -544,6 +590,9 @@ static unsigned short Port3ds_TouchUiPoll(void) {
         if (hit == P_SCREEN) {
             gPortWidescreen = !gPortWidescreen;
             Port3ds_SaveSettings();
+        } else if (hit == P_HUD) {
+            gPortHudTop = !gPortHudTop;
+            Port3ds_SaveSettings();
         } else if (hit == P_OCARINA) {
             gPortTouchOcarina = 3;
         } else if (hit == P_BOOTS) {
@@ -575,6 +624,11 @@ static unsigned short Port3ds_TouchUiPoll(void) {
     if (now.boots != sShown.boots) sShown.boots = now.boots, DrawPad(P_BOOTS);
     if (now.ocarina != sShown.ocarina) sShown.ocarina = now.ocarina, DrawPad(P_OCARINA);
     if (gPortWidescreen != sShownWide) sShownWide = gPortWidescreen, DrawPad(P_SCREEN);
+    if (gPortHudTop != sShownHud) sShownHud = gPortHudTop, DrawPad(P_HUD);
+    {
+        int navi = gPortHudNavi && sHudStale < 4;
+        if (navi != sShownNavi) sShownNavi = navi, DrawPad(P_VIEW);
+    }
     if (now.rupees != sShown.rupees || now.keys != sShown.keys) {
         sShown.rupees = now.rupees, sShown.keys = now.keys;
         DrawCounters();
@@ -1019,6 +1073,13 @@ int main(int argc, char** argv) {
 
     PortDma_Init(ROM_PATH);
     Port3ds_LoadSettings();
+    {
+        extern int gPortO3dsSim;
+        if (gPortO3dsSim) {
+            osSetSpeedupEnable(false);
+            DBG("PORT: o3ds_sim: New 3DS speedup OFF (268 MHz, no L2) - Old 3DS approximation");
+        }
+    }
 
     Log("DMA init OK.");
     /* PORT (2026-09-24): bootproc() normally calls Locale_Init (cart header -> gCurrentRegion,
