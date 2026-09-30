@@ -63,6 +63,10 @@ f32 sKaleidoSetupRightPageEyeZ[] = {
     PAUSE_EYE_DIST * -PAUSE_ITEM_Z,  // PAUSE_EQUIP
 };
 
+#ifdef __3DS__
+#include "port_minimap.h"
+#endif
+
 void KaleidoSetup_Update(PlayState* play) {
     PauseContext* pauseCtx = &play->pauseCtx;
     Input* input = &play->state.input[0];
@@ -89,6 +93,12 @@ void KaleidoSetup_Update(PlayState* play) {
             R_PAUSE_BUTTON_RIGHT_X = 155;
 
             pauseCtx->pageSwitchTimer = 0;
+#ifdef __3DS__
+            if (gPortTouchPage >= 0) { /* PORT: GEAR/MAP/ITEMS touch tabs open that page */
+                pauseCtx->pageIndex = gPortTouchPage;
+                gPortTouchPage = -1;
+            }
+#endif
 
             // Setting mainState here is irrelevant, mainState is only used under PAUSE_STATE_MAIN,
             // which isn't involved in the initial pause menu opening page scrolling animation.

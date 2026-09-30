@@ -28,6 +28,9 @@
 #include "assets/textures/parameter_static/parameter_static.h"
 #include "assets/textures/do_action_static/do_action_static.h"
 #include "assets/textures/icon_item_static/icon_item_static.h"
+#ifdef __3DS__
+#include "port_minimap.h"
+#endif
 
 #pragma increment_block_number "gc-jp:128 gc-jp-ce:128 gc-jp-mq:128 gc-us:128 gc-us-mq:128 ntsc-1.0:128 ntsc-1.1:128" \
                                "ntsc-1.2:128"
@@ -3224,6 +3227,13 @@ void Interface_Draw(PlayState* play) {
 
     OPEN_DISPS(play->state.gfxCtx, "../z_parameter.c", 3405);
 
+#ifdef __3DS__
+    /* PORT: the touch panel draws the B/C item icons from here (valid while this keeps being bumped) */
+    gPortHudIconSeg = interfaceCtx->iconItemSegment;
+    gPortHudSerial++;
+    gPortHudKeys = -1; /* set below where the small-key counter is drawn */
+#endif
+
     gSPSegment(OVERLAY_DISP++, 0x02, interfaceCtx->parameterSegment);
     gSPSegment(OVERLAY_DISP++, 0x07, interfaceCtx->doActionSegment);
     gSPSegment(OVERLAY_DISP++, 0x08, interfaceCtx->iconItemSegment);
@@ -3256,6 +3266,9 @@ void Interface_Draw(PlayState* play) {
             case SCENE_GANONS_TOWER_COLLAPSE_INTERIOR:
             case SCENE_INSIDE_GANONS_CASTLE_COLLAPSE:
             case SCENE_TREASURE_BOX_SHOP:
+#ifdef __3DS__
+                gPortHudKeys = gSaveContext.save.info.inventory.dungeonKeys[gSaveContext.mapIndex];
+#endif
                 if (gSaveContext.save.info.inventory.dungeonKeys[gSaveContext.mapIndex] >= 0) {
                     // Small Key Icon
                     gDPPipeSync(OVERLAY_DISP++);

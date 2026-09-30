@@ -1,3 +1,4 @@
+#include <string.h>
 /*
  * ultra_shims.c — libultra replacement layer for the OoT port.
  * Single-threaded synchronous model: the platform frame loop owns execution;
@@ -192,13 +193,6 @@ void osContGetReadData(OSContPad* pad) {
     pad[0].button = PortInput_GetPad(&sx, &sy);
     pad[0].stick_x = sx;
     pad[0].stick_y = sy;
-    if (pad[0].button != 0 || sx != 0 || sy != 0) {
-        static u16 last = 0; static s8 lx = 0, ly = 0;
-        if (pad[0].button != last || sx != lx || sy != ly) {
-            last = pad[0].button; lx = sx; ly = sy;
-            fprintf(stderr, "[input] button=%04x stick=(%d,%d)\n", pad[0].button, sx, sy);
-        }
-    }
 }
 s32 osContStartQuery(OSMesgQueue* mq) { (void)mq; return 0; }
 void osContGetQuery(OSContStatus* status) { memset(status, 0, 4 * sizeof(OSContStatus)); }
@@ -264,3 +258,75 @@ void Port3ds_PumpAudio(void) {
 /* Rumble + Controller Pak: absent hardware */
 s32 osMotorInit(OSMesgQueue* mq, OSPfs* pfs, s32 channel) { (void)mq; (void)pfs; (void)channel; return 1; }
 s32 __osMotorAccess(OSPfs* pfs, s32 flag) { (void)pfs; (void)flag; return 1; }
+
+/* PORT (2026-09-29): OoT3D-style touch panel state (3ds_main.c draws it; see port_minimap.h and
+ * docs/3ds-touch-panel.md). The game side fills gPortMinimap / gPortHud*; the input side sets the
+ * gPortTouch* one-shot requests that z_player.c consumes. */
+#include "save.h"
+#include "item.h"
+#include "port_minimap.h"
+#include "inventory.h"
+#include "interface.h"
+#include "dma.h"
+#include "segment_symbols.h"
+PortMinimap gPortMinimap;
+int gPortMinimapOnBottom = 1;
+const unsigned char* gPortHudIconSeg;
+unsigned int gPortHudSerial;
+int gPortHudKeys = -1;
+volatile int gPortTouchOcarina, gPortTouchBoots;
+volatile int gPortTouchPage = -1;
+
+static short Port_AmmoFor(int item) {
+    switch (item) {
+        case ITEM_DEKU_STICK: case ITEM_DEKU_NUT: case ITEM_BOMB: case ITEM_BOW: case ITEM_SLINGSHOT:
+        case ITEM_BOMBCHU: case ITEM_MAGIC_BEAN:
+            return AMMO(item);
+        case ITEM_BOW_FIRE: case ITEM_BOW_ICE: case ITEM_BOW_LIGHT:
+            return AMMO(ITEM_BOW);
+        default:
+            return -1;
+    }
+}
+
+void Port_GetHudInfo(PortHudInfo* h) {
+    int i;
+    memset(h, 0, sizeof(*h));
+    h->rupees = h->keys = -1;
+    h->ocarina = ITEM_NONE;
+    for (i = 0; i < 3; i++) h->cItem[i] = ITEM_NONE, h->cDisabled[i] = 1, h->cAmmo[i] = -1;
+    if (gSaveContext.gameMode != GAMEMODE_NORMAL || gSaveContext.save.info.playerData.healthCapacity == 0) {
+        return; /* boot logo, title, file select: no save loaded yet */
+    }
+    h->valid = 1;
+    h->rupees = gSaveContext.save.info.playerData.rupees;
+    h->keys = gPortHudKeys;
+    h->health = gSaveContext.save.info.playerData.health;
+    h->healthCapacity = gSaveContext.save.info.playerData.healthCapacity;
+    h->magic = gSaveContext.save.info.playerData.magic;
+    h->magicCapacity = gSaveContext.save.info.playerData.magicLevel != 0 ? gSaveContext.magicCapacity : 0;
+    h->boots = CUR_EQUIP_VALUE(EQUIP_TYPE_BOOTS);
+    h->ocarina = INV_CONTENT(ITEM_OCARINA_FAIRY);
+    for (i = 0; i < 3; i++) {
+        h->cItem[i] = gSaveContext.save.info.equips.buttonItems[i + 1];
+        h->cDisabled[i] = gSaveContext.buttonStatus[i + 1] == BTN_DISABLED;
+        h->cAmmo[i] = Port_AmmoFor(h->cItem[i]);
+    }
+}
+
+/* 32x32 RGBA32 icon for any item id (icon_item_static), read from ROM once and cached; NULL if out of
+ * range. For panel buttons whose item is not on a C button (boots, ocarina). Game thread only. */
+const unsigned char* Port_GetItemIcon(int itemId) {
+    enum { N = 8 };
+    static unsigned char sIcons[N][ITEM_ICON_SIZE] __attribute__((aligned(8)));
+    static short sIds[N] = { -1, -1, -1, -1, -1, -1, -1, -1 };
+    static int sNext;
+    int i;
+    if (itemId < 0 || itemId > ITEM_BOOTS_HOVER) return NULL;
+    for (i = 0; i < N; i++) if (sIds[i] == itemId) return sIcons[i];
+    i = sNext;
+    sNext = (sNext + 1) % N;
+    DmaMgr_RequestSync(sIcons[i], GET_ITEM_ICON_VROM(itemId), ITEM_ICON_SIZE);
+    sIds[i] = (short)itemId;
+    return sIcons[i];
+}

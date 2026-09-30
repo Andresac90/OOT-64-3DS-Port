@@ -231,7 +231,7 @@ static unsigned long get_time(void) {
  * 268 MHz ticks: texture import, vertex transform, triangle setup (excluding flushes), backend draws. */
 #ifdef __3DS__
 #include <3ds/svc.h>
-u64 gPortPerfTex, gPortPerfVtx, gPortPerfTri, gPortPerfFlush;
+u64 gPortPerfTex, gPortPerfVtx, gPortPerfTri, gPortPerfFlush, gPortPerfEmit, gPortPerfMtx;
 u32 gPortPerfTexImports;
 #ifdef PORT_PERF_STAGES /* opt-in (PORT_EXTRA=-DPORT_PERF_STAGES): one system call per triangle */
 #define PERF_T() svcGetSystemTick()
@@ -240,7 +240,7 @@ u32 gPortPerfTexImports;
 #endif
 #else
 #define PERF_T() 0
-static uint64_t gPortPerfTex, gPortPerfVtx, gPortPerfTri, gPortPerfFlush;
+static uint64_t gPortPerfTex, gPortPerfVtx, gPortPerfTri, gPortPerfFlush, gPortPerfEmit, gPortPerfMtx;
 static uint32_t gPortPerfTexImports;
 #endif
 static void gfx_flush_impl(void);
@@ -1432,6 +1432,21 @@ static void gfx_select_target(void) {
 #endif
 }
 
+/* PORT PERF (2026-09-30): per-triangle render-state setup (target, depth, viewport/scissor, combiner and
+ * shader, constants, blending, textures and samplers) only changes when a display-list command changes
+ * state. gfx_run_dl clears sTriStateOk on every command except vertex/triangle/matrix/DL-flow ones; while
+ * it is set, triangles reuse the values derived for the previous one (sTC) and skip straight to
+ * building their vertices. */
+static bool sTriStateOk;
+static struct {
+    bool used_textures[2];
+    const struct TileDesc* utile[2];
+    float inv_tex_w[2], inv_tex_h[2];
+    float u_scale[2], v_scale[2], u_off[2], v_off[2];
+    bool linear_filter;
+    bool z_is_from_0_to_1;
+} sTC;
+
 static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx);
 static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
     uint64_t t0 = PERF_T(), f0 = gPortPerfFlush;
@@ -1442,6 +1457,9 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
 static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
     gfx_select_target();
     gfx_port_tri_count++;
+#ifdef __3DS__
+    { extern u32 gPortPerfTrisIn; gPortPerfTrisIn++; }
+#endif
     struct LoadedVertex *v1 = &rsp.loaded_vertices[vtx1_idx];
     struct LoadedVertex *v2 = &rsp.loaded_vertices[vtx2_idx];
     struct LoadedVertex *v3 = &rsp.loaded_vertices[vtx3_idx];
@@ -1512,6 +1530,10 @@ static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_id
         }
     }
     
+    if (sTriStateOk) {
+        goto emit_vertices; /* render state unchanged since the previous triangle */
+    }
+
     bool depth_test = (rsp.geometry_mode & G_ZBUFFER) == G_ZBUFFER;
     if (depth_test != rendering_state.depth_test) {
         gfx_flush();
@@ -1666,8 +1688,34 @@ static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_id
     port_draw_snapshot(); /* first triangle of a batch: record the state it's drawn with */
 #endif
     
-    const float inv_tex_w[2] = { 1.0f / tex_width[0], 1.0f / tex_width[1] };
-    const float inv_tex_h[2] = { 1.0f / tex_height[0], 1.0f / tex_height[1] };
+    sTC.inv_tex_w[0] = 1.0f / tex_width[0];
+    sTC.inv_tex_w[1] = 1.0f / tex_width[1];
+    sTC.inv_tex_h[0] = 1.0f / tex_height[0];
+    sTC.inv_tex_h[1] = 1.0f / tex_height[1];
+    sTC.used_textures[0] = used_textures[0];
+    sTC.used_textures[1] = used_textures[1];
+    sTC.utile[0] = utile[0];
+    sTC.utile[1] = utile[1];
+    for (int t = 0; t < 2; t++) { /* libultraship's per-tile coordinate transform, as one multiply-add */
+        const struct TileDesc* tl = utile[t];
+        float su = 1.0f / 32.0f, sv = 1.0f / 32.0f;
+        if (tl->shifts != 0) {
+            su = tl->shifts <= 10 ? su / (1 << tl->shifts) : su * (1 << (16 - tl->shifts));
+        }
+        if (tl->shiftt != 0) {
+            sv = tl->shiftt <= 10 ? sv / (1 << tl->shiftt) : sv * (1 << (16 - tl->shiftt));
+        }
+        sTC.u_scale[t] = su;
+        sTC.v_scale[t] = sv;
+        sTC.u_off[t] = tl->uls / 4.0f;
+        sTC.v_off[t] = tl->ult / 4.0f;
+    }
+    sTC.linear_filter = linear_filter;
+    sTC.z_is_from_0_to_1 = z_is_from_0_to_1;
+    /* LOD fraction is derived from each triangle's w: keep re-evaluating state for those draws */
+    sTriStateOk = !(usage & (1u << (8 + CCS_LODF)));
+
+emit_vertices:;
     PVtx pv[3];
     for (int i = 0; i < 3; i++) {
         PVtx* p = &pv[i];
@@ -1677,26 +1725,20 @@ static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_id
         p->w = v_arr[i]->w;
         for (int t = 0; t < 2; t++) {
             float u = 0.0f, v = 0.0f;
-            if (used_textures[t]) { /* libultraship's per-tile texture coordinates */
-                const struct TileDesc* tl = utile[t];
-                u = v_arr[i]->u / 32.0f;
-                v = v_arr[i]->v / 32.0f;
-                if (tl->shifts != 0) {
-                    u = tl->shifts <= 10 ? u / (1 << tl->shifts) : u * (1 << (16 - tl->shifts));
-                }
-                if (tl->shiftt != 0) {
-                    v = tl->shiftt <= 10 ? v / (1 << tl->shiftt) : v * (1 << (16 - tl->shiftt));
-                }
-                u -= tl->uls / 4.0f;
-                v -= tl->ult / 4.0f;
-                if (linear_filter) {
+            if (sTC.used_textures[t]) { /* libultraship's per-tile texture coordinates */
+                const struct TileDesc* tl = sTC.utile[t];
+                /* (u / 32) shifted, minus the tile origin: scale/offset precomputed per state (sTC) */
+                u = v_arr[i]->u * sTC.u_scale[t] - sTC.u_off[t];
+                v = v_arr[i]->v * sTC.v_scale[t] - sTC.v_off[t];
+                (void)tl;
+                if (sTC.linear_filter) {
                     // Linear filter adds 0.5f to the coordinates (texture rectangles too: this
                     // backend's rectangle UVs need it; without it HUD digits blurred - fbdiff)
                     u += 0.5f;
                     v += 0.5f;
                 }
-                u *= inv_tex_w[t];
-                v *= inv_tex_h[t];
+                u *= sTC.inv_tex_w[t];
+                v *= sTC.inv_tex_h[t];
             }
             p->uv[t][0] = u;
             p->uv[t][1] = v;
@@ -1707,7 +1749,11 @@ static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_id
         p->c[2] = v_arr[i]->color.b * (1.0f / 255.0f);
         p->c[3] = v_arr[i]->color.a * (1.0f / 255.0f);
     }
-    gfx_emit_tri(&pv[0], &pv[1], &pv[2], z_is_from_0_to_1);
+    {
+        uint64_t te = PERF_T(), fe = gPortPerfFlush;
+        gfx_emit_tri(&pv[0], &pv[1], &pv[2], sTC.z_is_from_0_to_1);
+        gPortPerfEmit += (PERF_T() - te) - (gPortPerfFlush - fe);
+    }
 }
 
 static void gfx_sp_geometry_mode(uint32_t clear, uint32_t set) {
@@ -1836,6 +1882,11 @@ static void gfx_dp_set_scissor(uint32_t mode, uint32_t ulx, uint32_t uly, uint32
  * 3D also draws into the sides; OoT was not designed for it (pre-rendered backgrounds, fades and
  * cutscene fills stay 4:3, geometry outside the N64 view shows), so it is opt-in. */
 int gPortWidescreen = 0;
+/* pre-rendered rooms draw their background image with S2DEX BG_COPY/BG_1CYC: frames that have one (or
+ * whose previous frame had one, which covers draws issued before the background) stay 4:3 */
+static int sBgThisFrame, sBgLastFrame;
+#define WIDE_ACTIVE() (gPortWidescreen && !sBgThisFrame && !sBgLastFrame && sDrawTarget == NULL)
+static int sRectFullWidth; /* gfx_dp_fill_rectangle -> gfx_draw_rectangle: stretch to the whole target */
 
 static void gfx_apply_scissor(void) {
     uint32_t ulx = rdp.scissor_raw[0], uly = rdp.scissor_raw[1], lrx = rdp.scissor_raw[2], lry = rdp.scissor_raw[3];
@@ -1845,7 +1896,7 @@ static void gfx_apply_scissor(void) {
     float y = (SCREEN_HEIGHT - lry / 4.0f) * RATIO_Y;
     float width = (lrx - ulx) / 4.0f * RATIO_Y;
     float height = (lry - uly) / 4.0f * RATIO_Y;
-    if (gPortWidescreen && ulx == 0 && lrx >= SCREEN_WIDTH * 4 - 4) {
+    if (WIDE_ACTIVE() && ulx == 0 && lrx >= SCREEN_WIDTH * 4 - 4) {
         x = 0.0f;
         width = gfx_current_dimensions.width;
     }
@@ -2053,6 +2104,11 @@ static void gfx_draw_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lr
     
     ulxf = gfx_adjust_x_for_aspect_ratio(ulxf);
     lrxf = gfx_adjust_x_for_aspect_ratio(lrxf);
+    if (sRectFullWidth) { /* widescreen: a full-width fill (fade, letterbox, flash) covers the whole screen */
+        ulxf = -1.0f;
+        lrxf = 1.0f;
+        sRectFullWidth = 0;
+    }
     
     struct LoadedVertex* ul = &rsp.loaded_vertices[MAX_VERTICES + 0];
     struct LoadedVertex* ll = &rsp.loaded_vertices[MAX_VERTICES + 1];
@@ -2088,9 +2144,11 @@ static void gfx_draw_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lr
     rdp.viewport_or_scissor_changed = true;
     rsp.geometry_mode = 0;
     
+    sTriStateOk = false; /* the rectangle's temporary viewport/geometry mode must not be cached... */
     gfx_sp_tri1(MAX_VERTICES + 0, MAX_VERTICES + 1, MAX_VERTICES + 3);
     gfx_sp_tri1(MAX_VERTICES + 1, MAX_VERTICES + 2, MAX_VERTICES + 3);
-    
+    sTriStateOk = false; /* ...or reused by the triangles that follow it */
+
     rsp.geometry_mode = geometry_mode_saved;
     rdp.viewport = viewport_saved;
     rdp.viewport_or_scissor_changed = true;
@@ -2195,6 +2253,8 @@ static void gfx_dp_fill_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t
         v->color = rdp.fill_color;
     }
     
+    /* widescreen: untextured fills spanning the N64's full width stretch to the 400-pixel screen */
+    sRectFullWidth = WIDE_ACTIVE() && ulx <= 0 && lrx >= SCREEN_WIDTH * 4;
     uint64_t saved_combine_mode = rdp.combine_mode;
     /* only FILL mode writes the fill color; 1/2-cycle fill rects go through the combiner (prim-colored
      * fades, letterboxes, sky rects) - as in libultraship's GfxDpFillRectangle */
@@ -2321,6 +2381,11 @@ static inline void *seg_addr_mtx(uintptr_t w1) {
  * importer's buffers (the whole 320x240 RGBA16 image is 150 KB). */
 static bool sUcodeS2dex = false;
 static void gfx_s2dex_bg_rect(const uObjBg* bg, bool copy) {
+    if (!sBgThisFrame) {
+        sBgThisFrame = 1; /* pre-rendered background: keep this frame 4:3 */
+        gfx_flush();
+        gfx_apply_scissor();
+    }
     const uint8_t* img = seg_addr((uintptr_t)bg->b.imagePtr);
     uint32_t w = bg->b.imageW >> 2, h = bg->b.imageH >> 2, row, n;
     uint32_t line = (w * 2 + 7) >> 3;
@@ -2399,12 +2464,36 @@ static void gfx_run_dl(Gfx* cmd) {
 #ifdef PORT_GBIAUDIT
         { extern unsigned gPortGbiCounts[256]; gPortGbiCounts[opcode & 0xFF]++; }
 #endif
+        switch (opcode) { /* commands that cannot change triangle render state keep the fast path */
+            case G_VTX:
+            case G_TRI1:
+            case G_TRI2:
+            case G_QUAD:
+            case G_MTX:
+            case (uint8_t)G_POPMTX:
+            case G_DL:
+            case (uint8_t)G_ENDDL:
+            case (uint8_t)G_NOOP:
+#ifdef F3DEX_GBI_2
+            case (uint8_t)G_RDPHALF_1:
+            case (uint8_t)G_BRANCH_Z:
+            case (uint8_t)G_CULLDL:
+#endif
+                break;
+            default:
+                sTriStateOk = false;
+                break;
+        }
 
         switch (opcode) {
             // RSP commands:
             case G_MTX:
 #ifdef F3DEX_GBI_2
+            {
+                uint64_t tm = PERF_T();
                 gfx_sp_matrix(C0(0, 8) ^ G_MTX_PUSH, (const int32_t *) seg_addr_mtx(cmd->words.w1));
+                gPortPerfMtx += PERF_T() - tm;
+            }
 #else
                 gfx_sp_matrix(C0(16, 8), (const int32_t *) seg_addr_mtx(cmd->words.w1));
 #endif
@@ -2660,6 +2749,9 @@ void gfx_init(struct GfxWindowManagerAPI *wapi, struct GfxRenderingAPI *rapi) {
 }
 
 void gfx_start_frame(void) {
+    sTriStateOk = false;
+    sBgLastFrame = sBgThisFrame;
+    sBgThisFrame = 0;
     gfx_wapi->handle_events();
     sDrawTarget = NULL; /* the backend starts each frame on the screen */
     gfx_wapi->get_dimensions(&gfx_current_dimensions.width, &gfx_current_dimensions.height);
@@ -2668,6 +2760,7 @@ void gfx_start_frame(void) {
         gfx_current_dimensions.height = 1;
     }
     gfx_current_dimensions.aspect_ratio = (float)gfx_current_dimensions.width / (float)gfx_current_dimensions.height;
+    gfx_apply_scissor(); /* widescreen toggled or a pre-rendered room entered/left */
 }
 
 #ifdef PORT_GBIAUDIT

@@ -88,3 +88,5 @@ stays the final validator for color/perf/audio.
   is fixed — see `PORT_ROADMAP.md` §5.
 - Game code logs to `sdmc:/3ds/oot/boot.log` via `PortDbg`/`PortDbgX`, **not** stderr.
 - Tune the `KEYMAP` in `tools/emu-test.sh` to your Azahar input profile before using `-p`.
+- Controls, the OoT3D-style touch panel and the bottom-screen minimap: see
+  [3ds-touch-panel.md](3ds-touch-panel.md).

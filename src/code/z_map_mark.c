@@ -147,6 +147,36 @@ void MapMark_DrawForDungeon(PlayState* play) {
     CLOSE_DISPS(play->state.gfxCtx, "../z_map_mark.c", 339);
 }
 
+#ifdef __3DS__
+#include "port_minimap.h"
+/* PORT: chest/boss marks as data for the touch-screen map (same positions and chest rule as above) */
+void MapMark_Export(PlayState* play) {
+    MapMarkIconData* mapMarkIconData;
+    MapMarkPoint* markPoint;
+    u16 dungeon = gSaveContext.mapIndex;
+    s32 i;
+
+    gPortMinimap.numMarks = 0;
+    if ((sLoadedMarkDataTable == NULL) || (gMapData == NULL) ||
+        (play->interfaceCtx.mapRoomNum >= gMapData->dgnMinimapCount[dungeon])) {
+        return;
+    }
+    for (mapMarkIconData = &sLoadedMarkDataTable[dungeon][play->interfaceCtx.mapRoomNum][0];
+         mapMarkIconData->markType != MAP_MARK_NONE; mapMarkIconData++) {
+        markPoint = &mapMarkIconData->points[0];
+        for (i = 0; i < mapMarkIconData->count; i++, markPoint++) {
+            if (((mapMarkIconData->markType != MAP_MARK_CHEST) || !Flags_GetTreasure(play, markPoint->chestFlag)) &&
+                (gPortMinimap.numMarks < PORT_MINIMAP_MAX_MARKS)) {
+                gPortMinimap.markType[gPortMinimap.numMarks] = mapMarkIconData->markType;
+                gPortMinimap.markX[gPortMinimap.numMarks] = markPoint->x + 204;
+                gPortMinimap.markY[gPortMinimap.numMarks] = markPoint->y + 140;
+                gPortMinimap.numMarks++;
+            }
+        }
+    }
+}
+#endif
+
 void MapMark_Draw(PlayState* play) {
     switch (play->sceneId) {
         case SCENE_DEKU_TREE:

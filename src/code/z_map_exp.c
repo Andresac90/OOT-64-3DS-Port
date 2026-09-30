@@ -407,6 +407,91 @@ void Minimap_DrawCompassIcons(PlayState* play) {
     CLOSE_DISPS(play->state.gfxCtx, "../z_map_exp.c", 607);
 }
 
+#ifdef __3DS__
+#include "port_minimap.h"
+void MapMark_Export(PlayState* play);
+
+/* PORT: hand the minimap to the touch screen (see port_minimap.h). Same data, positions and visibility
+ * rules as the drawing code below; returns true when the top screen should not draw it. */
+static s32 Minimap_ExportToBottom(PlayState* play, s32 dungeon) {
+    InterfaceContext* interfaceCtx = &play->interfaceCtx;
+    s32 mapIndex = gSaveContext.mapIndex;
+    Player* player = GET_PLAYER(play);
+    PortMinimap* m = &gPortMinimap;
+
+    if (!gPortMinimapOnBottom) {
+        return false;
+    }
+    if (R_MINIMAP_DISABLED || (interfaceCtx->minimapAlpha == 0)) {
+        return true; /* serial not bumped: the panel shows no map */
+    }
+    m->tex = NULL;
+    m->numIcons = 0;
+    m->numMarks = 0;
+    if (dungeon) {
+        m->compass = CHECK_DUNGEON_ITEM(DUNGEON_COMPASS, mapIndex);
+        if (CHECK_DUNGEON_ITEM(DUNGEON_MAP, mapIndex)) {
+            m->tex = interfaceCtx->mapSegment;
+            m->fmt = PORT_MINIMAP_I4;
+            m->r = 100, m->g = 255, m->b = 255;
+            m->w = MAP_I_TEX_WIDTH, m->h = MAP_I_TEX_HEIGHT;
+            m->x = R_DGN_MINIMAP_X, m->y = R_DGN_MINIMAP_Y;
+        } else {
+            /* no map item: the frame still anchors the compass arrows */
+            m->w = MAP_I_TEX_WIDTH, m->h = MAP_I_TEX_HEIGHT;
+            m->x = R_DGN_MINIMAP_X, m->y = R_DGN_MINIMAP_Y;
+        }
+        if (m->compass) {
+            MapMark_Export(play);
+        }
+    } else {
+        m->compass = true;
+        m->tex = interfaceCtx->mapSegment;
+        m->fmt = PORT_MINIMAP_IA4;
+        m->r = R_MINIMAP_COLOR(0), m->g = R_MINIMAP_COLOR(1), m->b = R_MINIMAP_COLOR(2);
+        m->w = gMapData->owMinimapWidth[mapIndex], m->h = gMapData->owMinimapHeight[mapIndex];
+        m->x = R_OW_MINIMAP_X, m->y = R_OW_MINIMAP_Y;
+        if (((play->sceneId != SCENE_KAKARIKO_VILLAGE) && (play->sceneId != SCENE_KOKIRI_FOREST) &&
+             (play->sceneId != SCENE_ZORAS_FOUNTAIN)) ||
+            (LINK_AGE_IN_YEARS != YEARS_ADULT)) {
+            if ((gMapData->owEntranceFlag[sEntranceIconMapIndex] == 0xFFFF) ||
+                ((gMapData->owEntranceFlag[sEntranceIconMapIndex] != 0xFFFF) &&
+                 (gSaveContext.save.info.infTable[INFTABLE_INDEX_1AX] & gBitFlags[gMapData->owEntranceFlag[mapIndex]]))) {
+                m->iconX[m->numIcons] = gMapData->owEntranceIconPosX[sEntranceIconMapIndex];
+                m->iconY[m->numIcons] = gMapData->owEntranceIconPosY[sEntranceIconMapIndex];
+                m->numIcons++;
+            }
+        }
+        if ((play->sceneId == SCENE_ZORAS_FOUNTAIN) &&
+            (gSaveContext.save.info.infTable[INFTABLE_INDEX_1AX] & gBitFlags[INFTABLE_1A9_SHIFT])) {
+            m->iconX[m->numIcons] = 270;
+            m->iconY[m->numIcons] = 154;
+            m->numIcons++;
+        }
+    }
+    if (m->compass) {
+        /* Minimap_DrawCompassIcons: ortho overlay, 1 unit = 1 pixel, origin at the screen center */
+        s16 tempX = player->actor.world.pos.x;
+        s16 tempZ = player->actor.world.pos.z;
+
+        tempX /= R_COMPASS_SCALE_X;
+        tempZ /= R_COMPASS_SCALE_Y;
+        m->playerX = 160.0f + (R_COMPASS_OFFSET_X + tempX) / 10.0f;
+        m->playerY = 120.0f - (R_COMPASS_OFFSET_Y - tempZ) / 10.0f;
+        m->playerYaw = player->actor.shape.rot.y;
+        tempX = sPlayerInitialPosX;
+        tempZ = sPlayerInitialPosZ;
+        tempX /= R_COMPASS_SCALE_X;
+        tempZ /= R_COMPASS_SCALE_Y;
+        m->startX = 160.0f + (R_COMPASS_OFFSET_X + tempX) / 10.0f;
+        m->startY = 120.0f - (R_COMPASS_OFFSET_Y - tempZ) / 10.0f;
+        m->startYaw = 0x7FFF - sPlayerInitialDirection * 0x400;
+    }
+    m->serial++;
+    return true;
+}
+#endif
+
 void Minimap_Draw(PlayState* play) {
     s32 pad[2];
     InterfaceContext* interfaceCtx = &play->interfaceCtx;
@@ -426,6 +511,10 @@ void Minimap_Draw(PlayState* play) {
             case SCENE_SHADOW_TEMPLE:
             case SCENE_BOTTOM_OF_THE_WELL:
             case SCENE_ICE_CAVERN:
+#ifdef __3DS__
+                if (Minimap_ExportToBottom(play, true)) {
+                } else
+#endif
                 if (!R_MINIMAP_DISABLED) {
                     Gfx_SetupDL_39Overlay(play->state.gfxCtx);
                     gDPSetCombineLERP(OVERLAY_DISP++, 1, 0, PRIMITIVE, 0, TEXEL0, 0, PRIMITIVE, 0, 1, 0, PRIMITIVE, 0,
@@ -484,6 +573,10 @@ void Minimap_Draw(PlayState* play) {
             case SCENE_GORON_CITY:
             case SCENE_LON_LON_RANCH:
             case SCENE_OUTSIDE_GANONS_CASTLE:
+#ifdef __3DS__
+                if (Minimap_ExportToBottom(play, false)) {
+                } else
+#endif
                 if (!R_MINIMAP_DISABLED) {
                     Gfx_SetupDL_39Overlay(play->state.gfxCtx);
 

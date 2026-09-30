@@ -2620,7 +2620,50 @@ s32 Player_ItemIsItemAction(s32 item1, s32 itemAction) {
     }
 }
 
+#ifdef __3DS__
+#include "inventory.h"
+/* PORT: bottom-screen touch buttons (OoT3D style). The OCARINA button is a virtual fifth item button
+ * that always holds the owned ocarina; the BOOTS button cycles the owned boots. Both are requested by
+ * the input layer (one-shot flags) and handled here, where the normal item rules apply. */
+#include "port_minimap.h"
+
+static s32 Port_VirtualOcarinaItem(PlayState* play) {
+    s32 item = INV_CONTENT(ITEM_OCARINA_FAIRY);
+
+    if ((item != ITEM_OCARINA_FAIRY && item != ITEM_OCARINA_OF_TIME) || (play->interfaceCtx.restrictions.ocarina != 0) ||
+        ((gSaveContext.buttonStatus[1] == BTN_DISABLED) && (gSaveContext.buttonStatus[2] == BTN_DISABLED) &&
+         (gSaveContext.buttonStatus[3] == BTN_DISABLED))) {
+        return ITEM_NONE;
+    }
+    return item;
+}
+
+static void Port_CycleBoots(PlayState* play, Player* this) {
+    static const u8 sOwned[] = { EQUIP_INV_BOOTS_KOKIRI, EQUIP_INV_BOOTS_IRON, EQUIP_INV_BOOTS_HOVER };
+    s32 cur = CUR_EQUIP_VALUE(EQUIP_TYPE_BOOTS); /* EQUIP_VALUE_BOOTS_KOKIRI.. */
+    s32 i;
+
+    for (i = 1; i <= 3; i++) {
+        s32 next = ((cur - 1 + i) % 3) + 1;
+
+        if (CHECK_OWNED_EQUIP(EQUIP_TYPE_BOOTS, sOwned[next - 1]) && ((next == EQUIP_VALUE_BOOTS_KOKIRI) || LINK_IS_ADULT)) {
+            if (next != cur) {
+                Inventory_ChangeEquipment(EQUIP_TYPE_BOOTS, next);
+                Player_SetEquipmentData(play, this);
+                SFX_PLAY_CENTERED(NA_SE_SY_DECIDE);
+            }
+            return;
+        }
+    }
+}
+#endif
+
 s32 Player_GetItemOnButton(PlayState* play, s32 index) {
+#ifdef __3DS__
+    if (index == 4) {
+        return (play->bombchuBowlingStatus != 0) ? ITEM_NONE : Port_VirtualOcarinaItem(play);
+    }
+#endif
     if (index >= 4) {
         return ITEM_NONE;
     } else if (play->bombchuBowlingStatus != 0) {
@@ -2663,7 +2706,11 @@ void Player_ProcessItemButtons(Player* this, PlayState* play) {
     if (!(this->stateFlags1 & (PLAYER_STATE1_CARRYING_ACTOR | PLAYER_STATE1_29)) && !func_8008F128(this)) {
         if (this->itemAction >= PLAYER_IA_FISHING_POLE) {
             if (!Player_ItemIsInUse(this, B_BTN_ITEM) && !Player_ItemIsInUse(this, C_BTN_ITEM(0)) &&
-                !Player_ItemIsInUse(this, C_BTN_ITEM(1)) && !Player_ItemIsInUse(this, C_BTN_ITEM(2))) {
+                !Player_ItemIsInUse(this, C_BTN_ITEM(1)) && !Player_ItemIsInUse(this, C_BTN_ITEM(2))
+#ifdef __3DS__
+                && !Player_ItemIsInUse(this, Player_GetItemOnButton(play, 4))
+#endif
+            ) {
                 Player_UseItem(play, this, ITEM_NONE);
                 return;
             }
@@ -2675,6 +2722,20 @@ void Player_ProcessItemButtons(Player* this, PlayState* play) {
             }
         }
 
+#ifdef __3DS__
+        if (gPortTouchBoots) {
+            gPortTouchBoots = 0;
+            Port_CycleBoots(play, this);
+        }
+        if ((i == ARRAY_COUNT(sItemButtons)) && gPortTouchOcarina) {
+            gPortTouchOcarina = 0;
+            item = Player_GetItemOnButton(play, 4);
+            if (item < ITEM_NONE_FE) {
+                Player_UseItem(play, this, item);
+                return;
+            }
+        }
+#endif
         item = Player_GetItemOnButton(play, i);
 
         if (item >= ITEM_NONE_FE) {

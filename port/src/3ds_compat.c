@@ -16,3 +16,18 @@ void PortCompat_InitStreams(void) {
     stderr = fdopen(1, "w");        /* fd 1 -> 3DS console */
     if (stderr) setvbuf(stderr, NULL, _IONBF, 0);
 }
+
+/* PORT (2026-09-30): once the bottom screen is the touch panel (3ds_main.c), discard the shims'
+ * fprintf(stderr, ...) output so it cannot draw over the panel. */
+static int PortCompat_Discard(void* cookie, const char* buf, size_t n) {
+    (void)cookie;
+    (void)buf;
+    return (int)n;
+}
+void PortCompat_SilenceStderr(void) {
+    FILE* sink = funopen(NULL, NULL, PortCompat_Discard, NULL, NULL);
+    if (sink != NULL) {
+        stderr = sink;
+        stdout = sink; /* the bottom screen is the touch panel now: no console text over it */
+    }
+}
