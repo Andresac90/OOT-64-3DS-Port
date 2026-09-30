@@ -3,6 +3,8 @@
 #include <3ds.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <math.h>
 #include <citro3d.h>
 #include "gfx_3ds.h"
 
@@ -49,6 +51,7 @@ float gPortStereoSep;
  * the game each frame (gPortStereoFocusW, z_play.c; 0 when there is no player), smoothed so camera
  * cuts and Link's movement don't make the depth jump. */
 float gPortStereoFocusW;
+int gPortStereoFlatScene; /* set by menu gamestates (file select) each frame; cleared after the frame */
 float gPortStereoConv = 150.0f;
 static Gfx3DSMode sMonoMode;
 static u32 sMonoFlags;
@@ -159,10 +162,36 @@ static void gfx_3ds_update_stereo(void) {
     gPortStereoSep = want ? slider * 0.04f : 0.0f;
     {
         float target = gPortStereoFocusW;
-        if (target <= 0.0f) target = 150.0f; /* no player: a typical third-person distance */
-        if (target < 60.0f) target = 60.0f;  /* first person / close-ups: keep some depth */
+        float border = 0.0f;
+        { /* the nearest 3D surface at the screen borders (gfx_pc.c stereo_probe_tri): the 3rd-nearest
+           * of the 13 border probes, so one particle near the lens doesn't drag the screen plane */
+            extern float gPortStereoProbeW[13];
+            float v[13];
+            int n = 0, a, b;
+            for (a = 0; a < 13; a++) {
+                if (gPortStereoProbeW[a] > 0.0f) v[n++] = gPortStereoProbeW[a];
+                gPortStereoProbeW[a] = 0.0f;
+            }
+            for (a = 1; a < n; a++) { /* insertion sort */
+                float x = v[a];
+                for (b = a - 1; b >= 0 && v[b] > x; b--) v[b + 1] = v[b];
+                v[b + 1] = x;
+            }
+            if (n >= 3) border = v[2];
+            else if (n > 0) border = v[n - 1];
+        }
+        if (border > 0.0f && border < target) target = border; /* keep border geometry out of the air */
+        if (target < 10.0f) target = 10.0f;  /* the camera skimming the ground (title intro: w = 16) */
         if (target > 600.0f) target = 600.0f;
-        gPortStereoConv += (target - gPortStereoConv) * 0.2f;
+        {
+            /* pre-rendered rooms (a S2DEX background was drawn last frame): converge at half Link's
+             * distance so he sits ~50% deep, inside the room picture (drawn at 75%) */
+            extern int gPortPrerenderedFrame;
+            if (gPortPrerenderedFrame) target *= 0.5f;
+        }
+        /* asymmetric: pull the screen plane nearer fast (border geometry must never pop out), let it
+         * recede slowly (no depth "breathing" when the border estimate jumps between frames) */
+        gPortStereoConv += (target - gPortStereoConv) * (target < gPortStereoConv ? 0.3f : 0.04f);
     }
     if (want == on) {
         return;
@@ -534,7 +563,7 @@ static void gfx_3ds_read_back_offscreen(void) {
 }
 
 /* verification aid: with sdmc:/3ds/oot/capture_stereo present, every 300 frames while in stereo the
- * whole 240x800 target (both eyes, detiled RGBA8) goes to sdmc:/3ds/oot/stereo_fb.bin (header w, h) */
+ * whole 240x800 target (both eyes, detiled RGBA8) goes to sdmc:/3ds/oot/stereo_fb_<n>.bin (header w, h) */
 static void gfx_3ds_debug_dump_stereo(void) {
     static int sFrames;
     static u32* sLin;
@@ -557,7 +586,11 @@ static void gfx_3ds_debug_dump_stereo(void) {
                                 GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
                                 GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
     GSPGPU_InvalidateDataCache(sLin, (size_t)W * H * 4);
-    f = fopen("sdmc:/3ds/oot/stereo_fb.bin", "wb");
+    {
+        char path[64];
+        snprintf(path, sizeof path, "sdmc:/3ds/oot/stereo_fb_%d.bin", sFrames / 300);
+        f = fopen(path, "wb");
+    }
     if (f != NULL) {
         u32 hdr[2] = { (u32)W, (u32)H };
         fwrite(hdr, 4, 2, f);
@@ -587,6 +620,7 @@ static void gfx_3ds_swap_buffers_begin(void)
         sEyeOut[0]->used = sEyeOut[1]->used = true;
     }
     C3D_FrameEnd(0);
+    gPortStereoFlatScene = 0; /* the next frame's gamestate sets it again if it is a menu */
     /* Depth readback right after this frame's render (C3D_SyncDisplayTransfer outside a frame waits
      * for the queued render first). The game samples it from Environment_GraphCallback, which the N64
      * runs once the previous frame's RDP work is done: reading it back here gives the same frame N-1

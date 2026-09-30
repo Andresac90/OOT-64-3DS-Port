@@ -1262,8 +1262,13 @@ void Play_Draw(PlayState* this) {
         /* PORT (2026-09-30): stereoscopic 3D converges on Link (gfx_3ds.c): his clip-space w from the
          * previous draw (Actor_ProjectPos in the actor draw loop) */
         extern float gPortStereoFocusW;
+        extern int gPortStereoFlatScene;
         Player* player = GET_PLAYER(this);
         gPortStereoFocusW = (player != NULL) ? player->actor.projectedW : 0.0f;
+        /* the pause menu is a menu like the file select: flat panels over a half-depth background */
+        if (IS_PAUSED(&this->pauseCtx)) {
+            gPortStereoFlatScene = 1;
+        }
     }
     {
         /* PORT (2026-09-30): widescreen shows past the N64's 4:3 view. Scenes without a sky (skybox none /

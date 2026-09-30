@@ -849,6 +849,14 @@ static void Port3ds_PerfReport(unsigned frames) {
         PortDbgX("mem heap size KB", (unsigned)(fake_heap_end - fake_heap_start) / 1024);
     }
     PortDbgX("perf draws/frame", gPortPerfDraws / frames);
+    {
+        extern u32 gPortPerfMemQueries, gPortPerfMemHits, gPortPerfDlCmds, gPortPerfDlCalls;
+        PortDbgX("perf mem queries/frame (svc)", gPortPerfMemQueries / frames);
+        PortDbgX("perf mem query cache hits/frame", gPortPerfMemHits / frames);
+        PortDbgX("perf dl commands/frame", gPortPerfDlCmds / frames);
+        PortDbgX("perf dl G_DL calls/frame", gPortPerfDlCalls / frames);
+        gPortPerfMemQueries = gPortPerfMemHits = gPortPerfDlCmds = gPortPerfDlCalls = 0;
+    }
     sPerfGame = sPerfDl = sPerfSwap = sPerfPace = 0;
     gPortPerfTris = gPortPerfDraws = 0;
 }
@@ -946,12 +954,29 @@ void PortLogFastX(const char* label, unsigned val) {
  * interpreter uses this to bound its reads: an un-terminated or garbage DL that
  * would otherwise walk into unmapped memory and data-abort is stopped cleanly at
  * the edge of its mapped block. One svcQueryMemory per 4KB page walked = cheap. */
+/* PORT PERF (2026-09-30): the display-list walker and texture imports check every new memory block
+ * with svcQueryMemory (a kernel call). The app's memory map is fixed after boot (heaps are reserved up
+ * front), so readable ranges already confirmed are remembered: 8 most recent, round-robin. */
+u32 gPortPerfMemQueries, gPortPerfMemHits;
 unsigned PortMem_ReadableEnd(unsigned addr) {
+    static unsigned sBase[8], sEnd[8];
+    static int sNext;
     MemInfo mi;
     PageInfo pi;
+    int i;
+    for (i = 0; i < 8; i++) {
+        if (addr - sBase[i] < sEnd[i] - sBase[i]) {
+            gPortPerfMemHits++;
+            return sEnd[i];
+        }
+    }
+    gPortPerfMemQueries++;
     if (R_FAILED(svcQueryMemory(&mi, &pi, addr))) return 0;
     if (mi.state == MEMSTATE_FREE || mi.state == MEMSTATE_RESERVED) return 0;
     if (!(mi.perm & MEMPERM_READ)) return 0;
+    sBase[sNext] = mi.base_addr;
+    sEnd[sNext] = mi.base_addr + mi.size;
+    sNext = (sNext + 1) & 7;
     return mi.base_addr + mi.size;
 }
 

@@ -2042,6 +2042,15 @@ void FileSelect_Main(GameState* thisx) {
     Input* input = &this->state.input[0];
 
     OPEN_DISPS(this->state.gfxCtx, "../z_file_choose.c", 2898);
+#ifdef __3DS__
+    {
+        /* PORT (2026-09-30): stereo - the file select is a menu: its panels (drawn as perspective 3D) are a
+         * flat screen-depth layer, the sky behind them at half depth (gfx_citro3d.c). Automatic
+         * convergence on its geometry put the menus at mixed depths (hardware: "hurts the eye"). */
+        extern int gPortStereoFlatScene;
+        gPortStereoFlatScene = 1;
+    }
+#endif
 
 #if PLATFORM_N64
     if ((D_80121212 != 0) && (func_801C70FC() != 0)) {

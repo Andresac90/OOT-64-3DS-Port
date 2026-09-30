@@ -1255,7 +1255,67 @@ typedef struct {
     float x, y, z, w; /* clip space (N64 z) */
     float uv[2][2];   /* per texture unit, normalized to the uploaded texture */
     float c[4];       /* shade rgba 0..1 */
+    float s;          /* stereo: clip-space horizontal offset at full shift (stereo_offset); interpolated
+                       * exactly like x/y so split edges stay on their neighbours' edges (no cracks) */
 } PVtx;
+
+/* PORT (2026-09-30): stereoscopic depth per vertex, in clip units for a shift of 1 (the shader scales it
+ * by the eye's +-shift, so the disparity is shift * s / w). Piecewise AFFINE in w around the convergence
+ * c (Link's distance): behind him s = w - c (true stereo), in front of him s = STEREO_NEAR_SLOPE * (w - c)
+ * (the near floor comes forward gently instead of popping out). Triangles crossing the plane w = c are
+ * split on it (gfx_emit_tri), so inside every piece s is exactly affine and the RDP-style interpolation
+ * of split/clipped vertices is exact: no cracks, no flattening. (v12 clamped a curve per vertex in the
+ * shader: bent split edges = white crack dots, and a flat near floor; a smooth curve interpolated
+ * across big ground triangles took the far vertex's depth.) 2D/ortho draws (w exactly 1) stay at the
+ * screen; 0 when 3D is off. Vertices behind the camera (w <= 0, floors under it) follow the near slope. */
+#define STEREO_NEAR_SLOPE 1.0f /* 1 = true stereo everywhere (v4); the split below is skipped */
+
+/* PORT (2026-09-30, stereo v4): automatic convergence against stereo-window violations. Geometry in front
+ * of the screen plane that is cut by the screen border (the floor at the bottom edge) is what hurts in
+ * stereo (research: stereo window violations; 3DS/cinema guidelines keep crossed parallax off the frame
+ * edges). Probe points along the bottom and side borders get the depth (w) of the nearest 3D surface
+ * covering them, from every drawn triangle (homogeneous barycentrics: exact even with vertices behind
+ * the camera, like floors under it). gfx_3ds.c converges at min(Link, the 3rd-nearest probe), so border
+ * geometry sits at the screen and everything recedes behind it. (Edge crossings missed a single huge
+ * ground triangle covering the whole bottom border: the title-screen field popped out 20 px.) */
+#define STEREO_PROBES 13
+static const float sStereoProbe[STEREO_PROBES][2] = {
+    { -0.9f, -0.97f }, { -0.6f, -0.97f }, { -0.3f, -0.97f }, { 0.0f, -0.97f }, { 0.3f, -0.97f }, { 0.6f, -0.97f },
+    { 0.9f, -0.97f },  { -0.97f, -0.5f }, { -0.97f, 0.0f },  { -0.97f, 0.5f }, { 0.97f, -0.5f }, { 0.97f, 0.0f },
+    { 0.97f, 0.5f },
+};
+float gPortStereoProbeW[STEREO_PROBES]; /* nearest w per probe this frame (0 = nothing), gfx_3ds.c resets */
+static int sStereoDrawMode; /* G_NOOP stereo tag: only mode 0 (3D by distance) is measured */
+static void stereo_probe_tri(const PVtx* t[3]) {
+    for (int k = 0; k < STEREO_PROBES; k++) {
+        float X = sStereoProbe[k][0], Y = sStereoProbe[k][1];
+        float u0 = t[0]->x - X * t[0]->w, u1 = t[1]->x - X * t[1]->w, u2 = t[2]->x - X * t[2]->w;
+        float v0 = t[0]->y - Y * t[0]->w, v1 = t[1]->y - Y * t[1]->w, v2 = t[2]->y - Y * t[2]->w;
+        float b0 = u1 * v2 - u2 * v1, b1 = u2 * v0 - u0 * v2, b2 = u0 * v1 - u1 * v0;
+        float d = b0 + b1 + b2;
+        if (d == 0.0f) continue;
+        if (d > 0.0f ? (b0 < 0.0f || b1 < 0.0f || b2 < 0.0f) : (b0 > 0.0f || b1 > 0.0f || b2 > 0.0f)) continue;
+        float w = (b0 * t[0]->w + b1 * t[1]->w + b2 * t[2]->w) / d;
+        if (w > 1.0f && (gPortStereoProbeW[k] == 0.0f || w < gPortStereoProbeW[k])) {
+            gPortStereoProbeW[k] = w;
+        }
+    }
+}
+static inline float stereo_conv(void) {
+#ifdef __3DS__
+    extern float gPortStereoSep, gPortStereoConv;
+    return gPortStereoSep == 0.0f ? 0.0f : gPortStereoConv;
+#else
+    return 0.0f;
+#endif
+}
+static inline float stereo_offset(float w) {
+    float c = stereo_conv();
+    if (c == 0.0f || w == 1.0f) { /* 3D off, or ortho/2D (w exactly 1): screen depth */
+        return 0.0f;
+    }
+    return w >= c ? w - c : STEREO_NEAR_SLOPE * (w - c);
+}
 
 #define SUBDIV_MAX_RATIO 1.15f /* w ratio along an edge below which interpolation differences are < ~3.5% */
 #define SUBDIV_MIN_PIXELS 10.0f
@@ -1283,6 +1343,7 @@ static void gfx_pack_tri(const PVtx* t[3], bool z_is_from_0_to_1) {
         buf_vbo[buf_vbo_len++] = p->c[1];
         buf_vbo[buf_vbo_len++] = p->c[2];
         buf_vbo[buf_vbo_len++] = p->c[3];
+        buf_vbo[buf_vbo_len++] = p->s;
     }
     if (++buf_vbo_num_tris == MAX_BUFFERED) {
         gfx_flush();
@@ -1302,6 +1363,7 @@ static void pvtx_mid_screen(const PVtx* a, const PVtx* b, PVtx* m) {
     for (int i = 0; i < 4; i++) {
         m->c[i] = 0.5f * (a->c[i] + b->c[i]);
     }
+    m->s = 0.5f * (a->s * qa + b->s * qb) * w; /* like x/y: the split point stays on the shifted edge */
 }
 
 /* how much an edge needs splitting: screen length in N64 pixels, if its w ratio is significant */
@@ -1351,6 +1413,7 @@ static void pvtx_lerp_clip(const PVtx* a, const PVtx* b, float t, PVtx* o) {
     for (int i = 0; i < 4; i++) {
         o->c[i] = a->c[i] + (b->c[i] - a->c[i]) * t;
     }
+    o->s = a->s + (b->s - a->s) * t;
 }
 
 /* NoN microcode: nothing is clipped or rejected at the near plane; depth in front of it clamps */
@@ -1360,7 +1423,46 @@ static void pvtx_clamp_near(PVtx* p) {
     }
 }
 
+static void gfx_emit_tri_one(const PVtx* a, const PVtx* b, const PVtx* c, bool zf);
+
+/* stereo: split triangles that cross the convergence plane w = c (see stereo_offset) */
 static void gfx_emit_tri(const PVtx* a, const PVtx* b, const PVtx* c, bool zf) {
+    float cv = stereo_conv();
+    const PVtx* t[3] = { a, b, c };
+    int nearCnt = 0;
+    if (cv != 0.0f && sStereoDrawMode == 0 && a->w != 1.0f) {
+        stereo_probe_tri(t);
+    }
+    if (cv != 0.0f && STEREO_NEAR_SLOPE != 1.0f) {
+        for (int i = 0; i < 3; i++) nearCnt += (t[i]->w != 1.0f && t[i]->w < cv);
+    }
+    if (nearCnt == 0 || nearCnt == 3) {
+        gfx_emit_tri_one(a, b, c, zf);
+        return;
+    }
+    PVtx side[2][4];
+    int n[2] = { 0, 0 };
+    for (int i = 0; i < 3; i++) {
+        const PVtx *p = t[i], *q = t[(i + 1) % 3];
+        int sp = p->w < cv, sq = q->w < cv;
+        side[sp][n[sp]++] = *p;
+        if (sp != sq) {
+            PVtx m;
+            pvtx_lerp_clip(p, q, (cv - p->w) / (q->w - p->w), &m);
+            m.w = cv; /* exactly on the plane: s = 0 from both sides */
+            m.s = 0.0f;
+            side[0][n[0]++] = m;
+            side[1][n[1]++] = m;
+        }
+    }
+    for (int k = 0; k < 2; k++) {
+        for (int i = 1; i + 1 < n[k]; i++) {
+            gfx_emit_tri_one(&side[k][0], &side[k][i], &side[k][i + 1], zf);
+        }
+    }
+}
+
+static void gfx_emit_tri_one(const PVtx* a, const PVtx* b, const PVtx* c, bool zf) {
     const PVtx* t[3] = { a, b, c };
     PVtx poly[9], tmp[9];
     int n = 0;
@@ -1775,6 +1877,7 @@ emit_vertices:;
         p->c[1] = v_arr[i]->color.g * (1.0f / 255.0f);
         p->c[2] = v_arr[i]->color.b * (1.0f / 255.0f);
         p->c[3] = v_arr[i]->color.a * (1.0f / 255.0f);
+        p->s = stereo_offset(p->w);
     }
     {
         uint64_t te = PERF_T(), fe = gPortPerfFlush;
@@ -1925,6 +2028,8 @@ int gPortWidescreen = 0;
 /* pre-rendered rooms draw their background image with S2DEX BG_COPY/BG_1CYC: frames that have one (or
  * whose previous frame had one, which covers draws issued before the background) stay 4:3 */
 static int sBgThisFrame, sBgLastFrame;
+int gPortPrerenderedFrame; /* stereo (gfx_3ds.c): the previous frame had a pre-rendered background */
+static int sStereoRoomThisFrame; /* a pre-rendered skybox room (shops, houses: G_NOOP stereo mode 2) */
 #define WIDE_ACTIVE() (gPortWidescreen && !sBgThisFrame && !sBgLastFrame && sDrawTarget == NULL)
 static int sRectFullWidth; /* gfx_dp_fill_rectangle -> gfx_draw_rectangle: stretch to the whole target */
 
@@ -2286,6 +2391,13 @@ static void gfx_dp_fill_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t
         // Per documentation one extra pixel is added in this modes to each edge
         lrx += 1 << 2;
         lry += 1 << 2;
+    } else {
+        /* PORT (2026-09-30): 1/2-cycle fills exclude their lower-right edge, so the game's full-screen
+         * fades (gDPFillRectangle(0, 0, 319, 239)) leave the last row and column uncovered. On a TV
+         * that line is overscan; the 3DS shows every pixel (2x supersampled: a visible stripe under
+         * fade-to-black). Fills reaching the last row/column cover them. */
+        if (lry >= (SCREEN_HEIGHT - 1) * 4 && lry < SCREEN_HEIGHT * 4) lry = SCREEN_HEIGHT * 4;
+        if (lrx >= (SCREEN_WIDTH - 1) * 4 && lrx < SCREEN_WIDTH * 4) lrx = SCREEN_WIDTH * 4;
     }
     
     for (int i = MAX_VERTICES; i < MAX_VERTICES + 4; i++) {
@@ -2551,6 +2663,8 @@ static void gfx_run_dl(Gfx* cmd) {
                     extern void gfx_citro3d_set_stereo_mode(int mode);
                     gfx_flush();
                     gfx_citro3d_set_stereo_mode((int)(cmd->words.w1 & 0xFF));
+                    sStereoDrawMode = (int)(cmd->words.w1 & 0xFF);
+                    if ((cmd->words.w1 & 0xFF) == 2) sStereoRoomThisFrame = 1;
                 }
                 break;
 #endif
@@ -2818,7 +2932,7 @@ void gfx_init(struct GfxWindowManagerAPI *wapi, struct GfxRenderingAPI *rapi) {
 
 void gfx_start_frame(void) {
     sTriStateOk = false;
-    sBgLastFrame = sBgThisFrame;
+    sBgLastFrame = sBgThisFrame; gPortPrerenderedFrame = sBgLastFrame || sStereoRoomThisFrame; sStereoRoomThisFrame = 0;
     sBgThisFrame = 0;
     gfx_wapi->handle_events();
     sDrawTarget = NULL; /* the backend starts each frame on the screen */

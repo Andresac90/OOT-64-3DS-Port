@@ -891,7 +891,13 @@ void EnMag_Draw(Actor* thisx, PlayState* play) {
 
     gfxRef = POLY_OPA_DISP;
     gfx = Gfx_Open(gfxRef);
+#ifdef __3DS__
+    gDPNoOpTag(OVERLAY_DISP++, 0x3D5E3D03); /* PORT: stereo - the title logo is a flat screen-depth layer */
+#endif
     gSPDisplayList(OVERLAY_DISP++, gfx);
+#ifdef __3DS__
+    gDPNoOpTag(OVERLAY_DISP++, 0x3D5E3D00);
+#endif
 
     EnMag_DrawInner(thisx, play, &gfx);
 

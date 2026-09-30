@@ -116,7 +116,7 @@ static bool gfx_citro3d_z_is_from_0_to_1(void)
     return true;
 }
 
-#define VTX_FLOATS 12 /* gfx_pc.c packs pos(4) uv0(2) uv1(2) shade(4); the VBO holds the same layout */
+#define VTX_FLOATS 13 /* gfx_pc.c packs pos(4) uv0(2) uv1(2) shade(4) stereo(1); the VBO holds the same layout */
 
 static bool sDepthTestOn = false;
 static bool sDepthUpdateOn = true;
@@ -816,8 +816,11 @@ static void applyDrawId(void) {
  * screen plane, the world recedes behind him and closer things come forward a little (limit below);
  * the 2D HUD (w < 1.5) stays at the screen. Before: a fixed convergence of 80 put Link almost as deep
  * as the horizon (little relative depth) and nothing could come forward. */
-#define STEREO_POPOUT_LIMIT (-0.35f) /* closest things come forward at most 35% of the full depth */
-#define STEREO_ROOM_DEPTH 0.4f       /* pre-rendered room picture: just behind Link (at the screen) */
+#define STEREO_POPOUT_LIMIT (-0.10f) /* closest things come forward at most 10% of the full depth:
+                                      * comfort guideline - keep almost everything behind the screen */
+#define STEREO_ROOM_DEPTH 0.75f      /* pre-rendered room picture: behind Link, who is at ~0.5 there (the
+                                      * convergence halves in those rooms, gfx_3ds.c) - he stands inside
+                                      * the picture instead of in front of it (hardware feedback) */
 extern float gPortStereoConv;        /* gfx_3ds.c: smoothed convergence distance */
 static int sEyeLoc = -1;
 static float sEyeCur[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
@@ -846,14 +849,18 @@ static void setEye(float shift) {
     if (sEyeLoc < 0) {
         return;
     }
-    if (shift == 0.0f || sStereoMode == 3) { /* mono, or a flat screen-depth layer (the HUD) */
+    extern int gPortStereoFlatScene; /* gfx_3ds.c: menus (file select) - flat, backgrounds at half depth */
+    if (shift == 0.0f || sStereoMode == 3 || (gPortStereoFlatScene && sStereoMode == 0)) {
+        /* mono, a flat screen-depth layer (the HUD), or a menu's panels */
         u[0] = u[1] = u[2] = u[3] = 0.0f;
+    } else if (gPortStereoFlatScene) { /* a menu's sky / room background: behind the panels */
+        u[0] = 0.0f, u[1] = 0.0f, u[2] = 0.0f, u[3] = shift * 0.5f;
     } else if (sStereoMode == 1) { /* sky: the full shift, independent of the skybox box's own w */
         u[0] = 0.0f, u[1] = 0.0f, u[2] = 0.0f, u[3] = shift;
     } else if (sStereoMode == 2) { /* flat picture (w = 1): constant shift */
         u[0] = 0.0f, u[1] = 0.0f, u[2] = 0.0f, u[3] = shift * STEREO_ROOM_DEPTH;
     } else {
-        u[0] = shift, u[1] = gPortStereoConv, u[2] = STEREO_POPOUT_LIMIT, u[3] = 0.0f;
+        u[0] = shift, u[1] = 0.0f, u[2] = 0.0f, u[3] = 0.0f; /* depth curve per vertex (gfx_pc.c) */
     }
     if (u[0] != sEyeCur[0] || u[1] != sEyeCur[1] || u[2] != sEyeCur[2] || u[3] != sEyeCur[3]) {
         C3D_FVUnifSet(GPU_VERTEX_SHADER, sEyeLoc, u[0], u[1], u[2], u[3]);
@@ -902,6 +909,7 @@ static void gfx_citro3d_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size
         *dst++ = src[9];
         *dst++ = src[10];
         *dst++ = src[11];
+        *dst++ = src[12]; /* stereo offset (gfx_pc.c stereo_offset) */
     }
 
     applyDrawId();
@@ -912,11 +920,12 @@ static void gfx_citro3d_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size
             int off = e * STEREO_EYE_OFFSET;
             int vx = TOP_W - (sVp[0] + sVp[2]), sx = TOP_W - (sSc[0] + sSc[2]);
             int vy = vx + off, vh = sVp[2];
-            /* e = 0 is the left eye (sEyeOut[0] -> GFX_LEFT). Note: the display transfer flips the 800-row
-             * buffer, so in stereo_fb.bin dumps the LEFT eye is the SECOND half. Measured that way: the
-             * left eye gets +shift = uncrossed disparity = the world behind the screen. (A sign "fix" read
-             * from the dump with the halves swapped made the world pop out - hardware v10.) */
-            setEye(e == 0 ? gPortStereoSep : -gPortStereoSep);
+            /* The PICA framebuffer is stored bottom-up: viewport long-axis offset 0 lands in the SECOND
+             * half of the buffer in memory, which sEyeOut[1] sends to GFX_RIGHT. So e = 0 draws the RIGHT
+             * eye and gets -shift (uncrossed disparity = the world behind the screen). Confirmed on
+             * hardware: v10 (this sign) had depth behind the screen; v11 (flipped, after misreading the
+             * stereo_fb.bin dump, whose first half is the LEFT eye) made everything pop out and hurt. */
+            setEye(e == 0 ? -gPortStereoSep : gPortStereoSep);
             /* PICA viewport origins are signed 10-bit: a right-eye viewport starting at >= 512 on the long
              * axis (the A button's at 524) wrapped negative and vanished. Start it at 400 instead, taller,
              * and remap clip y in the shader so the geometry lands on the same pixels. */
@@ -962,6 +971,7 @@ static void gfx_citro3d_init(void)
 	AttrInfo_AddLoader(attrInfo, 1, GPU_FLOAT, 2); // v1=texcoord
 	AttrInfo_AddLoader(attrInfo, 2, GPU_FLOAT, 4); // v2=color
 	AttrInfo_AddLoader(attrInfo, 3, GPU_FLOAT, 2); // v3=texcoord1
+	AttrInfo_AddLoader(attrInfo, 4, GPU_FLOAT, 1); // v4=stereo offset
 
 	// Create the VBO (vertex buffer object)
 	sVboBuffer = linearAlloc(2 * 1024 * 1024);
@@ -969,7 +979,7 @@ static void gfx_citro3d_init(void)
 	// Configure buffers
 	C3D_BufInfo* bufInfo = C3D_GetBufInfo();
 	BufInfo_Init(bufInfo);
-	BufInfo_Add(bufInfo, sVboBuffer, VTX_FLOATS * 4, 4, 0x2310); // pos, uv0, uv1, color
+	BufInfo_Add(bufInfo, sVboBuffer, VTX_FLOATS * 4, 5, 0x42310); // pos, uv0, uv1, color, stereo
 
     C3D_CullFace(GPU_CULL_NONE);
     C3D_DepthMap(true, -1.0f, 0);

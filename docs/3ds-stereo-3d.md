@@ -62,12 +62,15 @@ mode (800px wide with anti-aliasing on hardware).
 
 ## v2 (2026-09-30, after hardware feedback "not deep enough; Link pops out in 2D rooms")
 
-- **Eye sign:** e = 0 (the left eye, GFX_LEFT) gets **+shift**. The display transfer flips the 800-row
-  buffer, so in `stereo_fb.bin` dumps the left eye is the **second** half. An earlier "sign fix" read
-  the dump with the halves swapped, which made the whole world pop out (hardware v10).
+- **Eye sign (confirmed on hardware):** the PICA framebuffer is stored bottom-up, so viewport
+  long-axis offset 0 lands in the *second* half of the buffer in memory, which `sEyeOut[1]` sends to
+  GFX_RIGHT. So e = 0 draws the **right** eye and gets **−shift**. In `stereo_fb.bin` dumps (memory
+  order) the first half is the **left** eye. "Behind the screen" means the right-eye image sits right
+  of the left-eye image, which is a positive shift in `stereo2png`'s "eye1 = eye0 shifted by".
+  (v11 flipped the sign after misreading the dump. Everything popped out and it hurt; restored in v12.)
 - **Convergence follows Link:** `gPortStereoFocusW` = the player's projectedW (z_play.c), smoothed in
   `gfx_3ds_update_stereo`, clamped to 60..600. Link sits at the screen plane and the world recedes.
-  Closer things come forward, at most 35% of the full depth (`STEREO_POPOUT_LIMIT`).
+  Closer things come forward, at most 10% of the full depth (`STEREO_POPOUT_LIMIT`; v11 had 35%).
 - **Shader:** `out.y += (eye.x · clamp(1 − conv/w, popLimit, 1) + eye.w) · w`, with no shift when w < 1.5
   (2D/ortho). eye.w is a constant shift for flat layers.
 - **Depth modes** (G_NOOP tags `0x3D5E3D0m`):
@@ -80,8 +83,70 @@ mode (800px wide with anti-aliasing on hardware).
   | 3 | the whole HUD (`Interface_Draw` tags itself) | flat at screen depth |
 
 - **Strength:** 0.04 NDC per eye at full slider, about 16 px at infinity. Measured in Hyrule Field:
-  castle wall −13 px (behind), Link +1 (screen), near ground +4 (front), HUD 0.
+  see the v12 measurements below.
 - **PICA quirk:** viewport origins are **signed 10-bit**. A right-eye viewport starting at ≥ 512 on the
-  long axis (the A button's, at 524) wrapped negative and vanished from the right eye. Such viewports
+  long axis (the A button's, at 524) wrapped negative and vanished from that eye (the left one). Such viewports
   start at 400, are made taller, and clip y is remapped in the shader (`remap` uniform:
   `y' = a·y + b·w`, with `a = h/(dy+h)` and `b = dy/(dy+h)`).
+
+## v3 (2026-09-30, after hardware feedback: white crack dots on the ground in 3D, near floor flat)
+
+- **Cause:** a per-vertex *curve* in the shader (the pop-out clamp). The renderer splits big triangles
+  and clips them, and new vertices on an edge are only on the neighbour's edge if the shift is affine
+  in the clip-space position. The curve bent those edges (T-junction cracks showing the white clear),
+  and the clamp pinned everything nearer than the limit to one flat depth.
+- **Now:** the depth offset is a vertex attribute (`v4`, `PVtx.s`) computed on the CPU:
+  `s = w − c` behind the convergence (true stereo) and `s = 0.2 · (w − c)` in front of it (gentle).
+  Triangles crossing the plane w = c are split on it (`gfx_emit_tri`). Inside every piece s is exactly
+  affine, and split/clip interpolation carries it like x/y, so there are no cracks and no chord error.
+  (A smooth curve interpolated across a ground triangle spanning w = 38..1000 took the far vertex's
+  depth: the near floor measured *behind* Link.)
+- **Shader:** `out.y += eye.x · s + eye.w · w`. Ortho/2D (w exactly 1) has s = 0.
+- **Measured, Kokiri Forest:** walls +11 px (behind), Link 0, floor around and below him ≈ 0 with a gentle
+  forward gradient, HUD 0.
+
+## v4 (2026-09-30): research-based design — the current one
+
+### What the research says
+
+| Principle | Source | How the port applies it |
+|---|---|---|
+| Use parallel-axis **asymmetric-frustum (off-axis)** stereo, not toe-in: it has no vertical parallax or keystone, and gives a controllable zero-parallax plane. | Paul Bourke; the citro3d `Mtx_PerspStereoTilt` (±iod/2 shift plus a projection skew at the `screen` distance) | The clip-space shift `x' = x ± e·(w − c)` is exactly the off-axis projection: horizontal only, zero at w = c. |
+| **Stereo window violations** are a primary cause of discomfort: something in front of the screen plane cut off by the frame border. | MSU stereo-quality reports; Solid Sight "The Stereo Window"; floating-window papers | Automatic convergence: 13 probes along the bottom and side borders find the nearest 3D surface there, and the screen plane goes no further than it. Border geometry is never in front. |
+| **Zone of comfort** is about ±0.5 diopters around the screen. It narrows when depth changes quickly. | Shibata, Kim, Hoffman & Banks, JOV 2011; the rate-of-change VAC study (Vision Research 2014) | Max separation 16 px at infinity (≈ 3.4 mm, ≈ 0.65° at 30 cm on a New 3DS: inside the 1° safety guideline and far inside Shibata's zone). The convergence recedes slowly and approaches fast. |
+| Keep crossed parallax (pop-out) small; guidelines give ≈ 2–3% of screen width at most. | 3D Consortium safety guidelines; the "percentage rule" literature | Pop-out only happens for things nearer than both Link and the border geometry, and not touching an edge. |
+| HUD/UI at the screen plane. OoT3D itself adjusted HUD-like elements (the Z-target mark) for depth. | Iwata Asks: OoT3D development staff | The HUD and title logo are flat layers (mode 3). |
+
+### Design
+
+- **Depth per vertex** (v3): `s = w − c` for all 3D geometry (pure off-axis, `STEREO_NEAR_SLOPE = 1`),
+  carried as a vertex attribute. It's exactly affine, so there are no cracks when triangles split.
+- **Convergence** `c = min(Link's w, border depth)`, clamped to 10..600:
+  - Border depth is the 3rd-nearest of 13 border probes (`gfx_pc.c stereo_probe_tri`: homogeneous
+    barycentrics, exact even with vertices behind the camera).
+  - It follows asymmetrically (0.3 toward nearer, 0.04 toward further).
+  - In pre-rendered rooms, the target is halved.
+- **Flat layers:** the HUD (`Interface_Draw`) and the title logo (`EnMag_Draw`).
+
+### Measured (Azahar, full slider)
+
+| Scene | Bottom ground | Link | Far | HUD |
+|---|---|---|---|---|
+| Title intro over Hyrule Field (v13: bottom −20 px, popped out) | +4…+7 | — | sky +15…+16 | — |
+| Hyrule Field | 0 | +4 | +13 | 0 |
+| Kokiri Forest | 0 | +7 | +13 | 0 |
+
+Positive values are behind the screen.
+
+### Further options (not done)
+
+- A floating window (a black mask on one eye's edge) for objects that do cross the side borders in front.
+- Expose strength and convergence as settings.
+
+### Menus (v15)
+
+The file select and the pause menu draw their panels as perspective 3D. Under automatic convergence
+they came out at mixed depths ("hurts the eye" on hardware). These gamestates set
+`gPortStereoFlatScene` each frame (`FileSelect_Main`; `Play_Draw` while `IS_PAUSED`). 3D geometry is
+then a flat screen-depth layer, and the sky / room background sits at half depth behind it. Measured:
+file-select panels and text at 0, sky behind; all pause pages at 0.
