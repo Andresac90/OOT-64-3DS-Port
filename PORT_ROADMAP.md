@@ -1,5 +1,60 @@
 # OoT → New 3DS Port — Status, Architecture & Roadmap (v2)
 
+## ★ MILESTONE 2026-09-30 — "plays like a 3DS game" (git tag `milestone-2026-09-30`)
+
+Verified on a New 3DS (hardware photos) and in Azahar. The sections below this one are the history
+of how we got here. They are accurate as history, but their "current state" lines are out of date;
+this section is the current status.
+
+**Works:**
+- Boot → N64 logo → title → file select → gameplay. The boot bypass is gone.
+- Full renderer, verified against the N64 (ares) reference with `tools/statediff` (`fbdiff`, scene
+  tours).
+- Music and sound effects match the N64. The audio microcode is a C port of the SoH mixer, running on
+  its own core.
+- Widescreen, with 4:3 kept automatically for pre-rendered backgrounds.
+- An OoT3D-style touch panel with the minimap on the bottom screen.
+- Stereoscopic 3D on the slider.
+- HOME button, saves, Old 3DS support (adaptive heaps).
+- Performance is much better. Measured before this milestone: 19–22 updates/s on New 3DS hardware.
+
+**Feature docs:**
+- Build and test: `docs/BUILDING_3DS.md`.
+- Controls, touch panel and minimap: `docs/3ds-touch-panel.md`.
+- Stereoscopic 3D: `docs/3ds-stereo-3d.md`.
+- Audio: `docs/audio/`.
+
+**Verification tools (all in the emulator, no hardware needed):**
+- `tools/regress.sh [label]`: PASS/FAIL boot gate. Run it after every change.
+- `tools/statediff/`:
+  - `tour.py`: warps through scenes; `--skip-n64` runs the 3DS side only.
+  - `statediff.py` / `fbdiff.py`: compare the 3DS against the N64 reference, field by field and on
+    the framebuffer.
+  - `make_ref.sh`: builds the N64 reference.
+- Debug flag files on the SD card: `sdmc:/3ds/oot/capture_bottom` dumps the touch panel,
+  `capture_stereo` dumps both eyes, and `capture_audio` records a WAV.
+- Before any hardware build: `grep UnmappedAccess` in the Azahar log must return 0. Azahar tolerates
+  unmapped accesses that crash a real 3DS.
+
+**Open issues (reported on hardware 2026-09-30, next work):**
+1. The sword's metal material isn't shiny like the N64. Suspect the environment-map / texgen
+   (G_TEXTURE_GEN) path.
+2. The title screen shows no Link on Epona. Buttons respond and ocarina sounds play; the title demo
+   may be in the wrong mode.
+3. Large distant elements and fog don't match the N64. Suspect the fog range/formula or
+   far-plane/depth handling.
+4. In widescreen, parts of the background next to 3D geometry (Kokiri Forest sky) show as a black
+   rectangle. Switching the screen to 4:3 fixes it.
+5. After switching the screen mode, 3D stopped working even with the slider up. It came back only
+   through the HOME menu.
+6. 3D depth for pre-rendered 2D rooms needs a better choice. They are currently at a fixed middle
+   depth; the alternative is to match the characters' depth.
+7. The N64 logo's color/shading effect differs from the N64.
+8. The touch panel's OCARINA, BOOTS and the tabs haven't yet been checked on hardware.
+
+---
+
+
 > **Purpose:** the canonical handoff document for anyone (human or AI) continuing this port.
 > Read this FIRST. Every claim below was **verified against the actual code on 2026-07-22**
 > by a 4-agent full-codebase audit (renderer / game patches + 2D UI / audio / stability +

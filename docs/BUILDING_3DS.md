@@ -90,3 +90,4 @@ stays the final validator for color/perf/audio.
 - Tune the `KEYMAP` in `tools/emu-test.sh` to your Azahar input profile before using `-p`.
 - Controls, the OoT3D-style touch panel and the bottom-screen minimap: see
   [3ds-touch-panel.md](3ds-touch-panel.md).
+- Stereoscopic 3D (3D slider): see [3ds-stereo-3d.md](3ds-stereo-3d.md).

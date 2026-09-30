@@ -18,6 +18,15 @@ void Skybox_Draw(SkyboxContext* skyboxCtx, GraphicsContext* gfxCtx, s16 skyboxId
     OPEN_DISPS(gfxCtx, "../z_vr_box_draw.c", 52);
 
     Gfx_SetupDL_40Opa(gfxCtx);
+#ifdef __3DS__
+    /* PORT: stereoscopic depth for the skybox (a small box around the camera, so its own w would put it
+     * at screen depth): real skies at infinity, pre-rendered rooms (shops, houses) at a fixed middle
+     * depth. G_NOOP tags; the N64 ignores them. See PORT_STEREO_TAG in port/src/gfx/gfx_pc.c. */
+    gDPNoOpTag(POLY_OPA_DISP++, 0x3D5E3D00 | (((skyboxId == SKYBOX_NORMAL_SKY) || (skyboxId == SKYBOX_OVERCAST_SUNSET) ||
+                                             (skyboxId == SKYBOX_CUTSCENE_MAP))
+                                                ? 1
+                                                : 2));
+#endif
 
     gSPSegment(POLY_OPA_DISP++, 0x7, skyboxCtx->staticSegments[0]);
     gSPSegment(POLY_OPA_DISP++, 0x8, skyboxCtx->staticSegments[1]);
@@ -95,6 +104,9 @@ void Skybox_Draw(SkyboxContext* skyboxCtx, GraphicsContext* gfxCtx, s16 skyboxId
     }
 
     gDPPipeSync(POLY_OPA_DISP++);
+#ifdef __3DS__
+    gDPNoOpTag(POLY_OPA_DISP++, 0x3D5E3D00); /* back to normal stereo depth */
+#endif
 
     CLOSE_DISPS(gfxCtx, "../z_vr_box_draw.c", 125);
 }

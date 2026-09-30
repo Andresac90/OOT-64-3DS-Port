@@ -2392,6 +2392,13 @@ static void gfx_s2dex_bg_rect(const uObjBg* bg, bool copy) {
     int32_t fx = bg->b.frameX, fy = bg->b.frameY;
     const uint32_t kStrip = 16;
     if (img == NULL || w == 0 || h == 0 || bg->b.imageSiz != G_IM_SIZ_16b) return; /* OoT backgrounds are 16-bit */
+#ifdef __3DS__
+    { /* stereo: the pre-rendered room sits at a fixed middle depth, not at the screen (see G_NOOP tags) */
+        extern void gfx_citro3d_set_stereo_mode(int mode);
+        gfx_flush();
+        gfx_citro3d_set_stereo_mode(2);
+    }
+#endif
     for (row = 0; row < h; row += kStrip) {
         n = (h - row < kStrip) ? h - row : kStrip;
         gfx_dp_set_texture_image(bg->b.imageFmt, G_IM_SIZ_16b, w - 1, img);
@@ -2409,6 +2416,13 @@ static void gfx_s2dex_bg_rect(const uObjBg* bg, bool copy) {
                                      1 << 10, 1 << 10, false);
         }
     }
+#ifdef __3DS__
+    {
+        extern void gfx_citro3d_set_stereo_mode(int mode);
+        gfx_flush();
+        gfx_citro3d_set_stereo_mode(0);
+    }
+#endif
 }
 
 static uint32_t rdp_half1; /* G_RDPHALF_1 word for G_BRANCH_Z */
@@ -2486,6 +2500,17 @@ static void gfx_run_dl(Gfx* cmd) {
         }
 
         switch (opcode) {
+#ifdef __3DS__
+            /* PORT (2026-09-30): stereo depth tags (gDPNoOpTag 0x3D5E3D0m; z_vr_box_draw.c): m = 0 normal,
+             * 1 infinity (sky), 2 fixed middle depth (pre-rendered rooms). */
+            case (uint8_t)G_NOOP:
+                if ((cmd->words.w1 & 0xFFFFFF00u) == 0x3D5E3D00u) {
+                    extern void gfx_citro3d_set_stereo_mode(int mode);
+                    gfx_flush();
+                    gfx_citro3d_set_stereo_mode((int)(cmd->words.w1 & 0xFF));
+                }
+                break;
+#endif
             // RSP commands:
             case G_MTX:
 #ifdef F3DEX_GBI_2

@@ -714,13 +714,20 @@ static void gfx_citro3d_set_zmode_decal(bool zmode_decal) {
 
 extern int Port3ds_IsOffscreen(void);
 
+/* stereo (gfx_3ds.c): the last top-screen viewport/scissor as given (x, y, w, h), re-issued per eye in
+ * normal-mode target coordinates; kept in every mode so a switch into stereo starts with the right ones */
+static int sVp[4] = { 0, 0, 400, 240 }, sSc[4] = { 0, 0, 400, 240 };
+
 static void gfx_citro3d_set_viewport(int x, int y, int width, int height) {
     if (Port3ds_IsOffscreen()) { /* 1x 320x240-space off-screen target (gfx_3ds.c) */
         C3D_SetViewport(y, 320 - (x + width), height, width);
         return;
     }
+    sVp[0] = x, sVp[1] = y, sVp[2] = width, sVp[3] = height;
     x = TOP_W - (x + width);
-    if (gGfx3DSMode == GFX_3DS_MODE_AA_22 || gGfx3DSMode == GFX_3DS_MODE_WIDE_AA_12)
+    if (gGfx3DSMode == GFX_3DS_MODE_STEREO) {
+        C3D_SetViewport(y, x, height, width);
+    } else if (gGfx3DSMode == GFX_3DS_MODE_AA_22 || gGfx3DSMode == GFX_3DS_MODE_WIDE_AA_12)
         C3D_SetViewport(y * 2, x * 2, height * 2, width * 2);
     else if (gGfx3DSMode == GFX_3DS_MODE_WIDE)
         C3D_SetViewport(y, x * 2, height, width * 2);
@@ -734,8 +741,11 @@ static void gfx_citro3d_set_scissor(int x, int y, int width, int height)
         C3D_SetScissor(GPU_SCISSOR_NORMAL, y, 320 - (x + width), y + height, 320 - x);
         return;
     }
+    sSc[0] = x, sSc[1] = y, sSc[2] = width, sSc[3] = height;
     x = TOP_W - (x + width);
-    if (gGfx3DSMode == GFX_3DS_MODE_NORMAL)
+    if (gGfx3DSMode == GFX_3DS_MODE_STEREO) {
+        C3D_SetScissor(GPU_SCISSOR_NORMAL, y, x, y + height, x + width);
+    } else if (gGfx3DSMode == GFX_3DS_MODE_NORMAL)
         C3D_SetScissor(GPU_SCISSOR_NORMAL, y, x, y + height, x + width);
     else if (gGfx3DSMode == GFX_3DS_MODE_AA_22 || gGfx3DSMode == GFX_3DS_MODE_WIDE_AA_12)
         C3D_SetScissor(GPU_SCISSOR_NORMAL, y * 2, x * 2, (y + height) * 2, (x + width) * 2);
@@ -788,6 +798,34 @@ static void applyDrawId(void) {
     }
 }
 
+/* eye uniform (shader.v.pica): x = horizontal shift at infinity, y = convergence (clip w at screen
+ * depth; about Link's distance from the camera is ~200-300, so the world mostly recedes) */
+#define STEREO_CONVERGENCE 80.0f
+static int sEyeLoc = -1;
+static float sEyeCur = -1.0f;
+
+/* depth mode from gfx_pc.c (G_NOOP tags, S2DEX backgrounds): 0 = by distance, 1 = infinity (sky),
+ * 2 = fixed middle depth (pre-rendered rooms) */
+static int sStereoMode;
+static int sEyeModeCur = -1;
+
+void gfx_citro3d_set_stereo_mode(int mode) {
+    sStereoMode = mode;
+}
+
+static void setEye(float shift) {
+    if (sEyeLoc >= 0 && (shift != sEyeCur || sStereoMode != sEyeModeCur)) {
+        /* shift * max(0, w - conv) in clip space = shift * (1 - conv / w) in NDC. Infinity: conv 0 (full
+         * shift at any w). Fixed: conv negative relative to w is not expressible, so emulate a constant
+         * NDC shift of 0.6 * shift with conv = 0 and the shift scaled (w-independent after the divide). */
+        float conv = sStereoMode == 0 ? STEREO_CONVERGENCE : 0.0f;
+        float s = sStereoMode == 2 ? shift * 0.6f : shift;
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sEyeLoc, s, conv, 0.0f, 0.0f);
+        sEyeCur = shift;
+        sEyeModeCur = sStereoMode;
+    }
+}
+
 static void gfx_citro3d_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris)
 {
     if (sBufIdx * VTX_FLOATS + buf_vbo_len > 2 * 1024 * 1024 / 4)
@@ -832,7 +870,23 @@ static void gfx_citro3d_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size
     }
 
     applyDrawId();
-    C3D_DrawArrays(GPU_TRIANGLES, sBufIdx, buf_vbo_num_tris * 3);
+    if (gGfx3DSMode == GFX_3DS_MODE_STEREO && !Port3ds_IsOffscreen()) {
+        /* both eyes from the same vertices: left half then right half of the stereo target */
+        int e;
+        for (e = 0; e < 2; e++) {
+            int off = e * STEREO_EYE_OFFSET;
+            /* measured (stereo_fb.bin): +shift moves the image right on screen; far objects need the left
+             * eye's image left of the right eye's (uncrossed), so the left eye gets -shift */
+            setEye(e == 0 ? -gPortStereoSep : gPortStereoSep);
+            int vx = TOP_W - (sVp[0] + sVp[2]), sx = TOP_W - (sSc[0] + sSc[2]);
+            C3D_SetViewport(sVp[1], vx + off, sVp[3], sVp[2]);
+            C3D_SetScissor(GPU_SCISSOR_NORMAL, sSc[1], sx + off, sSc[1] + sSc[3], sx + sSc[2] + off);
+            C3D_DrawArrays(GPU_TRIANGLES, sBufIdx, buf_vbo_num_tris * 3);
+        }
+    } else {
+        setEye(0.0f);
+        C3D_DrawArrays(GPU_TRIANGLES, sBufIdx, buf_vbo_num_tris * 3);
+    }
     sBufIdx += buf_vbo_num_tris * 3;
     {
         extern u32 gPortPerfTris, gPortPerfDraws;
@@ -847,6 +901,8 @@ static void gfx_citro3d_init(void)
 	shaderProgramInit(&sShaderProgram);
 	shaderProgramSetVsh(&sShaderProgram, &sVShaderDvlb->DVLE[0]);
 	C3D_BindProgram(&sShaderProgram);
+    sEyeLoc = shaderInstanceGetUniformLocation(sShaderProgram.vertexShader, "eye");
+    setEye(0.0f);
 
 	// Configure attributes for use with the vertex shader
 	C3D_AttrInfo* attrInfo = C3D_GetAttrInfo();

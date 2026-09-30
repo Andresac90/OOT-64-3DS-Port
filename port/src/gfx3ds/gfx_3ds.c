@@ -1,6 +1,7 @@
 #ifdef TARGET_N3DS
 
 #include <3ds.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <citro3d.h>
 #include "gfx_3ds.h"
@@ -37,6 +38,26 @@
 // #endif
 
 static C3D_RenderTarget* sTarget;
+/* PORT (2026-09-30): stereoscopic 3D. With the 3D slider up the top screen switches from the mono mode
+ * (800px wide + AA on hardware; the wide mode cannot show 3D) to two 400x240 eyes rendered side by side
+ * into one 240x800 target: every draw is issued twice with a different viewport and eye uniform
+ * (gfx_citro3d.c), so the display list is processed once and no render-target switching is needed. Two
+ * output-only targets alias the halves, so citro3d's FrameEnd transfers them to the left/right
+ * framebuffers itself. Slider down: back to the mono mode, zero extra cost. */
+float gPortStereoSep;
+static Gfx3DSMode sMonoMode;
+static u32 sMonoFlags;
+static int sMonoW, sMonoH;
+static bool sMonoWide;
+static C3D_RenderTarget* sEyeOut[2];
+
+/* the region readbacks use: one eye in stereo (the left half, laid out like the normal mode) */
+static int ViewW(void) {
+    return sTarget->frameBuf.width;
+}
+static int ViewH(void) {
+    return gGfx3DSMode == GFX_3DS_MODE_STEREO ? STEREO_EYE_OFFSET : sTarget->frameBuf.height;
+}
 
 Gfx3DSMode gGfx3DSMode;
 
@@ -99,6 +120,10 @@ static void gfx_3ds_init(void)
 
     sTarget = C3D_RenderTargetCreate(height, width, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
 	C3D_RenderTargetSetOutput(sTarget, GFX_TOP, GFX_LEFT, transferFlags);
+    sMonoFlags = transferFlags;
+    sMonoW = height;
+    sMonoH = width;
+    sMonoWide = useWide;
 
     if (!useAA && !useWide)
         gGfx3DSMode = GFX_3DS_MODE_NORMAL;
@@ -111,6 +136,79 @@ static void gfx_3ds_init(void)
 
     if (useWide)
         gfxSetWide(true);
+    sMonoMode = gGfx3DSMode;
+}
+
+/* Called before C3D_FrameBegin: citro3d breaks (svcBreak) on C3D_RenderTargetDelete inside a frame, and
+ * the delete waits for the GPU queue itself. The mono and stereo targets never coexist (VRAM: the
+ * 480x800 AA target alone is 3 MB). */
+static void gfx_3ds_update_stereo(void) {
+    float slider = osGet3DSliderState();
+    bool want = slider > 0.02f;
+    bool on = gGfx3DSMode == GFX_3DS_MODE_STEREO;
+    int e;
+
+    gPortStereoSep = want ? slider * 0.03f : 0.0f;
+    if (want == on) {
+        return;
+    }
+    { extern void PortDbg(const char*); PortDbg(want ? "[stereo] enter" : "[stereo] leave"); }
+    if (want) {
+        C3D_RenderTarget* st = C3D_RenderTargetCreate(240, 2 * STEREO_EYE_OFFSET, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+        if (st == NULL) {
+            gPortStereoSep = 0.0f;
+            return;
+        }
+        for (e = 0; e < 2; e++) {
+            sEyeOut[e] = C3D_RenderTargetCreate(240, STEREO_EYE_OFFSET, GPU_RB_RGBA8, -1);
+            if (sEyeOut[e] != NULL) {
+                /* alias half e of the stereo target (the tiled buffer is contiguous along the long axis) */
+                vramFree(sEyeOut[e]->frameBuf.colorBuf);
+                sEyeOut[e]->frameBuf.colorBuf = (u8*)st->frameBuf.colorBuf + e * 240 * STEREO_EYE_OFFSET * 4;
+                sEyeOut[e]->ownsColor = false;
+            }
+        }
+        if (sEyeOut[0] == NULL || sEyeOut[1] == NULL) {
+            for (e = 0; e < 2; e++) {
+                if (sEyeOut[e] != NULL) C3D_RenderTargetDelete(sEyeOut[e]), sEyeOut[e] = NULL;
+            }
+            C3D_RenderTargetDelete(st);
+            gPortStereoSep = 0.0f;
+            return;
+        }
+        C3D_RenderTargetDelete(sTarget); /* also unlinks it from the top screen */
+        sTarget = st;
+        {
+            u32 flags = GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
+                        GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
+                        GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
+            C3D_RenderTargetSetOutput(sEyeOut[0], GFX_TOP, GFX_LEFT, flags);
+            C3D_RenderTargetSetOutput(sEyeOut[1], GFX_TOP, GFX_RIGHT, flags);
+        }
+        gfxSetWide(false);
+        gfxSet3D(true);
+        gGfx3DSMode = GFX_3DS_MODE_STEREO;
+    } else {
+        C3D_RenderTarget* mono = C3D_RenderTargetCreate(sMonoW, sMonoH, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+        if (mono == NULL) {
+            return; /* stay in stereo (with the eyes still drawn) rather than show nothing */
+        }
+        for (e = 0; e < 2; e++) {
+            C3D_RenderTargetDelete(sEyeOut[e]); /* not the owner of the color buffer */
+            sEyeOut[e] = NULL;
+        }
+        C3D_RenderTargetDelete(sTarget);
+        sTarget = mono;
+        C3D_RenderTargetSetOutput(sTarget, GFX_TOP, GFX_LEFT, sMonoFlags);
+        gfxSet3D(false);
+        gfxSetWide(sMonoWide);
+        gGfx3DSMode = sMonoMode;
+    }
+    /* the depth/color readbacks were sized for the old target */
+    {
+        extern void gfx_3ds_drop_readbacks(void);
+        gfx_3ds_drop_readbacks();
+    }
 }
 
 static void gfx_3ds_main_loop(void (*run_one_game_iter)(void)) 
@@ -155,15 +253,15 @@ void Port3ds_RequestDepth(void) {
 }
 
 const u32* Port3ds_GetDepth(int* width, int* height) {
-    *width = sTarget->frameBuf.width;
-    *height = sTarget->frameBuf.height;
+    *width = ViewW();
+    *height = ViewH();
     return (sDepthValid && sDepthSlot >= 0) ? sDepthLinear[sDepthSlot] : NULL;
 }
 
 /* back = 0: most recent frame, 1: the one before (tools/statediff dumps both with the colors) */
 const u32* Port3ds_GetDepthSlot(int back, int* width, int* height) {
-    *width = sTarget->frameBuf.width;
-    *height = sTarget->frameBuf.height;
+    *width = ViewW();
+    *height = ViewH();
     if (sDepthSlot < 0) {
         return NULL;
     }
@@ -171,7 +269,7 @@ const u32* Port3ds_GetDepthSlot(int back, int* width, int* height) {
 }
 
 static void gfx_3ds_read_back_depth(void) {
-    size_t size = (size_t)sTarget->frameBuf.width * sTarget->frameBuf.height * 4;
+    size_t size = (size_t)ViewW() * ViewH() * 4;
 
     if (sDepthWantFrames <= 0) {
         sDepthValid = false;
@@ -185,8 +283,8 @@ static void gfx_3ds_read_back_depth(void) {
         }
     }
     C3D_SyncDisplayTransfer((u32*)sTarget->frameBuf.depthBuf,
-                            GX_BUFFER_DIM(sTarget->frameBuf.width, sTarget->frameBuf.height), sDepthLinear[sFrameSlot],
-                            GX_BUFFER_DIM(sTarget->frameBuf.width, sTarget->frameBuf.height),
+                            GX_BUFFER_DIM(ViewW(), ViewH()), sDepthLinear[sFrameSlot],
+                            GX_BUFFER_DIM(ViewW(), ViewH()),
                             GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
                                 GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
                                 GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
@@ -218,8 +316,8 @@ int Port3ds_ColorLatestSlot(void) {
 /* back = 0: most recently finished frame; back = 1: the one before */
 const u32* Port3ds_GetColor(int back, int* width, int* height) {
     int slot;
-    *width = sTarget->frameBuf.width;
-    *height = sTarget->frameBuf.height;
+    *width = ViewW();
+    *height = ViewH();
     if (sColorLatest < 0) {
         return NULL;
     }
@@ -228,7 +326,7 @@ const u32* Port3ds_GetColor(int back, int* width, int* height) {
 }
 
 static void gfx_3ds_read_back_color(void) {
-    size_t size = (size_t)sTarget->frameBuf.width * sTarget->frameBuf.height * 4;
+    size_t size = (size_t)ViewW() * ViewH() * 4;
     int slot;
 
     if (sColorWantFrames <= 0) {
@@ -243,8 +341,8 @@ static void gfx_3ds_read_back_color(void) {
         }
     }
     C3D_SyncDisplayTransfer((u32*)sTarget->frameBuf.colorBuf,
-                            GX_BUFFER_DIM(sTarget->frameBuf.width, sTarget->frameBuf.height), sColorLinear[slot],
-                            GX_BUFFER_DIM(sTarget->frameBuf.width, sTarget->frameBuf.height),
+                            GX_BUFFER_DIM(ViewW(), ViewH()), sColorLinear[slot],
+                            GX_BUFFER_DIM(ViewW(), ViewH()),
                             GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
                                 GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
                                 GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
@@ -264,10 +362,22 @@ void Port3ds_CaptureFrame5551(void* dst) {
     sCaptureDst = dst;
 }
 
+/* buffers sized for the previous target: dropped on a stereo switch, reallocated at the new size */
+void gfx_3ds_drop_readbacks(void) {
+    int i;
+    for (i = 0; i < 2; i++) {
+        if (sDepthLinear[i] != NULL) linearFree(sDepthLinear[i]), sDepthLinear[i] = NULL;
+        if (sColorLinear[i] != NULL) linearFree(sColorLinear[i]), sColorLinear[i] = NULL;
+    }
+    sDepthValid = false;
+    sDepthSlot = -1;
+    sColorLatest = -1;
+}
+
 static void gfx_3ds_capture_frame(void) {
     extern void gfx_texture_cache_invalidate_range(const void* start, uint32_t size);
     static u32* sLin;
-    int W = sTarget->frameBuf.width, H = sTarget->frameBuf.height, sx = H / 400, sy = W / 240, x, y, ox, oy;
+    int W = ViewW(), H = ViewH(), sx = H / 400, sy = W / 240, x, y, ox, oy;
     size_t size = (size_t)W * H * 4;
     uint16_t* dst = (uint16_t*)sCaptureDst;
 
@@ -275,7 +385,8 @@ static void gfx_3ds_capture_frame(void) {
         return;
     }
     sCaptureDst = NULL;
-    if (sLin == NULL && (sLin = linearAlloc(size)) == NULL) {
+    /* sized for the mono target, the larger of the two (stereo reads one 240x400 eye) */
+    if (sLin == NULL && (sLin = linearAlloc((size_t)sMonoW * sMonoH * 4)) == NULL) {
         return;
     }
     C3D_SyncDisplayTransfer((u32*)sTarget->frameBuf.colorBuf, GX_BUFFER_DIM(W, H), sLin, GX_BUFFER_DIM(W, H),
@@ -400,11 +511,46 @@ static void gfx_3ds_read_back_offscreen(void) {
     }
 }
 
+/* verification aid: with sdmc:/3ds/oot/capture_stereo present, every 300 frames while in stereo the
+ * whole 240x800 target (both eyes, detiled RGBA8) goes to sdmc:/3ds/oot/stereo_fb.bin (header w, h) */
+static void gfx_3ds_debug_dump_stereo(void) {
+    static int sFrames;
+    static u32* sLin;
+    FILE* f;
+    int W, H;
+    if (gGfx3DSMode != GFX_3DS_MODE_STEREO || (++sFrames % 300) != 0) {
+        return;
+    }
+    f = fopen("sdmc:/3ds/oot/capture_stereo", "rb");
+    if (f == NULL) {
+        return;
+    }
+    fclose(f);
+    W = sTarget->frameBuf.width, H = sTarget->frameBuf.height;
+    if (sLin == NULL && (sLin = linearAlloc((size_t)W * H * 4)) == NULL) {
+        return;
+    }
+    C3D_SyncDisplayTransfer((u32*)sTarget->frameBuf.colorBuf, GX_BUFFER_DIM(W, H), sLin, GX_BUFFER_DIM(W, H),
+                            GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
+                                GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+                                GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+    GSPGPU_InvalidateDataCache(sLin, (size_t)W * H * 4);
+    f = fopen("sdmc:/3ds/oot/stereo_fb.bin", "wb");
+    if (f != NULL) {
+        u32 hdr[2] = { (u32)W, (u32)H };
+        fwrite(hdr, 4, 2, f);
+        fwrite(sLin, 4, (size_t)W * H, f);
+        fclose(f);
+    }
+}
+
 u64 gPortPerfGpuWait; /* ticks in C3D_FrameBegin: waiting for the previous frame's GPU work */
 
 static bool gfx_3ds_start_frame(void)
 {
-    u64 t0 = svcGetSystemTick();
+    u64 t0;
+    gfx_3ds_update_stereo(); /* outside a frame: citro3d refuses to delete targets inside one */
+    t0 = svcGetSystemTick();
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
     gPortPerfGpuWait += svcGetSystemTick() - t0;
     C3D_RenderTargetClear(sTarget, C3D_CLEAR_ALL, 0x000000FF, 0xFFFFFFFF);
@@ -414,6 +560,10 @@ static bool gfx_3ds_start_frame(void)
 
 static void gfx_3ds_swap_buffers_begin(void) 
 {
+    if (gGfx3DSMode == GFX_3DS_MODE_STEREO) {
+        /* drawn through the stereo target: mark the aliased outputs for FrameEnd's transfers */
+        sEyeOut[0]->used = sEyeOut[1]->used = true;
+    }
     C3D_FrameEnd(0);
     /* Depth readback right after this frame's render (C3D_SyncDisplayTransfer outside a frame waits
      * for the queued render first). The game samples it from Environment_GraphCallback, which the N64
@@ -424,6 +574,7 @@ static void gfx_3ds_swap_buffers_begin(void)
     gfx_3ds_read_back_color();
     gfx_3ds_capture_frame();
     gfx_3ds_read_back_offscreen();
+    gfx_3ds_debug_dump_stereo();
     sOffCur = -1;
     sFrameSlot ^= 1; /* next frame's readbacks go to the other slot */
     /* PORT (2026-09-24): no vblank wait here -- Port3ds_PaceFrame (3ds_main.c) paces updates to the

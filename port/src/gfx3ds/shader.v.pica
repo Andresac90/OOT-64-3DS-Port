@@ -1,6 +1,13 @@
 ; Uniforms
+; PORT (2026-09-30): stereoscopic 3D. eye.x = this eye's horizontal shift (NDC units at infinity, signed),
+; eye.y = convergence distance (clip w at screen depth). Positions arrive in clip space (transformed on
+; the CPU), so the shift is eye.x * max(0, w - eye.y) on the screen's horizontal axis, which is clip y
+; here (the top-screen target is portrait). Anything at w <= eye.y (2D HUD, ortho, w = 1) stays at
+; screen depth; the world recedes into the screen. eye = 0 (mono, off-screen) leaves positions untouched.
+.fvec eye
 
 ; Constants
+.constf zeros(0.0, 0.0, 0.0, 0.0)
 
 ; Outputs
 .out outpos position
@@ -15,7 +22,14 @@
 .alias intex1 v3
 
 .proc main
-	mov outpos, inpos
+	mov r0, inpos
+	mov r1, eye
+	mov r3, -r1
+	add r2, r3.yyyy, inpos.wwww
+	max r2, zeros, r2
+	mul r2, r1.xxxx, r2
+	add r0.y, r0.yyyy, r2.yyyy
+	mov outpos, r0
 
     mov outtc0, intex
     mov outtc1, intex1
