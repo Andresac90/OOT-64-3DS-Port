@@ -87,12 +87,20 @@ static const s16 resample_table[64][4] = {
 };
 
 static inline s16 clamp16(s32 v) {
+#if defined(__3DS__) && defined(__ARM_ARCH_6K__)
+    /* PORT PERF (2026-09-30): ARMv6 SSAT - saturate to 16 bits in one instruction (bit-exact with the
+     * branches below; every mixer loop clamps each sample) */
+    s32 r;
+    __asm__("ssat %0, #16, %1" : "=r"(r) : "r"(v));
+    return (s16)r;
+#else
     if (v < -0x8000) {
         return -0x8000;
     } else if (v > 0x7fff) {
         return 0x7fff;
     }
     return (s16)v;
+#endif
 }
 
 /* ---- RDRAM address validation --------------------------------------------------------- */
@@ -344,6 +352,38 @@ static void aEnvMixerImpl(u16 in_addr, u16 n_samples, int swap_reverb, int neg_3
     u16 rate_wet = rspa.rate_wet;
     int i, j;
 
+#if defined(__3DS__) && defined(__ARM_ARCH_6K__)
+    if ((((uintptr_t)in | (uintptr_t)dry[0] | (uintptr_t)dry[1] | (uintptr_t)wet[0] | (uintptr_t)wet[1]) & 3) == 0) {
+        /* PORT PERF (2026-09-30): two samples per step; the four saturating accumulations are ARMv6
+         * QADD16 (per lane identical to clamp16(a + b)). Same per-sample products as the loop below. */
+        (void)i;
+        do {
+            for (i = 0; i < 8; i += 2) {
+                s16 x0 = in[0], x1 = in[1];
+                s16 l0 = (s16)((x0 * vols[0] >> 16) ^ negs[0]), l1 = (s16)((x1 * vols[0] >> 16) ^ negs[0]);
+                s16 r0 = (s16)((x0 * vols[1] >> 16) ^ negs[1]), r1 = (s16)((x1 * vols[1] >> 16) ^ negs[1]);
+                s16 s0[2] = { l0, r0 }, s1[2] = { l1, r1 };
+                in += 2;
+                for (j = 0; j < 2; j++) {
+                    u32 d = (u16)s0[j] | ((u32)(u16)s1[j] << 16);
+                    u32 w = (u16)(s16)((s0[swapped[j]] * vol_wet >> 16) ^ negs[2 + j]) |
+                            ((u32)(u16)(s16)((s1[swapped[j]] * vol_wet >> 16) ^ negs[2 + j]) << 16);
+                    u32* dp = (u32*)dry[j];
+                    u32* wp = (u32*)wet[j];
+                    __asm__("qadd16 %0, %0, %1" : "+r"(*dp) : "r"(d));
+                    __asm__("qadd16 %0, %0, %1" : "+r"(*wp) : "r"(w));
+                    dry[j] += 2;
+                    wet[j] += 2;
+                }
+            }
+            vols[0] += rates[0];
+            vols[1] += rates[1];
+            vol_wet += rate_wet;
+            n -= 8;
+        } while (n > 0);
+        return;
+    }
+#endif
     do {
         for (i = 0; i < 8; i++) {
             s16 samples[2] = { *in, *in };
@@ -499,14 +539,35 @@ static void aFilterImpl(u8 flags, u16 count_or_buf, u32 addr) {
             rspa.filter[i] = (tmp2[i] + rspa.filter[i]) / 2;
         }
 
+#if defined(__3DS__) && defined(__ARM_ARCH_6K__)
+        /* PORT PERF (2026-09-30): the 8-tap FIR with ARMv6 SMLALD (two 16x16 products accumulated into 64
+         * bits per instruction; same sums as the scalar loop). Reversed coefficients are packed in pairs
+         * (frev[j] = filter[7 - j]), the input pairs are read straight from tmp. */
+        s16 frev[8] __attribute__((aligned(4)));
+        for (j = 0; j < 8; j++) frev[j] = rspa.filter[7 - j];
+#endif
         do {
             memcpy(tmp + 8, buf, 8 * sizeof(s16));
             for (i = 0; i < 8; i++) {
+#if defined(__3DS__) && defined(__ARM_ARCH_6K__)
+                u32 lo = 0x4000, hi = 0; /* round term */
+                const u32* fp = (const u32*)frev;
+                for (j = 0; j < 8; j += 2) {
+                    /* tmp[i + j] and tmp[i + j + 1] as one word (unaligned when i is odd: build it) */
+                    u32 x = (u16)tmp[i + j] | ((u32)(u16)tmp[i + j + 1] << 16);
+                    __asm__("smlald %0, %1, %2, %3" : "+r"(lo), "+r"(hi) : "r"(x), "r"(fp[j >> 1]));
+                }
+                {
+                    s64 sample = (s64)(((u64)hi << 32) | lo);
+                    buf[i] = clamp16((s32)(sample >> 15));
+                }
+#else
                 s64 sample = 0x4000; // round term
                 for (j = 0; j < 8; j++) {
                     sample += tmp[i + j] * rspa.filter[7 - j];
                 }
                 buf[i] = clamp16((s32)(sample >> 15));
+#endif
             }
             memcpy(tmp, tmp + 8, 8 * sizeof(s16));
             buf += 8;
@@ -549,6 +610,52 @@ static void aUnkCmd19Impl(u8 f, u16 count, u16 out_addr, u16 in_addr) {
     } while (nbytes > 0);
 }
 
+#if defined(__3DS__) && defined(__ARM_ARCH_6K__)
+/* PORT (2026-09-30): self-test of the ARMv6 SIMD paths against the scalar reference (random inputs);
+ * logged once at the first audio task. Mismatches = the optimization is not bit-exact. */
+static void PortAudio_SimdSelfTest(void) {
+    u32 seed = 12345, bad = 0, n;
+    for (n = 0; n < 20000; n++) {
+        s32 v;
+        s16 a, b;
+        seed = seed * 1664525u + 1013904223u;
+        v = (s32)seed >> 8; /* wide range around +-2^23 */
+        a = clamp16(v);
+        b = (v < -0x8000) ? -0x8000 : (v > 0x7fff) ? 0x7fff : (s16)v;
+        if (a != b) bad++;
+    }
+    for (n = 0; n < 2000; n++) {
+        s16 tmp[16], filt[8], frev[8] __attribute__((aligned(4)));
+        int i, j;
+        for (i = 0; i < 16; i++) { seed = seed * 1664525u + 1013904223u; tmp[i] = (s16)(seed >> 16); }
+        for (i = 0; i < 8; i++) { seed = seed * 1664525u + 1013904223u; filt[i] = (s16)(seed >> 16); }
+        for (j = 0; j < 8; j++) frev[j] = filt[7 - j];
+        for (i = 0; i < 8; i++) {
+            s64 ref = 0x4000;
+            u32 lo = 0x4000, hi = 0;
+            const u32* fp = (const u32*)frev;
+            for (j = 0; j < 8; j++) ref += tmp[i + j] * filt[7 - j];
+            for (j = 0; j < 8; j += 2) {
+                u32 x = (u16)tmp[i + j] | ((u32)(u16)tmp[i + j + 1] << 16);
+                __asm__("smlald %0, %1, %2, %3" : "+r"(lo), "+r"(hi) : "r"(x), "r"(fp[j >> 1]));
+            }
+            if ((s64)(((u64)hi << 32) | lo) != ref) bad++;
+        }
+    }
+    for (n = 0; n < 20000; n++) { /* QADD16 lanes vs clamp16(a + b) */
+        u32 a2, b2, r2;
+        s16 a0, a1, b0, b1;
+        seed = seed * 1664525u + 1013904223u; a2 = seed;
+        seed = seed * 1664525u + 1013904223u; b2 = seed;
+        a0 = (s16)a2, a1 = (s16)(a2 >> 16), b0 = (s16)b2, b1 = (s16)(b2 >> 16);
+        r2 = a2;
+        __asm__("qadd16 %0, %0, %1" : "+r"(r2) : "r"(b2));
+        if ((s16)r2 != clamp16(a0 + b0) || (s16)(r2 >> 16) != clamp16(a1 + b1)) bad++;
+    }
+    PortDbgX("[audio] SIMD self-test mismatches (must be 0)", bad);
+}
+#endif
+
 /* ---- dispatcher: decode the Acmd words exactly as abi.h / synthesis.c encode them --------- */
 
 void PortAudio_RunTask(OSTask* task) {
@@ -557,9 +664,25 @@ void PortAudio_RunTask(OSTask* task) {
     if (task == NULL || task->t.data_ptr == NULL || !sPortAudioUcodeEnable) return;
     cmd = (const Acmd*)task->t.data_ptr;
     n = (u32)(task->t.data_size / sizeof(Acmd));
+#if defined(__3DS__) && defined(__ARM_ARCH_6K__)
+    {
+        static int sTested;
+        if (!sTested) {
+            sTested = 1;
+            PortAudio_SimdSelfTest();
+        }
+    }
+#endif
     if (n > 8192) n = 8192;
     for (k = 0; k < n; k++) {
         u32 w0 = cmd[k].words.w0, w1 = cmd[k].words.w1;
+#ifdef __3DS__
+        /* perf_stages=1: time per microcode operation (3ds_main.c reports the most expensive) */
+        extern int gPortPerfStagesOn;
+        extern u64 gPortPerfAudOpTicks[32];
+        extern u64 svcGetSystemTick(void);
+        u64 tOp = gPortPerfStagesOn ? svcGetSystemTick() : 0;
+#endif
         switch (w0 >> 24) {
             case A_SPNOOP:
             case A_UNK3:
@@ -637,5 +760,8 @@ void PortAudio_RunTask(OSTask* task) {
                 break;
             }
         }
+#ifdef __3DS__
+        if (gPortPerfStagesOn) gPortPerfAudOpTicks[(w0 >> 24) & 31] += svcGetSystemTick() - tOp;
+#endif
     }
 }

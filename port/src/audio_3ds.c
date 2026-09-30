@@ -206,7 +206,12 @@ static void Port3ds_AudioWorkerStart(void) {
     svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
     core = n3ds ? 2 : 1;
     if (!n3ds) {
-        APT_SetAppCpuTimeLimit(30); /* Old 3DS: let the app use up to 30% of the system core */
+        /* Old 3DS: the audio microcode needs ~33% of the system core (measured: 5.3-6.0 ms per task at
+         * 268 MHz, 60 tasks/s). Stock firmware allows at most 30%; Luma3DS allows up to 89%, but 80%
+         * has been reported to hard-lock when opening the Rosalina menu. Ask for 55%, else 30%. */
+        if (R_FAILED(APT_SetAppCpuTimeLimit(55))) {
+            APT_SetAppCpuTimeLimit(30);
+        }
     }
     sAudioWorker = threadCreate(Port3ds_AudioWorkerMain, NULL, 16 * 1024, prio > 0x18 ? prio - 1 : prio, core, true);
     if (sAudioWorker == NULL && n3ds) {

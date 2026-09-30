@@ -57,6 +57,7 @@ unsigned short PortInput_GetPad(signed char* outX, signed char* outY) {
 /* PORT (2026-09-30): widescreen option (gfx_pc.c gPortWidescreen): SELECT toggles it (the N64 pad has
  * no SELECT), saved in sdmc:/3ds/oot/settings.txt. Off = the N64's 4:3 picture with side bars. */
 #define PORT_SETTINGS_PATH "sdmc:/3ds/oot/settings.txt"
+static int sO3dsSimSetting; /* o3ds_sim as read from settings.txt (not perf_ab's run-time toggling) */
 static void Port3ds_SaveSettings(void) {
     extern int gPortWidescreen;
     FILE* f = fopen(PORT_SETTINGS_PATH, "w");
@@ -65,9 +66,12 @@ static void Port3ds_SaveSettings(void) {
         fprintf(f, "widescreen=%d\n", gPortWidescreen ? 1 : 0);
         fprintf(f, "hud=%d\n", gPortHudTop ? 1 : 0);
         {
-            extern int gPortO3dsSim, gPortPerfStagesOn;
-            if (gPortO3dsSim) fprintf(f, "o3ds_sim=1\n");
+            /* measurement switches are written back as they were read (perf_ab toggles gPortO3dsSim at
+             * run time; saving that state made the next boot start in Old-3DS speed) */
+            extern int gPortPerfStagesOn, gPortPerfAB;
+            if (sO3dsSimSetting) fprintf(f, "o3ds_sim=1\n");
             if (gPortPerfStagesOn) fprintf(f, "perf_stages=1\n");
+            if (gPortPerfAB) fprintf(f, "perf_ab=1\n");
         }
         fclose(f);
     }
@@ -94,6 +98,11 @@ static void Port3ds_LoadSettings(void) {
         if (sscanf(line, "o3ds_sim=%d", &v) == 1) {
             extern int gPortO3dsSim;
             gPortO3dsSim = v != 0;
+            sO3dsSimSetting = v != 0;
+        }
+        if (sscanf(line, "perf_ab=%d", &v) == 1) {
+            extern int gPortPerfAB;
+            gPortPerfAB = v != 0;
         }
         if (sscanf(line, "perf_stages=%d", &v) == 1) {
             extern int gPortPerfStagesOn;
@@ -752,6 +761,25 @@ void PortGfx_FrameReady(void) {}
  * wait whole retraces until R_UPDATE_RATE retrace periods have passed since the previous update,
  * pumping audio once per retrace. A frame that renders late simply runs late (like N64 lag). */
 static unsigned sPortAudioPumps = 0;
+/* PORT PERF (2026-09-30): audio pumps also run DURING rendering. On the N64 the audio thread preempts the
+ * game whenever a retrace arrives; here pumps only ran after the frame, so a slow frame (Old 3DS: 100 ms)
+ * caught up with 5-6 back-to-back pumps, each waiting for the previous microcode task on the worker
+ * core (measured 17-31 ms of main-thread waiting per frame, O3DS-sim). The display-list walker calls
+ * Port3ds_MaybePumpAudio every 256 commands: one pump per elapsed retrace, so the worker's microcode
+ * overlaps the rest of the frame. The display list is complete by then; audio only touches audio state. */
+static double sLastPumpMs;  /* time of the last pump (any source) */
+static int sMidFramePumps;  /* pumps since the previous Port3ds_PaceFrame */
+#define PORT_RETRACE_MS (1000.0 / 59.83)
+void Port3ds_MaybePumpAudio(void) {
+    extern void Port3ds_PumpAudio(void);
+    double now = (double)osGetTime();
+    if (sLastPumpMs != 0.0 && now - sLastPumpMs >= PORT_RETRACE_MS) {
+        Port3ds_PumpAudio();
+        sMidFramePumps++;
+        sLastPumpMs += PORT_RETRACE_MS;
+        if (now - sLastPumpMs > 4 * PORT_RETRACE_MS) sLastPumpMs = now; /* far behind: don't burst */
+    }
+}
 static void Port3ds_PaceFrame(void) {
     extern void* gRegEditor;
     extern void Port3ds_PumpAudio(void);
@@ -761,8 +789,9 @@ static void Port3ds_PaceFrame(void) {
     if (gRegEditor) rate = *(short*)((char*)gRegEditor + 0x14 + 126 * 2); /* R_UPDATE_RATE = SREG(30) */
     if (rate < 1) rate = 1;
     if (rate > 6) rate = 6;
-    int pumped = 0;
+    int pumped = sMidFramePumps; /* already done during rendering */
     u64 now;
+    sMidFramePumps = 0;
     for (;;) {
         /* PORT (2026-09-30): check the budget BEFORE waiting. The loop used to wait for a retrace
          * first, so a frame that had already used its budget (hardware: ~44 ms of work vs 50 ms)
@@ -771,6 +800,7 @@ static void Port3ds_PaceFrame(void) {
         if (sLast != 0 && (double)(osGetTime() - sLast) >= rate * kRetraceMs) break;
         gspWaitForVBlank();
         Port3ds_PumpAudio(); /* build+dispatch one audio RSP task per retrace, as on N64 */
+        sLastPumpMs = (double)osGetTime();
         pumped++;
         if (sLast == 0 || (double)(osGetTime() - sLast) + 2.0 >= rate * kRetraceMs) break;
     }
@@ -781,6 +811,7 @@ static void Port3ds_PaceFrame(void) {
         int due = (int)((double)(now - sLast) / kRetraceMs + 0.5);
         if (due > 8) due = 8;
         while (pumped < due) { Port3ds_PumpAudio(); pumped++; }
+        sLastPumpMs = (double)osGetTime();
     }
     sPortAudioPumps += (unsigned)pumped;
     sLast = now;
@@ -830,6 +861,19 @@ static void Port3ds_PerfReport(unsigned frames) {
         PortDbgX("perf us/task   audio ucode (worker)",
                  gPortPerfAudioTasks ? (unsigned)(gPortPerfAudioUcode / gPortPerfAudioTasks / (SYSCLOCK_ARM11 / 1000000)) : 0);
         gPortPerfAudioUcode = gPortPerfAudioWait = gPortPerfAudioMain = 0;
+        { /* perf_stages: the 5 most expensive microcode ops, as op << 20 | us per frame */
+            extern u64 gPortPerfAudOpTicks[32];
+            extern int gPortPerfStagesOn;
+            int k, i;
+            for (k = 0; k < 5 && gPortPerfStagesOn; k++) {
+                int best = 0;
+                for (i = 1; i < 32; i++) if (gPortPerfAudOpTicks[i] > gPortPerfAudOpTicks[best]) best = i;
+                if (gPortPerfAudOpTicks[best] == 0) break;
+                PortDbgX("perf audio op<<20|us/frame", ((unsigned)best << 20) | (unsigned)(gPortPerfAudOpTicks[best] / div));
+                gPortPerfAudOpTicks[best] = 0;
+            }
+            memset(gPortPerfAudOpTicks, 0, sizeof(gPortPerfAudOpTicks));
+        }
         gPortPerfAudioTasks = 0;
     }
     PortDbgX("perf tris/frame", gPortPerfTris / frames);
@@ -856,6 +900,18 @@ static void Port3ds_PerfReport(unsigned frames) {
         PortDbgX("perf dl commands/frame", gPortPerfDlCmds / frames);
         PortDbgX("perf dl G_DL calls/frame", gPortPerfDlCalls / frames);
         gPortPerfMemQueries = gPortPerfMemHits = gPortPerfDlCmds = gPortPerfDlCalls = 0;
+        { /* the 8 most frequent opcodes: opcode << 16 | count per frame */
+            extern u32 gPortPerfOpCounts[256];
+            int k, i;
+            for (k = 0; k < 8; k++) {
+                int best = -1;
+                for (i = 0; i < 256; i++) if (best < 0 || gPortPerfOpCounts[i] > gPortPerfOpCounts[best]) best = i;
+                if (gPortPerfOpCounts[best] == 0) break;
+                PortDbgX("perf dl top opcode<<16|count", ((unsigned)best << 16) | (gPortPerfOpCounts[best] / frames));
+                gPortPerfOpCounts[best] = 0;
+            }
+            memset(gPortPerfOpCounts, 0, sizeof(gPortPerfOpCounts));
+        }
     }
     sPerfGame = sPerfDl = sPerfSwap = sPerfPace = 0;
     gPortPerfTris = gPortPerfDraws = 0;
@@ -890,6 +946,18 @@ void PortGfx_RunTask(OSTask* task) {
           PortDbgX("perf audio pumps/s x10", (unsigned)((u64)sPortAudioPumps * 10000ull / (t1 - t0 ? t1 - t0 : 1)));
           sPortAudioPumps = 0;
           Port3ds_PerfReport(n);
+          { /* perf_ab=1: alternate New 3DS speed / Old 3DS approximation every 4 reports (~1 min) so one
+             * play session measures both (docs/3ds-60fps-plan.md P0) */
+              extern int gPortPerfAB, gPortO3dsSim;
+              static unsigned sReports;
+              bool n3ds = false;
+              APT_CheckNew3DS(&n3ds);
+              PortDbgX(gPortO3dsSim ? "perf mode O3DS-sim (268MHz no L2)" : "perf mode N3DS (804MHz L2)", 1);
+              if (gPortPerfAB && n3ds && (++sReports % 4) == 0) {
+                  gPortO3dsSim = !gPortO3dsSim;
+                  osSetSpeedupEnable(!gPortO3dsSim);
+              }
+          }
           n = 0; t0 = t1; } }
 }
 
@@ -958,6 +1026,7 @@ void PortLogFastX(const char* label, unsigned val) {
  * with svcQueryMemory (a kernel call). The app's memory map is fixed after boot (heaps are reserved up
  * front), so readable ranges already confirmed are remembered: 8 most recent, round-robin. */
 u32 gPortPerfMemQueries, gPortPerfMemHits;
+u64 gPortPerfAudOpTicks[32]; /* audio_microcode.c: ticks per microcode op (perf_stages) */
 unsigned PortMem_ReadableEnd(unsigned addr) {
     static unsigned sBase[8], sEnd[8];
     static int sNext;

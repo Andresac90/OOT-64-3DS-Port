@@ -71,3 +71,68 @@ running at its designed 20 updates/s (N64-identical gameplay). Status 2026-09-30
   are once per logic frame, and are fine.
 - **Interpolation artifacts** at teleports/cuts: detect big jumps and skip interpolation for that
   slot, as SoH does.
+
+## Progress log
+
+### 2026-09-30
+
+**P0 (measure):** `o3ds_sim`, `perf_stages` and `perf_ab` settings are shipped. `perf_ab=1` alternates
+N3DS / O3DS-sim speed every 4 reports; each report is tagged "perf mode ...".
+
+**Hardware (v11, perf_stages on, N3DS), display-list CPU 20–35 ms per frame:**
+
+| Stage | Time per frame |
+|---|---|
+| Triangle setup | 6–11 ms |
+| Flush | ~3 ms |
+| Vertex transform | 1.6–3.3 ms |
+| Textures | 0.5–1.4 ms |
+| Not attributed (DL walk, other commands, timer overhead) | 10–18 ms |
+
+**Command mix** (Azahar, title demo; counts are exact): 5,728 DL commands per frame for 1,415 triangles
+and 201 draws.
+
+| Command | Per frame |
+|---|---|
+| TRI2 | 799 |
+| SETTILE | 684 |
+| PIPESYNC | 675 |
+| LOADSYNC | 384 |
+| SETTIMG | 384 |
+| SETTILESIZE | 376 |
+| VTX | 257 |
+| LOADBLOCK | 248 |
+
+Texture setup and state commands dominate, so per-command overhead is the target.
+
+**P1 wins so far (render output verified identical by fbdiff, boot_title):**
+- `PortMem_ReadableEnd` caches confirmed ranges: 153 → 0 `svcQueryMemory` kernel calls per frame.
+- CI palette hashes are computed once per TLUT load instead of on every CI texture lookup (was 256
+  multiply-xors per CI8 lookup).
+
+**Hardware A/B (v16, `perf_ab=1`):**
+
+| Mode | Updates/s | Display list | Audio on the main thread | Microcode per task |
+|---|---|---|---|---|
+| N3DS | 19.1–20.2 | 20–32 ms | 4–5 ms | 1.8–2.5 ms |
+| O3DS-sim | 7.7–10.5 | 48–73 ms | 23–39 ms | 5.3–6.0 ms (≈ 34% of a core at 60 tasks/s) |
+
+**P1 audio (v17):**
+- Audio pumps run *during* display-list interpretation (every 256 commands, one per elapsed retrace),
+  the way the N64 audio thread preempts rendering. The worker's microcode now overlaps the frame
+  instead of back-to-back catch-up waits after it.
+- On the Old 3DS, the syscore time limit is 55%, falling back to 30%. Stock firmware allows 30%, Luma
+  89%; 80% has been reported to hang the Rosalina menu.
+- ARMv6 SIMD in the microcode: SSAT clamps, SMLALD for the FILTER FIR, QADD16 for ENVMIXER
+  accumulation. A startup self-test compares them against the scalar code on random data:
+  0 mismatches.
+
+  | Op (Azahar, us/frame) | Before | After |
+  |---|---|---|
+  | ENVMIXER | 5767 | 3822 |
+  | FILTER | 4680 | 3482 |
+  | ADPCM | 3341 | 3132 |
+  | RESAMPLE | 2323 | 2106 |
+  | MIXER | 1303 | 1040 |
+
+  Total −23%.

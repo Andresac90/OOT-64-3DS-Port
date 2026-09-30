@@ -237,7 +237,10 @@ u32 gPortPerfTexImports;
 /* opt-in: compile-time PORT_PERF_STAGES, or at run time with perf_stages=1 in settings.txt (one tick
  * read per triangle while on) */
 int gPortPerfStagesOn;
+u32 gPortPerfDlCmds, gPortPerfDlCalls; /* display-list commands interpreted / G_DL calls, per report */
+u32 gPortPerfOpCounts[256];              /* per opcode, per report (top ones logged) */
 int gPortO3dsSim;
+int gPortPerfAB; /* settings perf_ab=1: 3ds_main.c alternates N3DS / O3DS-sim speed for measurements */
 #ifdef PORT_PERF_STAGES
 #define PERF_T() svcGetSystemTick()
 #else
@@ -563,6 +566,8 @@ void gfx_texture_cache_invalidate_range(const void* start, uint32_t size) {
 }
 
 static uint32_t gfx_ci_palette_hash(uint32_t fmt, uint32_t siz);
+static uint32_t sTlutHash16[16], sTlutHash256;
+static int sTlutHashValid;
 static const struct TileDesc* sImpTile; /* tile of the texture being imported (import_texture) */
 static struct TextureHashmapNode* sImpNode; /* its cache node */
 
@@ -2106,22 +2111,35 @@ static void gfx_dp_load_tlut(uint8_t tile, uint32_t high_index) {
     for (i = 0; i < count && dest + i < 256; i++) {
         rdp.tlut[dest + i] = (TEX_SRC_BYTE_X(src + i * 2, sw) << 8) | TEX_SRC_BYTE_X(src + i * 2 + 1, sw);
     }
+    sTlutHashValid = 0; /* palette hashes are recomputed on the next CI lookup */
     rdp.textures_changed[0] = true;
     rdp.textures_changed[1] = true;
 }
 
 /* CI textures depend on the palette colors they index: part of the texture cache key */
+/* PORT PERF (2026-09-30): hashes of the 16 CI4 banks and the whole CI8 palette, computed once per TLUT
+ * change instead of on every CI texture lookup (256 multiply-xors each, ~1-2 us on the 3DS CPU). */
 static uint32_t gfx_ci_palette_hash(uint32_t fmt, uint32_t siz) {
-    uint32_t h = 2166136261u, i, first, n;
+    uint32_t i, k;
     if (fmt != G_IM_FMT_CI) {
         return 0;
     }
-    first = (siz == G_IM_SIZ_4b) ? (uint32_t)(sImpTile->palette & 15) * 16 : 0;
-    n = (siz == G_IM_SIZ_4b) ? 16 : 256;
-    for (i = 0; i < n; i++) {
-        h = (h ^ rdp.tlut[first + i]) * 16777619u;
+    if (!sTlutHashValid) {
+        uint32_t h256 = 2166136261u;
+        for (k = 0; k < 16; k++) {
+            uint32_t h = 2166136261u;
+            for (i = 0; i < 16; i++) {
+                h = (h ^ rdp.tlut[k * 16 + i]) * 16777619u;
+            }
+            sTlutHash16[k] = h | 1; /* never 0, which means "not CI" */
+        }
+        for (i = 0; i < 256; i++) {
+            h256 = (h256 ^ rdp.tlut[i]) * 16777619u;
+        }
+        sTlutHash256 = h256 | 1;
+        sTlutHashValid = 1;
     }
-    return h | 1; /* never 0, which means "not CI" */
+    return (siz == G_IM_SIZ_4b) ? sTlutHash16[sImpTile->palette & 15] : sTlutHash256;
 }
 
 static void gfx_dp_load_block(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t lrs, uint32_t dxt) {
@@ -2615,6 +2633,11 @@ static void gfx_run_dl(Gfx* cmd) {
         uint32_t opcode = cmd->words.w0 >> 24;
 #ifdef __3DS__
         sPortCurCmd = cmd; /* draw attribution: which DL command produced a draw */
+        if ((++gPortPerfDlCmds & 255) == 0) {
+            extern void Port3ds_MaybePumpAudio(void);
+            Port3ds_MaybePumpAudio(); /* audio preempts rendering on each retrace, like the N64 */
+        }
+        { extern u32 gPortPerfOpCounts[256]; gPortPerfOpCounts[opcode & 0xFF]++; }
 #endif
         if (opcode == (uint8_t)G_LOAD_UCODE) { /* track which microcode the DL runs under */
             extern uint64_t gspS2DEX2d_fifoTextStart[];
@@ -2718,6 +2741,9 @@ static void gfx_run_dl(Gfx* cmd) {
 #endif
                 break;
             case G_DL:
+#ifdef __3DS__
+                gPortPerfDlCalls++;
+#endif
                 if (C0(16, 1) == 0) {
                     // Push return address
                     gfx_run_dl((Gfx *)seg_addr(cmd->words.w1));

@@ -166,6 +166,14 @@ void ConsoleLogo_Main(GameState* thisx) {
     ConsoleLogoState* this = (ConsoleLogoState*)thisx;
 
     OPEN_DISPS(this->state.gfxCtx, "../z_title.c", 494);
+#ifdef __3DS__
+    {
+        /* PORT (2026-09-30): stereo - the N64 logo is a splash screen: flat at the screen. The spinning
+         * "N" (3D) sat ~8 px behind the flat "NINTENDO" text: one logo at two depths (hardware feedback). */
+        extern int gPortStereoFlatScene;
+        gPortStereoFlatScene = 1;
+    }
+#endif
 
     gSPSegment(POLY_OPA_DISP++, 0, NULL);
     gSPSegment(POLY_OPA_DISP++, 1, this->staticSegment);
