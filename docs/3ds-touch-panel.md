@@ -40,7 +40,7 @@ ZL/ZR or the C-stick. The New 3DS extras are shortcuts only.
 |---|---|
 | VIEW | Holds C-up (first person, or talk to Navi). |
 | Y / ZL / X | Hold the matching C button. The pad shows the equipped icon (live from `interfaceCtx->iconItemSegment`), the ammo count (red at 0), and is greyed when the game disables that button. The "ZL" label only appears on a New 3DS. |
-| OCARINA | Tap to play the owned ocarina without putting it on a C button. It works like a virtual fifth item button (`Player_GetItemOnButton(play, 4)`), so the game's normal rules still apply. It is refused where the ocarina is restricted, where every C button is disabled, and in bombchu bowling. |
+| OCARINA | Tap to play the owned ocarina without putting it on a C button. It works like a virtual fifth item button (`Port_VirtualOcarinaItem`), so the game's normal rules still apply. It is refused where the ocarina is restricted, where every C button is disabled, and in bombchu bowling. |
 | BOOTS | Tap to cycle through owned boots: Kokiri → Iron → Hover (Iron and Hover need adult Link). It uses the same path as the pause menu (`Inventory_ChangeEquipment` + `Player_SetEquipmentData`) and plays the "decide" sound. |
 | SCREEN | Tap to toggle 4:3 and widescreen. Saved to `sdmc:/3ds/oot/settings.txt`. |
 | GEAR / MAP / ITEMS | Press START with that pause page preselected (`gPortTouchPage` → `KaleidoSetup_Update`). Tapping any tab while paused closes the menu (START). |
@@ -64,7 +64,7 @@ game's fade: the map is blank whenever `minimapAlpha == 0` (cutscenes, some HUD 
 | `src/code/z_map_exp.c` | `Minimap_ExportToBottom()` runs from `Minimap_Draw`. It fills `gPortMinimap` using the same visibility rules and positions as the drawing code, then skips the top-screen draw. The compass positions reuse the `Minimap_DrawCompassIcons` math: the overlay is an ortho view with 1 unit = 1 pixel and the origin at the screen centre, so `x = 160 + (R_COMPASS_OFFSET_X + posX/R_COMPASS_SCALE_X)/10` and `y = 120 - (R_COMPASS_OFFSET_Y - posZ/R_COMPASS_SCALE_Y)/10`. |
 | `src/code/z_map_mark.c` | `MapMark_Export()` copies the chest/boss marks of the current dungeon room (at `x + 204`, `y + 140`, as `MapMark_DrawForDungeon` does). |
 | `src/code/z_parameter.c` | `Interface_Draw` publishes `gPortHudIconSeg` and bumps `gPortHudSerial` (used to tell whether the HUD, and so the icon pointer, is live). It also sets `gPortHudKeys` where the small-key counter is drawn. |
-| `src/overlays/actors/ovl_player_actor/z_player.c` | Adds the virtual OCARINA button (index 4 in `Player_GetItemOnButton`, which the "put away the item" check also accepts) and `Port_CycleBoots()`. Both are consumed in `Player_ProcessItemButtons`, so they only act when the player could use an item anyway. |
+| `src/overlays/actors/ovl_player_actor/z_player.c` | Adds the virtual OCARINA button (`Port_VirtualOcarinaItem`, also accepted by the "put away the item" check) and `Port_CycleBoots()`. It must **not** be index 4 of `Player_GetItemOnButton`: there, index 4 means "no item button pressed". Reusing it made Link play the ocarina every idle frame, including the title demo (fixed 2026-09-30). Both are consumed in `Player_ProcessItemButtons`, so they only act when the player could use an item anyway. |
 | `src/code/z_kaleido_setup.c` | On START, `gPortTouchPage` (if ≥ 0) selects the pause page. |
 
 ### Port side

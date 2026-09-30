@@ -2874,6 +2874,22 @@ s32 Actor_CullingVolumeTest(PlayState* play, Actor* actor, Vec3f* projPos, f32 p
         // a frustum shape in front of the camera and a box shape behind the camera.
         invW = (projW < 1.0f) ? 1.0f : 1.0f / (f32)projW;
 
+#ifdef __3DS__
+        {
+            /* PORT: widescreen draws 400/320 = 1.25x the N64's horizontal view; actors culled at the
+             * 4:3 edge vanished in the side bars */
+            extern int gPortWidescreen;
+            if (gPortWidescreen) {
+                invW *= 0.8f;
+                if ((((fabsf(projPos->x) - actor->cullingVolumeScale) * invW) < 1.0f) &&
+                    (((projPos->y + actor->cullingVolumeDownward) * invW * 1.25f) > -1.0f) &&
+                    (((projPos->y - actor->cullingVolumeScale) * invW * 1.25f) < 1.0f)) {
+                    return true;
+                }
+                return false;
+            }
+        }
+#endif
         if ((((fabsf(projPos->x) - actor->cullingVolumeScale) * invW) < 1.0f) &&
             (((projPos->y + actor->cullingVolumeDownward) * invW) > -1.0f) &&
             (((projPos->y - actor->cullingVolumeScale) * invW) < 1.0f)) {

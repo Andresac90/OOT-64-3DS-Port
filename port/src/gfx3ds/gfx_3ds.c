@@ -154,12 +154,20 @@ static void gfx_3ds_update_stereo(void) {
     }
     { extern void PortDbg(const char*); PortDbg(want ? "[stereo] enter" : "[stereo] leave"); }
     if (want) {
-        C3D_RenderTarget* st = C3D_RenderTargetCreate(240, 2 * STEREO_EYE_OFFSET, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
-        if (st == NULL) {
+        C3D_RenderTarget* st;
+        static int sRetryWait;
+        if (sRetryWait > 0) { /* a failed switch retries once a second, not every frame */
+            sRetryWait--;
             gPortStereoSep = 0.0f;
             return;
         }
-        for (e = 0; e < 2; e++) {
+        /* free the mono target FIRST: VRAM cannot hold both (plus the pause menu's off-screen targets,
+         * which stay allocated once used; creating the stereo target next to the mono one failed on
+         * hardware after a pause, and 3D never came back) */
+        C3D_RenderTargetDelete(sTarget); /* also unlinks it from the top screen */
+        sTarget = NULL;
+        st = C3D_RenderTargetCreate(240, 2 * STEREO_EYE_OFFSET, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+        for (e = 0; e < 2 && st != NULL; e++) {
             sEyeOut[e] = C3D_RenderTargetCreate(240, STEREO_EYE_OFFSET, GPU_RB_RGBA8, -1);
             if (sEyeOut[e] != NULL) {
                 /* alias half e of the stereo target (the tiled buffer is contiguous along the long axis) */
@@ -168,15 +176,18 @@ static void gfx_3ds_update_stereo(void) {
                 sEyeOut[e]->ownsColor = false;
             }
         }
-        if (sEyeOut[0] == NULL || sEyeOut[1] == NULL) {
+        if (st == NULL || sEyeOut[0] == NULL || sEyeOut[1] == NULL) {
+            { extern void PortDbg(const char*); PortDbg("[stereo] no VRAM for the stereo target, staying mono"); }
             for (e = 0; e < 2; e++) {
                 if (sEyeOut[e] != NULL) C3D_RenderTargetDelete(sEyeOut[e]), sEyeOut[e] = NULL;
             }
-            C3D_RenderTargetDelete(st);
+            if (st != NULL) C3D_RenderTargetDelete(st);
+            sTarget = C3D_RenderTargetCreate(sMonoW, sMonoH, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+            C3D_RenderTargetSetOutput(sTarget, GFX_TOP, GFX_LEFT, sMonoFlags);
             gPortStereoSep = 0.0f;
+            sRetryWait = 60;
             return;
         }
-        C3D_RenderTargetDelete(sTarget); /* also unlinks it from the top screen */
         sTarget = st;
         {
             u32 flags = GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
@@ -189,16 +200,12 @@ static void gfx_3ds_update_stereo(void) {
         gfxSet3D(true);
         gGfx3DSMode = GFX_3DS_MODE_STEREO;
     } else {
-        C3D_RenderTarget* mono = C3D_RenderTargetCreate(sMonoW, sMonoH, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
-        if (mono == NULL) {
-            return; /* stay in stereo (with the eyes still drawn) rather than show nothing */
-        }
         for (e = 0; e < 2; e++) {
             C3D_RenderTargetDelete(sEyeOut[e]); /* not the owner of the color buffer */
             sEyeOut[e] = NULL;
         }
-        C3D_RenderTargetDelete(sTarget);
-        sTarget = mono;
+        C3D_RenderTargetDelete(sTarget); /* first, same VRAM reason as above */
+        sTarget = C3D_RenderTargetCreate(sMonoW, sMonoH, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
         C3D_RenderTargetSetOutput(sTarget, GFX_TOP, GFX_LEFT, sMonoFlags);
         gfxSet3D(false);
         gfxSetWide(sMonoWide);

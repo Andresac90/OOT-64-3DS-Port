@@ -131,6 +131,7 @@ static struct RSP {
     Light_t current_lights[MAX_LIGHTS + 1];
     float current_lights_coeffs[MAX_LIGHTS][3];
     float current_lookat_coeffs[2][3]; // lookat_x, lookat_y
+    Light_t current_lookat[2]; /* the game's gSPLookAt (G_MV_LIGHT offsets 0 and 24) */
     uint8_t current_num_lights; // includes ambient light
     bool lights_changed;
     
@@ -1124,10 +1125,20 @@ static void gfx_sp_vertex_impl(size_t n_vertices, size_t dest_index, const Vtx *
                 for (int i = 0; i < rsp.current_num_lights - 1; i++) {
                     calculate_normal_dir(&rsp.current_lights[i], rsp.current_lights_coeffs[i]);
                 }
-                static const Light_t lookat_x = {{0, 0, 0}, 0, {0, 0, 0}, 0, {127, 0, 0}, 0};
-                static const Light_t lookat_y = {{0, 0, 0}, 0, {0, 0, 0}, 0, {0, 127, 0}, 0};
-                calculate_normal_dir(&lookat_x, rsp.current_lookat_coeffs[0]);
-                calculate_normal_dir(&lookat_y, rsp.current_lookat_coeffs[1]);
+                /* PORT (2026-09-30): the game's LookAt (camera direction for G_TEXTURE_GEN environment maps
+                 * and hilites), transformed like the lights - libultraship GfxSpVertex. This was a fixed
+                 * +x/+y (sm64 PC port), so every env-mapped surface sampled the wrong part of its texture:
+                 * dull swords/metal, the flat N64 boot logo. Until a LookAt arrives, the old fixed one. */
+                if (rsp.current_lookat[0].dir[0] == 0 && rsp.current_lookat[0].dir[1] == 0 &&
+                    rsp.current_lookat[0].dir[2] == 0) {
+                    static const Light_t lookat_x = {{0, 0, 0}, 0, {0, 0, 0}, 0, {127, 0, 0}, 0};
+                    static const Light_t lookat_y = {{0, 0, 0}, 0, {0, 0, 0}, 0, {0, 127, 0}, 0};
+                    calculate_normal_dir(&lookat_x, rsp.current_lookat_coeffs[0]);
+                    calculate_normal_dir(&lookat_y, rsp.current_lookat_coeffs[1]);
+                } else {
+                    calculate_normal_dir(&rsp.current_lookat[0], rsp.current_lookat_coeffs[0]);
+                    calculate_normal_dir(&rsp.current_lookat[1], rsp.current_lookat_coeffs[1]);
+                }
                 rsp.lights_changed = false;
             }
             
@@ -1169,8 +1180,20 @@ static void gfx_sp_vertex_impl(size_t n_vertices, size_t dest_index, const Vtx *
                 doty += vn->n[1] * rsp.current_lookat_coeffs[1][1];
                 doty += vn->n[2] * rsp.current_lookat_coeffs[1][2];
                 
-                U = (int32_t)((dotx / 127.0f + 1.0f) / 4.0f * rsp.texture_scaling_factor.s);
-                V = (int32_t)((doty / 127.0f + 1.0f) / 4.0f * rsp.texture_scaling_factor.t);
+                /* libultraship: clamp, and G_TEXTURE_GEN_LINEAR maps through acos */
+                dotx /= 127.0f;
+                doty /= 127.0f;
+                dotx = dotx < -1.0f ? -1.0f : (dotx > 1.0f ? 1.0f : dotx);
+                doty = doty < -1.0f ? -1.0f : (doty > 1.0f ? 1.0f : doty);
+                if (rsp.geometry_mode & G_TEXTURE_GEN_LINEAR) {
+                    dotx = acosf(-dotx) / 4.0f;
+                    doty = acosf(-doty) / 4.0f;
+                } else {
+                    dotx = (dotx + 1.0f) / 4.0f;
+                    doty = (doty + 1.0f) / 4.0f;
+                }
+                U = (int32_t)(dotx * rsp.texture_scaling_factor.s);
+                V = (int32_t)(doty * rsp.texture_scaling_factor.t);
             }
         } else {
             d->color.r = v->cn[0];
@@ -1814,10 +1837,23 @@ static void gfx_sp_movemem(uint8_t index, uint8_t offset, const void* data) {
 #ifdef F3DEX_GBI_2
         case G_MV_LIGHT: {
             int lightidx = offset / 24 - 2;
-            if (lightidx >= 0 && lightidx <= MAX_LIGHTS) { // skip lookat
+            if (lightidx >= 0 && lightidx <= MAX_LIGHTS) {
                 // NOTE: reads out of bounds if it is an ambient light
                 memcpy(rsp.current_lights + lightidx, data, sizeof(Light_t));
+            } else if (lightidx < 0) { /* G_MVO_LOOKATX / G_MVO_LOOKATY */
+                /* guLookAt/guLookAtHilite always write col = colc = (0,0,0) for X and (0,0x80,0) for Y.
+                 * Anything else is not a LookAt: the N64 boot logo's gsSPLookAt(0x01002E50) points one
+                 * byte past the end of nintendo_rogo_static (0x2E50 bytes), so it reads whatever follows
+                 * in RAM (a bug of the original that happens to look fine on the N64). Keep the LookAt
+                 * the game built just before (ConsoleLogo_Draw's func_8002EABC) instead of garbage. */
+                const uint8_t* b = (const uint8_t*)data;
+                int y = offset / 24; /* 0 = X, 1 = Y */
+                uint8_t want = y ? 0x80 : 0x00;
+                if (b[0] == 0 && b[1] == want && b[2] == 0 && b[4] == 0 && b[5] == want && b[6] == 0) {
+                    memcpy(rsp.current_lookat + y, data, sizeof(Light_t));
+                }
             }
+            rsp.lights_changed = true;
             break;
         }
 #else
@@ -2254,7 +2290,10 @@ static void gfx_dp_fill_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t
     }
     
     /* widescreen: untextured fills spanning the N64's full width stretch to the 400-pixel screen */
-    sRectFullWidth = WIDE_ACTIVE() && ulx <= 0 && lrx >= SCREEN_WIDTH * 4;
+    /* 1/2-cycle fills (Environment_FillScreen, fbdemo fades) are gDPFillRectangle(0, 0, 319, 239): no
+     * extra pixel is added in those modes, so the right edge is 319 << 2; FILL mode reaches 320 << 2
+     * above. Requiring 320 << 2 left every fade/flash 4:3 in widescreen. */
+    sRectFullWidth = WIDE_ACTIVE() && ulx <= 0 && lrx >= (SCREEN_WIDTH - 1) * 4;
     uint64_t saved_combine_mode = rdp.combine_mode;
     /* only FILL mode writes the fill color; 1/2-cycle fill rects go through the combiner (prim-colored
      * fades, letterboxes, sky rects) - as in libultraship's GfxDpFillRectangle */

@@ -383,7 +383,27 @@ static int MapTexel(const PortMinimap* m, int tx, int ty, int* lum) { /* alpha 0
     return (nib & 1) ? 255 : 0;
 }
 
+static void DrawMapInto(int have);
+
+/* The bottom framebuffer is single-buffered and scanned out while we draw: repainting the parchment and
+ * then the map in place showed the half-drawn state (the map flashed on hardware). Draw into a shadow
+ * copy with the framebuffer's layout, then copy only the map columns over in one pass. */
 static void DrawMap(int have) {
+    static u16 sShadow[320 * 240];
+    u16* real = sFb;
+    int x;
+    sFb = sShadow;
+    DrawMapInto(have);
+    sFb = real;
+    for (x = MAP_X; x < MAP_X + MAP_W; x++) {
+        /* column x holds rows 239..0; the map's rows MAP_Y..MAP_Y+MAP_H-1 are contiguous in it */
+        int base = x * 240 + (239 - (MAP_Y + MAP_H - 1));
+        memcpy(&real[base], &sShadow[base], MAP_H * sizeof(u16));
+    }
+    sFbDirty = 1;
+}
+
+static void DrawMapInto(int have) {
     const PortMinimap* m = &gPortMinimap;
     float s, ox, oy, inv;
     int x, y, bx0, by0, bx1, by1, lum;
@@ -568,8 +588,23 @@ static unsigned short Port3ds_TouchUiPoll(void) {
 
     { /* minimap: redrawn every other poll while the game feeds it, cleared once when it stops */
         static int sMapShown;
+        static u32 sMapSig;
         if (sMapStale == 0 && (sPolls & 1)) {
-            DrawMap(1);
+            /* redraw only when something visible changed (arrows move by whole panel pixels) */
+            const PortMinimap* m = &gPortMinimap;
+            u32 sig = (u32)(uintptr_t)m->tex * 31u + (u32)m->w * 7u + (u32)m->h * 13u + m->compass * 17u +
+                      (u32)(int)(m->playerX * 2.0f) * 101u + (u32)(int)(m->playerY * 2.0f) * 1009u +
+                      (u32)(m->playerYaw >> 11) * 10007u + (u32)(int)m->startX * 3u + (u32)(int)m->startY * 5u +
+                      m->numMarks * 19u + m->numIcons * 23u + (u32)m->r * 29u + (u32)m->g * 37u;
+            if (m->tex != NULL && m->w > 0 && m->h > 0) { /* same buffer, new room: sample the texels */
+                const u8* t = m->tex;
+                int n = m->w * m->h / 2, k;
+                for (k = 0; k < 64; k++) sig = sig * 33u + t[(k * (n / 64)) ^ 7];
+            }
+            if (!sMapShown || sig != sMapSig) {
+                DrawMap(1);
+                sMapSig = sig;
+            }
             sMapShown = 1;
         } else if (sMapStale > 6 && sMapShown) {
             DrawMap(0);
@@ -675,6 +710,11 @@ static void Port3ds_PaceFrame(void) {
     int pumped = 0;
     u64 now;
     for (;;) {
+        /* PORT (2026-09-30): check the budget BEFORE waiting. The loop used to wait for a retrace
+         * first, so a frame that had already used its budget (hardware: ~44 ms of work vs 50 ms)
+         * still waited up to one more retrace: measured pace 14.7 ms/frame, 17.1 updates/s on a New
+         * 3DS instead of 20. A late frame now goes straight on (audio catches up below). */
+        if (sLast != 0 && (double)(osGetTime() - sLast) >= rate * kRetraceMs) break;
         gspWaitForVBlank();
         Port3ds_PumpAudio(); /* build+dispatch one audio RSP task per retrace, as on N64 */
         pumped++;

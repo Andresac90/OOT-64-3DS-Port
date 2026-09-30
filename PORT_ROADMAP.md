@@ -36,21 +36,33 @@ this section is the current status.
 - Before any hardware build: `grep UnmappedAccess` in the Azahar log must return 0. Azahar tolerates
   unmapped accesses that crash a real 3DS.
 
-**Open issues (reported on hardware 2026-09-30, next work):**
-1. The sword's metal material isn't shiny like the N64. Suspect the environment-map / texgen
-   (G_TEXTURE_GEN) path.
-2. The title screen shows no Link on Epona. Buttons respond and ocarina sounds play; the title demo
-   may be in the wrong mode.
-3. Large distant elements and fog don't match the N64. Suspect the fog range/formula or
-   far-plane/depth handling.
-4. In widescreen, parts of the background next to 3D geometry (Kokiri Forest sky) show as a black
-   rectangle. Switching the screen to 4:3 fixes it.
-5. After switching the screen mode, 3D stopped working even with the slider up. It came back only
-   through the HOME menu.
-6. 3D depth for pre-rendered 2D rooms needs a better choice. They are currently at a fixed middle
-   depth; the alternative is to match the characters' depth.
-7. The N64 logo's color/shading effect differs from the N64.
-8. The touch panel's OCARINA, BOOTS and the tabs haven't yet been checked on hardware.
+**Issues reported on hardware 2026-09-30, and what was found (after the milestone tag):**
+1. **Sword metal not shiny: fixed (root cause found; hardware check pending).** The renderer used a
+   fixed LookAt copied from the SM64 PC port. The game's `gSPLookAt` (G_MV_LIGHT offsets 0 and 24) was
+   dropped, so every `G_TEXTURE_GEN` environment map sampled the wrong part of its texture. The fix
+   stores it and transforms it like the lights (libultraship). It also adds the
+   `G_TEXTURE_GEN_LINEAR` acos mapping, and handles LookAts stored in ROM segments (bytes at k^7).
+2. **No Link on Epona on the title screen: fixed.** The touch panel's virtual OCARINA button reused
+   `Player_GetItemOnButton` index 4, which means "no button pressed". Link played the ocarina every
+   frame nothing was pressed, including during the title demo. It now uses its own function.
+3. Large distant elements and fog don't match the N64: **open**. Measure with fbdiff in Hyrule Field.
+4. **Black rectangle in widescreen: fixed.** Scenes without a sky (Kokiri Forest, `SKYBOX_UNSET_1D`)
+   clear to black and only cover the 4:3 view with geometry. Widescreen now clears to the fog color in
+   those scenes. Actor culling is also widened by 1.25× in widescreen, so actors no longer pop out in
+   the side bars.
+5. **3D not coming back: fixed.** Re-entering stereo created the stereo target while the 3 MB mono
+   target still existed. After the pause menu's off-screen targets are allocated, VRAM ran out. Now the
+   mono target is freed first, and retries back off.
+6. **3D depth of pre-rendered rooms: changed.** The picture now sits just behind the characters
+   (0.9 × shift). At 0.6 it sat in front of them.
+7. **N64 logo shading: text fixed.** The PICA clamps every TEV stage, and the general
+   `(A−B)·C+D` lowering saturated. It now uses `A·C + (D − B·C)`. fbdiff: logo error 3.3 → 1.5,
+   title screen 9.4 → 7.2. The spinning "N" still differs: the LookAt path is being checked.
+8. The touch panel's OCARINA, BOOTS and the tabs are still unchecked on hardware.
+9. **Fades, flashes and scene intros stayed 4:3 in widescreen: fixed.** The full-width test
+   missed 1-cycle fills, whose right edge is 319 << 2.
+10. **Minimap flashing: fixed.** It is now drawn off-screen and copied in one pass, and only redrawn
+    when something visible changed.
 
 ---
 

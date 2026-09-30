@@ -217,6 +217,16 @@ static int lowerChannel(Opnd a, Opnd b, Opnd c, Opnd d, int ch, int cycle, ChanO
         n = emit(out, n, GPU_ADD, a, d, z);
         return emit(out, n, GPU_SUBTRACT, prev, b, z);
     }
+    if (a.kind != OK_PREV && b.kind != OK_PREV && c.kind != OK_PREV && d.kind != OK_PREV) {
+        /* PORT (2026-09-30): A*C + (D - B*C). Every PICA stage clamps to 0..1; the previous order
+         * interp(A,B,C) + D - B saturated at the "+ D" whenever the true intermediate passed 1, then the
+         * "- B" made it far too dark: the N64 boot logo's "(TEXEL1 - PRIM) * ENV_A + TEXEL0" text came out
+         * dark blue instead of cyan-white (tools/statediff fbdiff, boot@60). This order errs only when
+         * D < B*C (a bias larger than the base), which "base texture + shine/tint" combines avoid. */
+        n = emit(out, n, GPU_MODULATE, b, c, z);         /* B*C */
+        n = emit(out, n, GPU_SUBTRACT, d, prev, z);      /* D - B*C */
+        return emit(out, n, GPU_MULTIPLY_ADD, a, c, prev); /* A*C + ... */
+    }
     n = emit(out, n, GPU_INTERPOLATE, a, b, c); /* (A-B)*C + B */
     n = emit(out, n, GPU_ADD, prev, d, z);      /* ... + D */
     return emit(out, n, GPU_SUBTRACT, prev, b, z); /* ... - B */
@@ -819,7 +829,10 @@ static void setEye(float shift) {
          * shift at any w). Fixed: conv negative relative to w is not expressible, so emulate a constant
          * NDC shift of 0.6 * shift with conv = 0 and the shift scaled (w-independent after the divide). */
         float conv = sStereoMode == 0 ? STEREO_CONVERGENCE : 0.0f;
-        float s = sStereoMode == 2 ? shift * 0.6f : shift;
+        /* pre-rendered rooms at 0.9: behind the characters (fixed cameras put them at w ~ 300-800, i.e.
+         * 0.73-0.9 of the full shift), like a backdrop they stand in front of. At 0.6 the picture sat in
+         * FRONT of them, which read as characters sunk behind a flat wall. */
+        float s = sStereoMode == 2 ? shift * 0.9f : shift;
         C3D_FVUnifSet(GPU_VERTEX_SHADER, sEyeLoc, s, conv, 0.0f, 0.0f);
         sEyeCur = shift;
         sEyeModeCur = sStereoMode;

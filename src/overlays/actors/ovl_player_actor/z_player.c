@@ -2627,10 +2627,13 @@ s32 Player_ItemIsItemAction(s32 item1, s32 itemAction) {
  * the input layer (one-shot flags) and handled here, where the normal item rules apply. */
 #include "port_minimap.h"
 
+/* NOT an index of Player_GetItemOnButton: index 4 there means "no item button pressed" and must stay
+ * ITEM_NONE (reusing it made Link play the ocarina every frame nothing was pressed, even in the title
+ * demo). */
 static s32 Port_VirtualOcarinaItem(PlayState* play) {
     s32 item = INV_CONTENT(ITEM_OCARINA_FAIRY);
 
-    if ((item != ITEM_OCARINA_FAIRY && item != ITEM_OCARINA_OF_TIME) || (play->interfaceCtx.restrictions.ocarina != 0) ||
+    if ((play->bombchuBowlingStatus != 0) || (item != ITEM_OCARINA_FAIRY && item != ITEM_OCARINA_OF_TIME) || (play->interfaceCtx.restrictions.ocarina != 0) ||
         ((gSaveContext.buttonStatus[1] == BTN_DISABLED) && (gSaveContext.buttonStatus[2] == BTN_DISABLED) &&
          (gSaveContext.buttonStatus[3] == BTN_DISABLED))) {
         return ITEM_NONE;
@@ -2659,11 +2662,6 @@ static void Port_CycleBoots(PlayState* play, Player* this) {
 #endif
 
 s32 Player_GetItemOnButton(PlayState* play, s32 index) {
-#ifdef __3DS__
-    if (index == 4) {
-        return (play->bombchuBowlingStatus != 0) ? ITEM_NONE : Port_VirtualOcarinaItem(play);
-    }
-#endif
     if (index >= 4) {
         return ITEM_NONE;
     } else if (play->bombchuBowlingStatus != 0) {
@@ -2708,7 +2706,7 @@ void Player_ProcessItemButtons(Player* this, PlayState* play) {
             if (!Player_ItemIsInUse(this, B_BTN_ITEM) && !Player_ItemIsInUse(this, C_BTN_ITEM(0)) &&
                 !Player_ItemIsInUse(this, C_BTN_ITEM(1)) && !Player_ItemIsInUse(this, C_BTN_ITEM(2))
 #ifdef __3DS__
-                && !Player_ItemIsInUse(this, Player_GetItemOnButton(play, 4))
+                && !Player_ItemIsInUse(this, Port_VirtualOcarinaItem(play))
 #endif
             ) {
                 Player_UseItem(play, this, ITEM_NONE);
@@ -2729,7 +2727,7 @@ void Player_ProcessItemButtons(Player* this, PlayState* play) {
         }
         if ((i == ARRAY_COUNT(sItemButtons)) && gPortTouchOcarina) {
             gPortTouchOcarina = 0;
-            item = Player_GetItemOnButton(play, 4);
+            item = Port_VirtualOcarinaItem(play);
             if (item < ITEM_NONE_FE) {
                 Player_UseItem(play, this, item);
                 return;

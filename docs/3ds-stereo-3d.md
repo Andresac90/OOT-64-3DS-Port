@@ -32,7 +32,7 @@ mode (800px wide with anti-aliasing on hardware).
   - 0 = by distance (default).
   - 1 = infinity (conv 0, full shift). Used by the skybox: OoT's sky is a small box around the camera,
     so its own w would put it at screen depth, in front of the terrain.
-  - 2 = fixed middle depth (0.6 × shift). Used by pre-rendered rooms (shop/house skyboxes, S2DEX
+  - 2 = fixed depth just behind the characters (0.9 × shift; 0.6 put the picture in front of them). Used by pre-rendered rooms (shop/house skyboxes, S2DEX
     backgrounds), so 3D actors aren't pushed behind a wall that appears in front of them.
   - `src/code/z_vr_box_draw.c` sets the mode with `gDPNoOpTag(0x3D5E3D0m)` (the N64 ignores G_NOOP).
     `gfx_pc.c` handles the tag in the G_NOOP case and sets mode 2 around `gfx_s2dex_bg_rect`.

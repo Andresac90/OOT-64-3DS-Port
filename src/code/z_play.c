@@ -1257,7 +1257,22 @@ void Play_Draw(PlayState* this) {
     gSPSegment(POLY_XLU_DISP++, 0x02, this->sceneSegment);
     gSPSegment(OVERLAY_DISP++, 0x02, this->sceneSegment);
 
+#ifdef __3DS__
+    {
+        /* PORT (2026-09-30): widescreen shows past the N64's 4:3 view. Scenes without a sky (skybox none /
+         * UNSET_1D, e.g. Kokiri Forest) rely on geometry covering the whole 4:3 image, so the widened
+         * view showed the black clear where nothing was modeled; clear to the fog color there instead,
+         * which the distant geometry fades into. 4:3 keeps the N64's black clear. */
+        extern int gPortWidescreen;
+        if (gPortWidescreen && (!this->skyboxId || (this->skyboxId == SKYBOX_UNSET_1D) || this->envCtx.skyboxDisabled)) {
+            Gfx_SetupFrame(gfxCtx, this->lightCtx.fogColor[0], this->lightCtx.fogColor[1], this->lightCtx.fogColor[2]);
+        } else {
+            Gfx_SetupFrame(gfxCtx, 0, 0, 0);
+        }
+    }
+#else
     Gfx_SetupFrame(gfxCtx, 0, 0, 0);
+#endif
 
     if (!DEBUG_FEATURES || (R_HREG_MODE != HREG_MODE_PLAY) || R_PLAY_RUN_DRAW) {
         POLY_OPA_DISP = Play_SetFog(this, POLY_OPA_DISP);
