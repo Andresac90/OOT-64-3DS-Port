@@ -1,4 +1,4 @@
-# Ocarina of Time 3DS Port
+# Unofficial Ocarina of Time (N64) 3DS Port
 
 <p align="center">
   <img src="docs/images/showcase.png" width="460"
