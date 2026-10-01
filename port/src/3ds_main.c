@@ -1009,6 +1009,7 @@ static void Port3ds_PerfReport(unsigned frames) {
         PortDbgX("mem heap size KB", (unsigned)(fake_heap_end - fake_heap_start) / 1024);
     }
     PortDbgX("perf draws/frame", gPortPerfDraws / frames);
+    { extern u32 gPortGpuRoute[4]; PortDbgX("perf gpu tris tested", gPortGpuRoute[0] / frames); PortDbgX("perf gpu tris behind eye", gPortGpuRoute[1] / frames); PortDbgX("perf gpu tris near", gPortGpuRoute[2] / frames); PortDbgX("perf gpu tris to cpu", gPortGpuRoute[3] / frames); gPortGpuRoute[0] = gPortGpuRoute[1] = gPortGpuRoute[2] = gPortGpuRoute[3] = 0; }
     { /* citro3d state calls per frame (each marks state citro3d re-sends with the next draw) */
         extern u32 gPortC3dCalls[6];
         static const char* const n[6] = { "perf c3d shader loads/frame", "perf c3d const sets/frame",

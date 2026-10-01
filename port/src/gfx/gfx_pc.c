@@ -2592,6 +2592,7 @@ static void gpu_emit_cpu(const uint8_t vidx[3], const uint16_t sl[3]) {
     gfx_emit_tri(&pv[0], &pv[1], &pv[2], sTC.z_is_from_0_to_1);
 }
 
+u32 gPortGpuRoute[4]; /* TEMP: tested / behind eye / near plane / routed to the CPU */
 static void gpu_emit_tri(const uint8_t vidx[3]) {
     uint16_t sl[3];
     int i, j, need = 0, ix[3];
@@ -2608,7 +2609,27 @@ static void gpu_emit_tri(const uint8_t vidx[3]) {
         float hi = a[1] > b[1] ? a[1] : b[1], lo = a[1] < b[1] ? a[1] : b[1];
         hi = c[1] > hi ? c[1] : hi;
         lo = c[1] < lo ? c[1] : lo;
-        if (lo <= 0.0f || hi >= SUBDIV_MAX_RATIO * lo || a[0] < -a[1] || b[0] < -b[1] || c[0] < -c[1]) {
+        int cpu = lo <= 0.0f || a[0] < -a[1] || b[0] < -b[1] || c[0] < -c[1];
+        { extern u32 gPortGpuRoute[4]; gPortGpuRoute[0]++; if (lo <= 0.0f) gPortGpuRoute[1]++; else if (cpu) gPortGpuRoute[2]++; }
+        if (!cpu && hi >= SUBDIV_MAX_RATIO * lo) {
+            /* depth range alone is not enough: like pvtx_edge_score, only edges at least SUBDIV_MIN_PIXELS
+             * long on screen get split (most such triangles are small: walls, distant ground) */
+            PVtx q[3];
+            int e, k;
+            for (k = 0; k < 3; k++) {
+                const struct LoadedVertex* lv = &rsp.loaded_vertices[vidx[k]];
+                float rows[4][4];
+                gfx_gpu_slot_rows(sl[k], 2, rows);
+                q[k].y = rows[0][0] * lv->x + rows[0][1] * lv->y + rows[0][2] * lv->z + rows[0][3];
+                q[k].x = -(rows[1][0] * lv->x + rows[1][1] * lv->y + rows[1][2] * lv->z + rows[1][3]);
+                q[k].w = (k == 0 ? a : k == 1 ? b : c)[1];
+            }
+            for (e = 0; e < 3 && !cpu; e++) {
+                cpu = pvtx_edge_score(&q[e], &q[(e + 1) % 3]) > 0.0f;
+            }
+        }
+        if (cpu) {
+            { extern u32 gPortGpuRoute[4]; gPortGpuRoute[3]++; }
             gpu_emit_cpu(vidx, sl);
             return;
         }
