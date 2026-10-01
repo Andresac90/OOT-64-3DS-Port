@@ -15,6 +15,7 @@
 #include "config.h"
 
 #include "gfx_pc.h"
+#include "port_prof.h"
 #include "gfx_cc.h"
 #include "gfx_window_manager_api.h"
 #include "gfx_rendering_api.h"
@@ -264,14 +265,25 @@ static uint32_t gPortPerfTexImports;
 #endif
 static void gfx_flush_impl(void);
 static void import_texture_impl(int unit, int tile_index);
+static float gfx_adjust_x_for_aspect_ratio(float x);
+/* GPU vertex path (gpu_vtx=1): the batch's matrix palette, flushed with the draw (see "GPU vertex path") */
+extern int gPortGpuVtx;
+#define GPU_PAL 20
+static uint16_t sGpuPal[GPU_PAL];
+static int sGpuPalN, sGpuPalSent; /* entries in use / entries already uploaded to the GPU */
+static uint32_t sGpuPalEpoch = 1; /* bumps when the palette is emptied (full, new frame) */
 static void gfx_flush(void) {
     uint64_t t0 = PERF_T();
+    PROF_PUSH(PROF_FLUSH);
     gfx_flush_impl();
+    PROF_POP();
     gPortPerfFlush += PERF_T() - t0;
 }
 static void import_texture(int unit, int tile_index) {
     uint64_t t0 = PERF_T();
+    PROF_PUSH(PROF_TEX);
     import_texture_impl(unit, tile_index);
+    PROF_POP();
     gPortPerfTex += PERF_T() - t0;
     gPortPerfTexImports++;
 }
@@ -423,7 +435,14 @@ static void gfx_flush_impl(void) {
         port_draw_id_begin();
 #endif
 #ifdef __3DS__
-        if (gPortLegacyVbo) {
+        if (gPortGpuVtx) {
+            extern void gfx_citro3d_gpu_palette(const uint16_t* slots, int start, int n);
+            if (sGpuPalN > sGpuPalSent) {
+                gfx_citro3d_gpu_palette(sGpuPal + sGpuPalSent, sGpuPalSent, sGpuPalN - sGpuPalSent);
+                sGpuPalSent = sGpuPalN;
+            }
+            gfx_citro3d_draw_indexed();
+        } else if (gPortLegacyVbo) {
             gfx_rapi->draw_triangles(buf_vbo, buf_vbo_len, buf_vbo_num_tris); /* array path (A/B bench) */
         } else {
             gfx_citro3d_draw_indexed();
@@ -1041,6 +1060,7 @@ static void gfx_matrix_mul(float res[4][4], const float a[4][4], const float b[4
  * interpolated decomposed (translation, per-axis scale, re-orthonormalised rotation) like RT64's
  * G_EX_INTERPOLATE_DECOMPOSE, so a turning limb does not shrink. The exact pass (t = 1) records. */
 #include "port_interp.h"
+extern int gPortReplayRec;
 #define INTERP_MAX 4096
 #define INTERP_HASH 8192
 typedef struct {
@@ -1061,7 +1081,6 @@ typedef struct {
 static int16_t sInterpVPos[2][INTERP_VTX_MAX][3];
 static InterpVLoad sInterpVLoad[2][INTERP_VLOADS];
 static int sInterpVN[2], sInterpVLN[2];
-static float sInterpT = 1.0f; /* 1 = the logic frame itself */
 static int sInterpRecord = 0;
 /* group stack (G_NOOP tags) */
 #define INTERP_DEPTH 16
@@ -1086,8 +1105,10 @@ static void interp_group(uint32_t w0, uint32_t w1) {
         if (sGrpDepth < INTERP_DEPTH) {
             uint32_t parent = sGrpDepth > 0 ? sGrpId[sGrpDepth - 1] : 0x51ED5EEDu;
             uint32_t id = interp_mix(parent, w1), h = (id ^ (id >> 11)) & 2047;
-            /* the same path pushed again in this pass (e.g. a model drawn twice): number it */
-            for (;;) {
+            int probes;
+            /* the same path pushed again in this pass (e.g. a model drawn twice): number it. Bounded:
+             * with the table full (no per-frame reset) an unbounded probe never ended - fps60=0 hung */
+            for (probes = 0; probes < 2048; probes++) {
                 if (sOccStamp[h] != sInterpStamp) {
                     sOccStamp[h] = sInterpStamp;
                     sOccKey[h] = id;
@@ -1099,7 +1120,7 @@ static void interp_group(uint32_t w0, uint32_t w1) {
                 }
                 h = (h + 1) & 2047;
             }
-            id = interp_mix(id, sOccCnt[h]++);
+            id = interp_mix(id, probes < 2048 ? sOccCnt[h]++ : 0);
             sGrpId[sGrpDepth] = id;
             sGrpFlags[sGrpDepth] = (uint8_t)(w0 & 0xFF) | (sGrpDepth > 0 ? (sGrpFlags[sGrpDepth - 1] & PORT_INTERP_SKIP) : 0);
             sGrpMtx[sGrpDepth] = 0;
@@ -1186,12 +1207,14 @@ static int interp_decomposed(float out[4][4], const float a[4][4], const float b
     return 1;
 }
 
-/* interpolate `m` (this logic frame's matrix) from the previous frame's; record it on the exact pass */
-static void interp_matrix(float m[4][4], uint8_t parameters) {
+/* blend `m` (this logic frame's matrix) from the previous frame's into out[k] for t = (k + 1) / 3 (copies
+ * of m when there is nothing to blend); records m on the exact pass. Returns 1 when out[] was written. */
+static int interp_matrix3(const float m[4][4], uint8_t parameters, float out[2][4][4]) {
     uint32_t key;
-    int idx;
+    int idx, k;
+    const float(*p)[4];
     if (sGrpDepth <= 0 || sGrpDepth > INTERP_DEPTH) {
-        return; /* untagged: drawn as it is */
+        return 0; /* untagged: drawn as it is */
     }
     key = interp_mix(sGrpId[sGrpDepth - 1], sGrpMtx[sGrpDepth - 1]++ * 4 + (parameters & G_MTX_PROJECTION ? 1 : 0)) | 1;
     if (sInterpRecord) {
@@ -1202,51 +1225,51 @@ static void interp_matrix(float m[4][4], uint8_t parameters) {
             sInterpN[sInterpCurTab] = n + 1;
         }
     }
-    if (sInterpT >= 1.0f || (sGrpFlags[sGrpDepth - 1] & PORT_INTERP_SKIP)) {
-        return;
+    if (!gPortReplayRec || (sGrpFlags[sGrpDepth - 1] & PORT_INTERP_SKIP)) {
+        return 0;
     }
     idx = interp_find(key);
     if (idx < 0) {
         gPortInterpMissed++;
-        return;
+        return 0;
     }
     gPortInterpMatched++;
-    {
-        const float(*p)[4] = sInterpTab[sInterpCurTab ^ 1][idx].m;
-        float out[4][4];
-        int i, j;
-        if (memcmp(p, m, sizeof(float) * 16) == 0) {
-            gPortInterpSame++;
-            return;
-        }
+    p = sInterpTab[sInterpCurTab ^ 1][idx].m;
+    if (memcmp(p, m, sizeof(float) * 16) == 0) {
+        gPortInterpSame++;
+        return 0;
+    }
+    for (k = 0; k < 2; k++) {
+        float t = (k + 1) * (1.0f / 3.0f);
         if (p[0][3] == 0.0f && p[1][3] == 0.0f && p[2][3] == 0.0f && p[3][3] == 1.0f && m[0][3] == 0.0f &&
             m[1][3] == 0.0f && m[2][3] == 0.0f && m[3][3] == 1.0f) {
             /* rigid (modelview, camera view): decomposed. Teleports are the game side's call (the group's
              * SKIP flag: actor moved too far, camera cut), as in Zelda64Recomp - a translation threshold here
              * cannot work, limb matrices are in unscaled model units (x100). */
-            if (interp_decomposed(out, p, m, sInterpT)) {
-                memcpy(m, out, sizeof(out));
-            } else {
+            if (!interp_decomposed(out[k], p, m, t)) {
                 gPortInterpJump++;
+                return 0;
             }
-            return;
-        }
-        for (i = 0; i < 4; i++) { /* perspective projections: per element */
-            for (j = 0; j < 4; j++) {
-                m[i][j] = p[i][j] + (m[i][j] - p[i][j]) * sInterpT;
+        } else {
+            int i, j;
+            for (i = 0; i < 4; i++) { /* perspective projections: per element */
+                for (j = 0; j < 4; j++) {
+                    out[k][i][j] = p[i][j] + (m[i][j] - p[i][j]) * t;
+                }
             }
         }
     }
+    return 1;
 }
 
-/* skinned vertex loads (groups tagged PORT_INTERP_VERTS): positions blended per vertex. Returns the
- * vertices to transform (a blended copy in `tmp`, or the originals). */
-static const Vtx* interp_vertices(const Vtx* v, size_t n, Vtx* tmp) {
+/* skinned vertex loads (groups tagged PORT_INTERP_VERTS): records this load's positions; returns the
+ * previous frame's positions for the same load (NULL: none / not a skinned load) */
+static const int16_t (*interp_vtx_prev(const Vtx* v, size_t n))[3] {
     uint32_t key;
     int g = sGrpDepth - 1;
     size_t i;
     if (g < 0 || g >= INTERP_DEPTH || !(sGrpFlags[g] & PORT_INTERP_VERTS) || n == 0 || n > 64) {
-        return v;
+        return NULL;
     }
     key = interp_mix(sGrpId[g] ^ 0x5EB1u, sGrpVtx[g]++) | 1;
     if (sInterpRecord) {
@@ -1264,8 +1287,8 @@ static const Vtx* interp_vertices(const Vtx* v, size_t n, Vtx* tmp) {
             sInterpVN[sInterpCurTab] = f + (int)n;
         }
     }
-    if (sInterpT >= 1.0f || (sGrpFlags[g] & PORT_INTERP_SKIP)) {
-        return v;
+    if (!gPortReplayRec || (sGrpFlags[g] & PORT_INTERP_SKIP)) {
+        return NULL;
     }
     {
         const int pt = sInterpCurTab ^ 1;
@@ -1273,21 +1296,13 @@ static const Vtx* interp_vertices(const Vtx* v, size_t n, Vtx* tmp) {
         for (c = 0; c < sInterpVLN[pt]; c++) { /* few skinned loads per frame: a linear scan is enough */
             const InterpVLoad* L = &sInterpVLoad[pt][c];
             if (L->key == key && L->n == n) {
-                memcpy(tmp, v, n * sizeof(Vtx));
-                for (i = 0; i < n; i++) {
-                    const int16_t* p = sInterpVPos[pt][L->first + i];
-                    int k;
-                    for (k = 0; k < 3; k++) {
-                        tmp[i].v.ob[k] = (short)(p[k] + (int)((v[i].v.ob[k] - p[k]) * sInterpT));
-                    }
-                }
                 gPortInterpVtx += (uint32_t)n;
-                return tmp;
+                return (const int16_t(*)[3])sInterpVPos[pt][L->first];
             }
         }
         gPortInterpVtxMiss++;
     }
-    return v;
+    return NULL;
 }
 
 /* 3ds_main.c: once per logic frame, before its passes: the tables the previous exact pass recorded
@@ -1306,12 +1321,288 @@ void gfx_interp_begin_frame(void) {
     }
 }
 
-/* before each pass: t = 1 is the logic frame itself (recorded when `record`), t < 1 an in-between frame */
+/* before the display-list walk: `record` = keep the tables for the next frame's interpolation */
 void gfx_interp_pass(float t, int record) {
+    (void)t;
     sInterpStamp++;
     sGrpDepth = 0;
-    sInterpT = t;
     sInterpRecord = record;
+}
+
+/* ---- PORT (2026-09-30): replay (60 fps without walking the display list again) ----
+ * In-between frames used to re-run the whole display list (as costly as the frame itself: 20-35 ms on
+ * a New 3DS). Now the logic frame's walk RECORDS: the backend logs its state calls and draws instead of
+ * issuing them (gfx_citro3d.c), and here every vertex written to the VBO gets a recipe - the object-space
+ * position(s) and matrix slot it came from, or, for vertices made by splitting/clipping, the weights of
+ * the original triangle's three vertices (clip-space affine, so they stay valid). The matrix stacks are
+ * evaluated at t = 1/3 and 2/3 alongside the real one. Each shown frame then only rewrites the VBO
+ * positions (t = 1/3, 2/3, or the recorded t = 1) and re-issues the log: colours, lighting, texture
+ * coordinates and everything else stay as recorded for the logic frame. */
+extern float* gfx_citro3d_vbo_info(int** pos, u32* cap, float scale[4]);
+int gPortReplayRec;   /* 1 while the walk records for replay */
+extern int gPortReplayFirstK;
+int gPortReplayBroken; /* this frame cannot be replayed (an off-screen target, a buffer overflow) */
+#define REC_SLOTS 1024
+#define REC_SRC 8192
+#define REC_VTX 20000
+#define REC_NONE 0xFFFF
+static float sAltMV[2][11][4][4], sAltP[2][4][4];
+static float (*sRecMP)[2][4][4]; /* per matrix slot: MP at t = 1/3, 2/3 */
+static int sRecSlotN, sRecSlotCur = -1;
+typedef struct {
+    float ob[2][3]; /* object-space position at t = 1/3, 2/3 (skinned vertices move) */
+    float hx, hy, A; /* clip adjustments at load: half-pixel offsets, aspect squeeze */
+    uint16_t slot;
+} RecSrc;
+static RecSrc* sRecSrc;
+static int sRecSrcN;
+static uint16_t sLoadSrc[MAX_VERTICES + 4]; /* per loaded vertex: its source, REC_NONE = none */
+typedef struct {
+    uint16_t src[3];
+    float wgt[3];
+    float orig[5]; /* the recorded (t = 1) x y z w and stereo offset, PICA layout */
+    uint32_t stamp;
+} RecVtx;
+static RecVtx* sRecVtx;
+static uint32_t sRecStamp = 1;
+static int sRecVtxMax;
+static float (*sRecClip)[4]; /* per source, per replay */
+/* the triangle being emitted (gfx_sp_tri1_impl): its loaded vertices' sources and clip positions */
+static int sRecTriOk;
+static uint16_t sRecTriSrc[3];
+static float sRecTriPos[3][3]; /* x y w */
+
+static void gfx_replay_alloc(void) {
+    if (sRecVtx == NULL) {
+        sRecMP = malloc(sizeof(*sRecMP) * REC_SLOTS);
+        sRecSrc = malloc(sizeof(RecSrc) * REC_SRC);
+        sRecVtx = malloc(sizeof(RecVtx) * REC_VTX);
+        sRecClip = malloc(sizeof(*sRecClip) * REC_SRC);
+    }
+}
+
+/* 3ds_main.c, before the walk */
+void gfx_replay_begin(void) {
+    gfx_replay_alloc();
+    gPortReplayRec = sRecVtx != NULL && sRecMP != NULL && sRecSrc != NULL && sRecClip != NULL;
+    gPortReplayBroken = !gPortReplayRec;
+    sRecSlotN = sRecSrcN = 0;
+    sRecSlotCur = -1;
+    sRecVtxMax = 0;
+    sRecStamp++;
+    memset(sLoadSrc, 0xFF, sizeof(sLoadSrc));
+}
+
+static void rec_matrix_changed(void) {
+    sRecSlotCur = -1;
+}
+
+/* the current MP slot (made on first use after a matrix change) */
+static int rec_slot(void) {
+    if (sRecSlotCur < 0) {
+        int k, top = rsp.modelview_matrix_stack_size - 1;
+        if (sRecSlotN >= REC_SLOTS || top < 0) {
+            gPortReplayBroken = 1;
+            return -1;
+        }
+        for (k = 0; k < 2; k++) {
+            gfx_matrix_mul(sRecMP[sRecSlotN][k], sAltMV[k][top], sAltP[k]);
+        }
+        sRecSlotCur = sRecSlotN++;
+    }
+    return sRecSlotCur;
+}
+
+/* a loaded vertex: its source record */
+static void rec_load_vertex(int dest, const Vtx_t* v, const int16_t* prev) {
+    RecSrc* s;
+    int slot, k;
+    if (sRecSrcN >= REC_SRC || (slot = rec_slot()) < 0) {
+        sLoadSrc[dest] = REC_NONE;
+        gPortReplayBroken = 1;
+        return;
+    }
+    s = &sRecSrc[sRecSrcN];
+    for (k = 0; k < 2; k++) {
+        float t = (k + 1) * (1.0f / 3.0f);
+        int c;
+        for (c = 0; c < 3; c++) {
+            s->ob[k][c] = prev != NULL ? prev[c] + (v->ob[c] - prev[c]) * t : (float)v->ob[c];
+        }
+    }
+    s->hx = rsp.half_px_x;
+    s->hy = rsp.half_px_y;
+    s->A = (4.0f / 3.0f) / ((float)gfx_current_dimensions.width / (float)gfx_current_dimensions.height);
+    s->slot = (uint16_t)slot;
+    sLoadSrc[dest] = (uint16_t)sRecSrcN++;
+}
+
+/* a vertex written to the VBO at `first`: its recipe */
+static void rec_vbo_vertex(int first, const float* d, float px, float py, float pw, int slot) {
+    RecVtx* r;
+    if (first >= REC_VTX) {
+        gPortReplayBroken = 1;
+        return;
+    }
+    r = &sRecVtx[first];
+    r->orig[0] = d[0], r->orig[1] = d[1], r->orig[2] = d[2], r->orig[3] = d[3], r->orig[4] = d[12];
+    r->stamp = sRecStamp;
+    r->src[0] = r->src[1] = r->src[2] = REC_NONE;
+    if (first + 1 > sRecVtxMax) {
+        sRecVtxMax = first + 1;
+    }
+    if (slot >= 0 && sLoadSrc[slot] != REC_NONE) {
+        r->src[0] = sLoadSrc[slot];
+        r->wgt[0] = 1.0f;
+        return;
+    }
+    if (sRecTriOk) {
+        /* a new vertex (split/clipped): solve p = a A + b B + c C in clip (x, y, w) */
+        const float(*T)[3] = sRecTriPos;
+        float det = T[0][0] * (T[1][1] * T[2][2] - T[2][1] * T[1][2]) - T[1][0] * (T[0][1] * T[2][2] - T[2][1] * T[0][2]) +
+                    T[2][0] * (T[0][1] * T[1][2] - T[1][1] * T[0][2]);
+        if (fabsf(det) > 1e-9f) {
+            float inv = 1.0f / det, P[3] = { px, py, pw };
+            float a = (P[0] * (T[1][1] * T[2][2] - T[2][1] * T[1][2]) - T[1][0] * (P[1] * T[2][2] - T[2][1] * P[2]) +
+                       T[2][0] * (P[1] * T[1][2] - T[1][1] * P[2])) * inv;
+            float b = (T[0][0] * (P[1] * T[2][2] - T[2][1] * P[2]) - P[0] * (T[0][1] * T[2][2] - T[2][1] * T[0][2]) +
+                       T[2][0] * (T[0][1] * P[2] - P[1] * T[0][2])) * inv;
+            float c = 1.0f - a - b;
+            (void)c;
+            c = (T[0][0] * (T[1][1] * P[2] - P[1] * T[1][2]) - T[1][0] * (T[0][1] * P[2] - P[1] * T[0][2]) +
+                 P[0] * (T[0][1] * T[1][2] - T[1][1] * T[0][2])) * inv;
+            r->src[0] = sRecTriSrc[0], r->src[1] = sRecTriSrc[1], r->src[2] = sRecTriSrc[2];
+            r->wgt[0] = a, r->wgt[1] = b, r->wgt[2] = c;
+        }
+    }
+}
+
+/* ---- PORT (2026-10-01): GPU vertex path (gpu_vtx=1; gfx_citro3d.c, shader_gpu.v.pica) ----
+ * G_VTX keeps vertices in model space and tags each with the current matrix SLOT: the MP matrix (and,
+ * while recording for 60 fps, its t = 1/3 and 2/3 versions from the parallel stacks) turned into the 4
+ * output rows the vertex shader multiplies by. A batch's distinct slots form its palette (GPU_PAL). */
+#define GPU_SLOTS 4096
+#define GPU_SLOT_IDENTITY 0xFFFF /* rectangles: their vertices are already in clip space */
+typedef struct {
+    float rows[3][4][4]; /* [replay k][output row][x y z 1 coefficient] */
+} GpuSlot;
+static GpuSlot* sGpuSlot;
+static int sGpuSlotN, sGpuSlotCur = -1;
+static uint16_t sLoadSlot[MAX_VERTICES + 4];
+static float sLoadDpos[MAX_VERTICES + 4][3];
+static uint8_t sProbeStale[MAX_VERTICES + 4]; /* 3D border probes: clip position not computed since load */
+static uint8_t sZWStale[MAX_VERTICES + 4];    /* the clip z/w below not computed since load */
+static float sZW[MAX_VERTICES + 4][2];
+static uint32_t* sSlotPalBatch;
+static uint8_t* sSlotPalIdx;
+static uint32_t sIdentPalBatch;
+static uint8_t sIdentPalIdx;
+
+/* MP (row-vector: clip_j = sum_i ob_i * MP[i][j]) -> output rows (y', -x', -(z + w) / 2, w) with the
+ * half-pixel offset and aspect squeeze, exactly as gfx_sp_vertex + pack_vertex compute them */
+static void gpu_rows_from_mp(float rows[4][4], const float mp[4][4], float hx, float hy, float A) {
+    int i;
+    for (i = 0; i < 4; i++) {
+        float cx = mp[i][0], cy = mp[i][1], cz = mp[i][2], cw = mp[i][3];
+        rows[0][i] = cy - hy * cw;
+        rows[1][i] = -(A * (cx + hx * cw));
+        rows[2][i] = -0.5f * (cz + cw);
+        rows[3][i] = cw;
+    }
+}
+
+static int gpu_slot_get(void) {
+    if (sGpuSlotCur < 0) {
+        int k, top = rsp.modelview_matrix_stack_size - 1;
+        float A = gfx_adjust_x_for_aspect_ratio(1.0f);
+        GpuSlot* g;
+        if (sGpuSlot == NULL) {
+            sGpuSlot = malloc(sizeof(GpuSlot) * GPU_SLOTS);
+            sSlotPalBatch = calloc(GPU_SLOTS, sizeof(uint32_t));
+            sSlotPalIdx = calloc(GPU_SLOTS, 1);
+            if (sGpuSlot == NULL || sSlotPalBatch == NULL || sSlotPalIdx == NULL) {
+                return GPU_SLOT_IDENTITY;
+            }
+        }
+        if (sGpuSlotN >= GPU_SLOTS) {
+            return sGpuSlotN - 1; /* table full (never seen): reuse the last slot */
+        }
+        g = &sGpuSlot[sGpuSlotN];
+        gpu_rows_from_mp(g->rows[2], rsp.MP_matrix, rsp.half_px_x, rsp.half_px_y, A);
+        for (k = 0; k < 2; k++) {
+            if (gPortReplayRec && top >= 0) {
+                float mp[4][4];
+                gfx_matrix_mul(mp, sAltMV[k][top], sAltP[k]);
+                gpu_rows_from_mp(g->rows[k], mp, rsp.half_px_x, rsp.half_px_y, A);
+            } else {
+                memcpy(g->rows[k], g->rows[2], sizeof(g->rows[2]));
+            }
+        }
+        sSlotPalBatch[sGpuSlotN] = 0;
+        sGpuSlotCur = sGpuSlotN++;
+    }
+    return sGpuSlotCur;
+}
+
+/* gfx_citro3d.c: the rows of a palette entry for replay k */
+void gfx_gpu_slot_rows(uint16_t slot, int k, float rows[4][4]) {
+    if (slot == GPU_SLOT_IDENTITY || sGpuSlot == NULL || slot >= sGpuSlotN) {
+        static const float ident[4][4] = { { 0, 1, 0, 0 }, { -1, 0, 0, 0 }, { 0, 0, -0.5f, -0.5f }, { 0, 0, 0, 1 } };
+        memcpy(rows, ident, sizeof(ident));
+        return;
+    }
+    memcpy(rows, sGpuSlot[slot].rows[k < 0 || k > 2 ? 2 : k], sizeof(float) * 16);
+}
+
+/* rewrite the VBO positions for replay k (0: t = 1/3, 1: t = 2/3, 2: the recorded t = 1) */
+void gfx_replay_positions(int k, bool z_is_from_0_to_1) {
+    int pos_dummy;
+    int* posp = &pos_dummy;
+    u32 cap;
+    float scale[4];
+    float* vbo = gfx_citro3d_vbo_info(&posp, &cap, scale);
+    int i, j;
+    if (vbo == NULL) {
+        return;
+    }
+    if (k < 2) {
+        for (i = 0; i < sRecSrcN; i++) {
+            const RecSrc* s = &sRecSrc[i];
+            const float(*m)[4] = sRecMP[s->slot][k];
+            const float* o = s->ob[k];
+            float x = o[0] * m[0][0] + o[1] * m[1][0] + o[2] * m[2][0] + m[3][0];
+            float y = o[0] * m[0][1] + o[1] * m[1][1] + o[2] * m[2][1] + m[3][1];
+            float z = o[0] * m[0][2] + o[1] * m[1][2] + o[2] * m[2][2] + m[3][2];
+            float w = o[0] * m[0][3] + o[1] * m[1][3] + o[2] * m[2][3] + m[3][3];
+            x += s->hx * w;
+            y -= s->hy * w;
+            sRecClip[i][0] = x * s->A, sRecClip[i][1] = y, sRecClip[i][2] = z, sRecClip[i][3] = w;
+        }
+    }
+    for (i = 0; i < sRecVtxMax; i++) {
+        const RecVtx* r = &sRecVtx[i];
+        float* d = vbo + i * 13;
+        if (r->stamp != sRecStamp) {
+            continue; /* not ours (written by another path): left as it is */
+        }
+        if (k == 2 || r->src[0] == REC_NONE) {
+            d[0] = r->orig[0], d[1] = r->orig[1], d[2] = r->orig[2], d[3] = r->orig[3], d[12] = r->orig[4];
+            continue;
+        }
+        {
+            float c[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            for (j = 0; j < 3 && r->src[j] != REC_NONE; j++) {
+                const float* s = sRecClip[r->src[j]];
+                c[0] += r->wgt[j] * s[0], c[1] += r->wgt[j] * s[1], c[2] += r->wgt[j] * s[2], c[3] += r->wgt[j] * s[3];
+            }
+            d[0] = c[1];
+            d[1] = -c[0];
+            d[2] = -(z_is_from_0_to_1 ? (c[2] + c[3]) * 0.5f : c[2]);
+            d[3] = c[3];
+            /* stereo offset s = w - convergence (stereo_offset), 0 for flat layers */
+            d[12] = r->orig[4] == 0.0f ? 0.0f : r->orig[4] + (c[3] - r->orig[3]);
+        }
+    }
 }
 
 static void gfx_sp_matrix(uint8_t parameters, const int32_t *addr) {
@@ -1339,8 +1630,11 @@ static void gfx_sp_matrix(uint8_t parameters, const int32_t *addr) {
 #else
     memcpy(matrix, addr, sizeof(matrix));
 #endif
-    if (sInterpRecord || sInterpT < 1.0f) {
-        interp_matrix(matrix, parameters);
+    float alt[2][4][4]; /* replay: this matrix at t = 1/3, 2/3 */
+    int haveAlt = sInterpRecord ? interp_matrix3(matrix, parameters, alt) : 0;
+    if (gPortReplayRec && !haveAlt) {
+        memcpy(alt[0], matrix, sizeof(matrix));
+        memcpy(alt[1], matrix, sizeof(matrix));
     }
     
     { /* PORT rawmtx */
@@ -1368,6 +1662,30 @@ static void gfx_sp_matrix(uint8_t parameters, const int32_t *addr) {
                         matrix[r][0], matrix[r][1], matrix[r][2], matrix[r][3]);
         }
     }
+    if (gPortReplayRec) { /* the same stack operation on the t = 1/3 and 2/3 stacks */
+        int k, top = rsp.modelview_matrix_stack_size - 1;
+        for (k = 0; k < 2; k++) {
+            if (parameters & G_MTX_PROJECTION) {
+                if (parameters & G_MTX_LOAD) {
+                    memcpy(sAltP[k], alt[k], sizeof(matrix));
+                } else {
+                    gfx_matrix_mul(sAltP[k], alt[k], sAltP[k]);
+                }
+            } else {
+                int t = top;
+                if ((parameters & G_MTX_PUSH) && rsp.modelview_matrix_stack_size < 11) {
+                    t = top + 1;
+                    memcpy(sAltMV[k][t], sAltMV[k][top], sizeof(matrix));
+                }
+                if (parameters & G_MTX_LOAD) {
+                    memcpy(sAltMV[k][t], alt[k], sizeof(matrix));
+                } else {
+                    gfx_matrix_mul(sAltMV[k][t], alt[k], sAltMV[k][t]);
+                }
+            }
+        }
+        rec_matrix_changed();
+    }
     if (parameters & G_MTX_PROJECTION) {
         if (parameters & G_MTX_LOAD) {
             memcpy(rsp.P_matrix, matrix, sizeof(matrix));
@@ -1387,9 +1705,12 @@ static void gfx_sp_matrix(uint8_t parameters, const int32_t *addr) {
         rsp.lights_changed = 1;
     }
     gfx_matrix_mul(rsp.MP_matrix, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], rsp.P_matrix);
+    sGpuSlotCur = -1;
 }
 
 static void gfx_sp_pop_matrix(uint32_t count) {
+    rec_matrix_changed();
+    sGpuSlotCur = -1;
     while (count--) {
         if (rsp.modelview_matrix_stack_size > 0) {
             --rsp.modelview_matrix_stack_size;
@@ -1405,18 +1726,183 @@ static float gfx_adjust_x_for_aspect_ratio(float x) {
 }
 
 static uint32_t sPVStamp[MAX_VERTICES + 4]; /* see sPVCache */
+static const int16_t (*sVtxPrev)[3]; /* replay: the previous frame's positions of a skinned load */
 static void gfx_sp_vertex_impl(size_t n_vertices, size_t dest_index, const Vtx *vertices);
 static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *vertices) {
     uint64_t t0 = PERF_T();
-    Vtx tmp[64];
-    if (sGrpDepth > 0) {
-        vertices = interp_vertices(vertices, n_vertices, tmp);
-    }
+    sVtxPrev = sGrpDepth > 0 && sInterpRecord ? interp_vtx_prev(vertices, n_vertices) : NULL;
+    PROF_SET(PROF_VTX);
     gfx_sp_vertex_impl(n_vertices, dest_index, vertices);
+    PROF_SET(PROF_DL);
     gPortPerfVtx += PERF_T() - t0;
 }
 
+/* shade colour (lighting, or the vertex colour) and texture coordinates (texgen, or the vertex's), shared
+ * by the CPU and GPU vertex paths; alpha and position are each path's */
+static inline __attribute__((always_inline)) void vtx_shade(const Vtx_t* v, const Vtx_tn* vn, struct LoadedVertex* d,
+                                                           float inv127) {
+    short U = v->tc[0] * rsp.texture_scaling_factor.s >> 16;
+    short V = v->tc[1] * rsp.texture_scaling_factor.t >> 16;
+
+    if (rsp.geometry_mode & G_LIGHTING) {
+        PROF_SET(PROF_VTX_LIGHT);
+        if (rsp.lights_changed) {
+            for (int i = 0; i < rsp.current_num_lights - 1; i++) {
+                calculate_normal_dir(&rsp.current_lights[i], rsp.current_lights_coeffs[i]);
+            }
+            /* PORT (2026-09-30): the game's LookAt (camera direction for G_TEXTURE_GEN environment maps
+             * and hilites), transformed like the lights - libultraship GfxSpVertex. It was always a fixed
+             * +x/+y (sm64 PC port): dull swords/metal, the flat N64 boot logo. */
+            /* No LookAt loaded yet this frame: a fixed +x/+y (sm64 PC port). Measured with tools/statediff
+             * (Chamber of the Sages pedestal, the one surface env-mapped before any LookAt): this 263
+             * wrong flat px, a ZERO LookAt 449, the previous frame's last one 446. On the N64 the LookAt
+             * lives outside the 0x420-byte F3DZEX2 data image reloaded per task (that image is zero
+             * there), so it keeps what an earlier task left - not reproducible exactly. */
+            static const Light_t lookat_def[2] = { {{0, 0, 0}, 0, {0, 0, 0}, 0, {127, 0, 0}, 0},
+                                                   {{0, 0, 0}, 0, {0, 0, 0}, 0, {0, 127, 0}, 0} };
+            for (int k = 0; k < 2; k++) {
+                const Light_t* la = &rsp.current_lookat[k];
+                if (la->dir[0] == 0 && la->dir[1] == 0 && la->dir[2] == 0) {
+                    la = &lookat_def[k];
+                }
+                calculate_normal_dir(la, rsp.current_lookat_coeffs[k]);
+            }
+            rsp.lights_changed = false;
+        }
+
+        int r = rsp.current_lights[rsp.current_num_lights - 1].col[0];
+        int g = rsp.current_lights[rsp.current_num_lights - 1].col[1];
+        int b = rsp.current_lights[rsp.current_num_lights - 1].col[2];
+
+        for (int i = 0; i < rsp.current_num_lights - 1; i++) {
+            float intensity = 0;
+            intensity += vn->n[0] * rsp.current_lights_coeffs[i][0];
+            intensity += vn->n[1] * rsp.current_lights_coeffs[i][1];
+            intensity += vn->n[2] * rsp.current_lights_coeffs[i][2];
+            intensity *= inv127;
+            if (intensity > 0.0f) {
+                r += intensity * rsp.current_lights[i].col[0];
+                g += intensity * rsp.current_lights[i].col[1];
+                b += intensity * rsp.current_lights[i].col[2];
+            }
+        }
+
+        d->color.r = r > 255 ? 255 : r;
+        d->color.g = g > 255 ? 255 : g;
+        d->color.b = b > 255 ? 255 : b;
+
+        if (rsp.geometry_mode & G_TEXTURE_GEN) {
+            float dotx = 0, doty = 0;
+            dotx += vn->n[0] * rsp.current_lookat_coeffs[0][0];
+            dotx += vn->n[1] * rsp.current_lookat_coeffs[0][1];
+            dotx += vn->n[2] * rsp.current_lookat_coeffs[0][2];
+            doty += vn->n[0] * rsp.current_lookat_coeffs[1][0];
+            doty += vn->n[1] * rsp.current_lookat_coeffs[1][1];
+            doty += vn->n[2] * rsp.current_lookat_coeffs[1][2];
+
+            /* libultraship: clamp, and G_TEXTURE_GEN_LINEAR maps through acos */
+            dotx *= inv127;
+            doty *= inv127;
+            dotx = dotx < -1.0f ? -1.0f : (dotx > 1.0f ? 1.0f : dotx);
+            doty = doty < -1.0f ? -1.0f : (doty > 1.0f ? 1.0f : doty);
+            if (rsp.geometry_mode & G_TEXTURE_GEN_LINEAR) {
+                dotx = acosf(-dotx) / 4.0f;
+                doty = acosf(-doty) / 4.0f;
+            } else {
+                dotx = (dotx + 1.0f) / 4.0f;
+                doty = (doty + 1.0f) / 4.0f;
+            }
+            U = (int32_t)(dotx * rsp.texture_scaling_factor.s);
+            V = (int32_t)(doty * rsp.texture_scaling_factor.t);
+        }
+        PROF_SET(PROF_VTX);
+    } else {
+        d->color.r = v->cn[0];
+        d->color.g = v->cn[1];
+        d->color.b = v->cn[2];
+    }
+
+    d->u = U;
+    d->v = V;
+}
+
+#ifdef __3DS__
+/* GPU vertex path: model space + matrix slot; the shader transforms, clips and fogs. Skinned vertices
+ * carry the delta to the previous frame's position for the 60 fps in-between frames. */
+static void gfx_sp_vertex_gpu(size_t n_vertices, size_t dest_index, const Vtx* vertices) {
+    const float inv127 = 1.0f / 127.0f;
+    const uint16_t slot = (uint16_t)gpu_slot_get(); /* one matrix state for the whole load */
+    uint8_t rej = 0;
+    {
+        /* PORT PERF (2026-10-01): off-screen rejection for the whole load. The GPU path doesn't transform
+         * vertices on the CPU, so it could not drop off-screen triangles, and a material entirely off
+         * screen became a draw (367 draws/frame vs 144). The load's model-space bounding box is
+         * transformed instead (8 corners): every vertex is outside a clip plane if all corners are (the
+         * plane tests are linear), so its triangles are skipped exactly as clip_rej skips them. */
+        float mn[3] = { 32767.0f, 32767.0f, 32767.0f }, mx[3] = { -32768.0f, -32768.0f, -32768.0f };
+        const float aspect = gfx_adjust_x_for_aspect_ratio(1.0f);
+        const float(*m)[4] = rsp.MP_matrix;
+        int c, k;
+        for (size_t i = 0; i < n_vertices; i++) {
+            for (k = 0; k < 3; k++) {
+                float o = vertices[i].v.ob[k];
+                mn[k] = o < mn[k] ? o : mn[k];
+                mx[k] = o > mx[k] ? o : mx[k];
+            }
+        }
+        rej = 1 | 2 | 4 | 8 | 32;
+        for (c = 0; c < 8 && rej != 0; c++) {
+            float ox = (c & 1) ? mx[0] : mn[0], oy = (c & 2) ? mx[1] : mn[1], oz = (c & 4) ? mx[2] : mn[2];
+            float x = ox * m[0][0] + oy * m[1][0] + oz * m[2][0] + m[3][0];
+            float y = ox * m[0][1] + oy * m[1][1] + oz * m[2][1] + m[3][1];
+            float z = ox * m[0][2] + oy * m[1][2] + oz * m[2][2] + m[3][2];
+            float w = ox * m[0][3] + oy * m[1][3] + oz * m[2][3] + m[3][3];
+            uint8_t cr = 0;
+            x = (x + rsp.half_px_x * w) * aspect;
+            y -= rsp.half_px_y * w;
+            if (x < -w) cr |= 1;
+            if (x > w) cr |= 2;
+            if (y < -w) cr |= 4;
+            if (y > w) cr |= 8;
+            if (z > w) cr |= 32;
+            rej &= cr;
+        }
+    }
+    for (size_t i = 0; i < n_vertices; i++, dest_index++) {
+        const Vtx_t* v = &vertices[i].v;
+        const Vtx_tn* vn = &vertices[i].n;
+        struct LoadedVertex* d = &rsp.loaded_vertices[dest_index];
+        sPVStamp[dest_index] = 0;
+        sBatchStamp[dest_index] = 0;
+        sLoadSlot[dest_index] = slot;
+        sProbeStale[dest_index] = 1;
+        sZWStale[dest_index] = 1;
+        d->x = v->ob[0], d->y = v->ob[1], d->z = v->ob[2], d->w = 1.0f;
+        d->clip_rej = rej;
+        if (sVtxPrev != NULL) {
+            sLoadDpos[dest_index][0] = sVtxPrev[i][0] - v->ob[0];
+            sLoadDpos[dest_index][1] = sVtxPrev[i][1] - v->ob[1];
+            sLoadDpos[dest_index][2] = sVtxPrev[i][2] - v->ob[2];
+        } else {
+            sLoadDpos[dest_index][0] = sLoadDpos[dest_index][1] = sLoadDpos[dest_index][2] = 0.0f;
+        }
+        vtx_shade(v, vn, d, inv127);
+        d->color.a = v->cn[3]; /* with G_FOG the shader replaces it by the fog factor */
+    }
+}
+#endif
+
 static void gfx_sp_vertex_impl(size_t n_vertices, size_t dest_index, const Vtx *vertices) {
+    /* PORT PERF (2026-10-01): loop invariants hoisted - the aspect squeeze was a float division per
+     * vertex (gfx_adjust_x_for_aspect_ratio), the light intensities divided by 127 per light per vertex */
+    const float aspect = gfx_adjust_x_for_aspect_ratio(1.0f);
+    const float inv127 = 1.0f / 127.0f;
+#ifdef __3DS__
+    if (gPortGpuVtx) {
+        gfx_sp_vertex_gpu(n_vertices, dest_index, vertices);
+        return;
+    }
+#endif
     for (size_t i = 0; i < n_vertices; i++, dest_index++) {
         const Vtx_t *v = &vertices[i].v;
         const Vtx_tn *vn = &vertices[i].n;
@@ -1424,6 +1910,9 @@ static void gfx_sp_vertex_impl(size_t n_vertices, size_t dest_index, const Vtx *
         sPVStamp[dest_index] = 0; /* its packed form (gfx_sp_tri1_impl) is stale */
 #ifdef __3DS__
         sBatchStamp[dest_index] = 0; /* and so is its VBO copy in the current batch */
+        if (gPortReplayRec) {
+            rec_load_vertex((int)dest_index, v, sVtxPrev != NULL ? sVtxPrev[i] : NULL);
+        }
 #endif
         
         float x = v->ob[0] * rsp.MP_matrix[0][0] + v->ob[1] * rsp.MP_matrix[1][0] + v->ob[2] * rsp.MP_matrix[2][0] + rsp.MP_matrix[3][0];
@@ -1437,97 +1926,9 @@ static void gfx_sp_vertex_impl(size_t n_vertices, size_t dest_index, const Vtx *
          * supersample in both axes in 3D scenes, none for 2D backgrounds). */
         x += rsp.half_px_x * w;
         y -= rsp.half_px_y * w;
-        x = gfx_adjust_x_for_aspect_ratio(x);
+        x *= aspect;
         
-        short U = v->tc[0] * rsp.texture_scaling_factor.s >> 16;
-        short V = v->tc[1] * rsp.texture_scaling_factor.t >> 16;
-        
-        if (rsp.geometry_mode & G_LIGHTING) {
-            if (rsp.lights_changed) {
-                for (int i = 0; i < rsp.current_num_lights - 1; i++) {
-                    calculate_normal_dir(&rsp.current_lights[i], rsp.current_lights_coeffs[i]);
-                }
-                /* PORT (2026-09-30): the game's LookAt (camera direction for G_TEXTURE_GEN environment maps
-                 * and hilites), transformed like the lights - libultraship GfxSpVertex. It was always a fixed
-                 * +x/+y (sm64 PC port): dull swords/metal, the flat N64 boot logo. */
-                /* No LookAt loaded yet this frame: a fixed +x/+y (sm64 PC port). Measured with tools/statediff
-                 * (Chamber of the Sages pedestal, the one surface env-mapped before any LookAt): this 263
-                 * wrong flat px, a ZERO LookAt 449, the previous frame's last one 446. On the N64 the LookAt
-                 * lives outside the 0x420-byte F3DZEX2 data image reloaded per task (that image is zero
-                 * there), so it keeps what an earlier task left - not reproducible exactly. */
-                static const Light_t lookat_def[2] = { {{0, 0, 0}, 0, {0, 0, 0}, 0, {127, 0, 0}, 0},
-                                                       {{0, 0, 0}, 0, {0, 0, 0}, 0, {0, 127, 0}, 0} };
-                for (int k = 0; k < 2; k++) {
-                    const Light_t* la = &rsp.current_lookat[k];
-                    if (la->dir[0] == 0 && la->dir[1] == 0 && la->dir[2] == 0) {
-                        la = &lookat_def[k];
-                    }
-                    calculate_normal_dir(la, rsp.current_lookat_coeffs[k]);
-                }
-                rsp.lights_changed = false;
-            }
-            
-            { extern unsigned int gfx_port_frame_index; static int lt=-2;
-              if(lt==-2){const char*e=getenv("PORT_LIGHTLOG");lt=e?atoi(e):-1;}
-              static int shown=-1; if(lt>=0 && (int)gfx_port_frame_index==lt && shown!=lt){ shown=lt;
-                fprintf(stderr,"[LIGHT] numlights=%d ambient=(%d,%d,%d)\n",
-                  rsp.current_num_lights,
-                  rsp.current_lights[rsp.current_num_lights-1].col[0],
-                  rsp.current_lights[rsp.current_num_lights-1].col[1],
-                  rsp.current_lights[rsp.current_num_lights-1].col[2]); } }
-            int r = rsp.current_lights[rsp.current_num_lights - 1].col[0];
-            int g = rsp.current_lights[rsp.current_num_lights - 1].col[1];
-            int b = rsp.current_lights[rsp.current_num_lights - 1].col[2];
-            
-            for (int i = 0; i < rsp.current_num_lights - 1; i++) {
-                float intensity = 0;
-                intensity += vn->n[0] * rsp.current_lights_coeffs[i][0];
-                intensity += vn->n[1] * rsp.current_lights_coeffs[i][1];
-                intensity += vn->n[2] * rsp.current_lights_coeffs[i][2];
-                intensity /= 127.0f;
-                if (intensity > 0.0f) {
-                    r += intensity * rsp.current_lights[i].col[0];
-                    g += intensity * rsp.current_lights[i].col[1];
-                    b += intensity * rsp.current_lights[i].col[2];
-                }
-            }
-            
-            d->color.r = r > 255 ? 255 : r;
-            d->color.g = g > 255 ? 255 : g;
-            d->color.b = b > 255 ? 255 : b;
-            
-            if (rsp.geometry_mode & G_TEXTURE_GEN) {
-                float dotx = 0, doty = 0;
-                dotx += vn->n[0] * rsp.current_lookat_coeffs[0][0];
-                dotx += vn->n[1] * rsp.current_lookat_coeffs[0][1];
-                dotx += vn->n[2] * rsp.current_lookat_coeffs[0][2];
-                doty += vn->n[0] * rsp.current_lookat_coeffs[1][0];
-                doty += vn->n[1] * rsp.current_lookat_coeffs[1][1];
-                doty += vn->n[2] * rsp.current_lookat_coeffs[1][2];
-                
-                /* libultraship: clamp, and G_TEXTURE_GEN_LINEAR maps through acos */
-                dotx /= 127.0f;
-                doty /= 127.0f;
-                dotx = dotx < -1.0f ? -1.0f : (dotx > 1.0f ? 1.0f : dotx);
-                doty = doty < -1.0f ? -1.0f : (doty > 1.0f ? 1.0f : doty);
-                if (rsp.geometry_mode & G_TEXTURE_GEN_LINEAR) {
-                    dotx = acosf(-dotx) / 4.0f;
-                    doty = acosf(-doty) / 4.0f;
-                } else {
-                    dotx = (dotx + 1.0f) / 4.0f;
-                    doty = (doty + 1.0f) / 4.0f;
-                }
-                U = (int32_t)(dotx * rsp.texture_scaling_factor.s);
-                V = (int32_t)(doty * rsp.texture_scaling_factor.t);
-            }
-        } else {
-            d->color.r = v->cn[0];
-            d->color.g = v->cn[1];
-            d->color.b = v->cn[2];
-        }
-        
-        d->u = U;
-        d->v = V;
+        vtx_shade(v, vn, d, inv127);
         
         // trivial clip rejection
         d->clip_rej = 0;
@@ -1692,6 +2093,9 @@ static int pack_vertex(const PVtx* p, bool z_is_from_0_to_1, int slot) {
     d[10] = p->c[2];
     d[11] = p->c[3];
     d[12] = p->s;
+    if (gPortReplayRec) {
+        rec_vbo_vertex((int)first, d, p->x, p->y, p->w, slot);
+    }
     if (buf_vbo_len == 0) { /* the batch's first vertex, for the draw log (port_draw_snapshot) */
         buf_vbo[0] = p->x, buf_vbo[1] = p->y, buf_vbo[2] = z_is_from_0_to_1 ? (p->z + p->w) * 0.5f : p->z;
         buf_vbo[3] = p->w, buf_vbo[4] = p->uv[0][0], buf_vbo[5] = p->uv[0][1], buf_vbo[6] = p->uv[1][0];
@@ -1706,11 +2110,18 @@ static int pack_vertex(const PVtx* p, bool z_is_from_0_to_1, int slot) {
 }
 #endif
 
+#ifdef __3DS__
+static void gpu_pack_clip_tri(const PVtx* t[3]);
+#endif
 static void gfx_pack_tri(const PVtx* t[3], bool z_is_from_0_to_1) {
     if (buf_vbo_num_tris == MAX_BUFFERED) {
         gfx_flush();
     }
 #ifdef __3DS__
+    if (gPortGpuVtx) { /* GPU path: a piece of a triangle split/clipped on the CPU, in clip space */
+        gpu_pack_clip_tri(t);
+        return;
+    }
     if (!gPortLegacyVbo) {
         int ix[3], i;
         for (i = 0; i < 3; i++) {
@@ -1956,7 +2367,15 @@ static void gfx_select_target(void) {
         return;
     }
     gfx_flush();
+    if (want != NULL && gPortReplayRec) {
+        /* an off-screen render (read back into game memory): this frame is drawn straight away instead */
+        extern void gfx_citro3d_rec_abort(void);
+        gfx_citro3d_rec_abort();
+        gPortReplayRec = 0;
+        gPortReplayBroken = 1;
+    }
     sDrawTarget = want;
+    sGpuSlotCur = -1; /* the aspect squeeze differs on off-screen targets */
     if (want != NULL) {
         gfx_current_dimensions.width = SCREEN_WIDTH;
         gfx_current_dimensions.height = SCREEN_HEIGHT;
@@ -1987,10 +2406,311 @@ static struct {
     bool z_is_from_0_to_1;
 } sTC;
 
+#ifdef __3DS__
+/* ---- GPU vertex path: triangles (see the slot table above) ---- */
+typedef struct {
+    float pos[4];  /* model space, w = 1 (rectangles, split pieces: clip space, identity slot) */
+    float uv0[2], uv1[2];
+    float dpos[4]; /* skinned: previous frame's position - this one; w = 1: shade alpha is already fog */
+    uint8_t c[4];  /* shade (alpha replaced by fog in the shader when G_FOG) */
+    uint8_t idx;   /* palette index */
+    uint8_t pad[3];
+} GpuVtx;          /* 56 bytes = GPU_STRIDE in gfx_citro3d.c */
+extern void* gfx_citro3d_gpu_vbo(int** pos, u32* cap, float scale[4]);
+extern void gfx_citro3d_gpu_params(float fogMul, float fogOff, float fogOn, float conv);
+extern void gfx_citro3d_gpu_cull(int mode);
+static GpuVtx* sGpuVbo;
+static int* sGpuVboPos;
+static u32 sGpuVboCap;
+static float sGpuScale[4];
+static uint32_t sGpuVboBatch;
+static int sGpuCull = -1, sGpuFogOn = -1;
+static int16_t sGpuFogMul, sGpuFogOff;
+static float sGpuConvSet = -1.0f;
+
+/* per-triangle draw state the GPU path owns: cull mode, fog, stereo convergence (rectangles change the
+ * geometry mode directly, so this is checked per triangle, not only after state commands) */
+static int gpu_tri_state(void) {
+    int cull = (rsp.geometry_mode & G_CULL_BOTH) >> 9; /* 1 front, 2 back, 3 both */
+    int fogOn = (rsp.geometry_mode & G_FOG) != 0;
+    float conv = stereo_conv();
+    if (cull == 3) {
+        return 0; /* the CPU path drew nothing either */
+    }
+    if (cull != sGpuCull) {
+        gfx_flush();
+        gfx_citro3d_gpu_cull(cull);
+        sGpuCull = cull;
+    }
+    if (fogOn != sGpuFogOn || conv != sGpuConvSet || (fogOn && (rsp.fog_mul != sGpuFogMul || rsp.fog_offset != sGpuFogOff))) {
+        gfx_flush();
+        /* N64 fog = z / w * mul + off; the shader sees z' = -(z + w) / 2: z / w = -2 z'/w - 1 */
+        gfx_citro3d_gpu_params(-2.0f * rsp.fog_mul, (float)rsp.fog_offset - rsp.fog_mul, (float)fogOn, conv);
+        sGpuFogOn = fogOn, sGpuConvSet = conv, sGpuFogMul = rsp.fog_mul, sGpuFogOff = rsp.fog_offset;
+    }
+    return 1;
+}
+
+/* PORT PERF (2026-10-01): the palette PERSISTS across draws - an entry stays in its uniforms until the
+ * palette is full (then it is emptied after a flush) or the frame ends; each draw uploads only the
+ * entries added since the previous one. (Uploading the whole palette per draw and drawing whenever it
+ * was full gave 367 draws/frame instead of 144 and tripled the draw-submission cost.) */
+static int gpu_pal_index(uint16_t slot) {
+    if (slot == GPU_SLOT_IDENTITY) {
+        return sIdentPalBatch == sGpuPalEpoch ? sIdentPalIdx : -1;
+    }
+    return sSlotPalBatch[slot] == sGpuPalEpoch ? sSlotPalIdx[slot] : -1;
+}
+
+static int gpu_pal_add(uint16_t slot) {
+    int i = gpu_pal_index(slot);
+    if (i >= 0) {
+        return i;
+    }
+    i = sGpuPalN++;
+    sGpuPal[i] = slot;
+    if (slot == GPU_SLOT_IDENTITY) {
+        sIdentPalBatch = sGpuPalEpoch, sIdentPalIdx = (uint8_t)i;
+    } else {
+        sSlotPalBatch[slot] = sGpuPalEpoch, sSlotPalIdx[slot] = (uint8_t)i;
+    }
+    return i;
+}
+
+/* texture coordinates of a loaded vertex under the current render state (libultraship per-tile math) */
+static inline void gpu_uv(const struct LoadedVertex* lv, float uv[2][2]) {
+    int t;
+    for (t = 0; t < 2; t++) {
+        uv[t][0] = uv[t][1] = 0.0f;
+        if (sTC.used_textures[t]) {
+            float u = lv->u * sTC.u_scale[t] - sTC.u_off[t], v = lv->v * sTC.v_scale[t] - sTC.v_off[t];
+            if (sTC.linear_filter) {
+                u += 0.5f;
+                v += 0.5f;
+            }
+            uv[t][0] = u * sTC.inv_tex_w[t];
+            uv[t][1] = v * sTC.inv_tex_h[t];
+        }
+    }
+}
+
+/* a piece of a triangle split/clipped on the CPU (gfx_emit_tri), drawn in clip space via the identity
+ * palette entry with its shade/fog precomputed (dpos.w = 1) */
+static void gpu_pack_clip_tri(const PVtx* t[3]) {
+    int i, ix[3], pal = gpu_pal_index(GPU_SLOT_IDENTITY);
+    if (pal < 0) {
+        pal = gpu_pal_add(GPU_SLOT_IDENTITY); /* the caller made room */
+    }
+    if (sGpuVboBatch != sBatchId) {
+        sGpuVbo = (GpuVtx*)gfx_citro3d_gpu_vbo(&sGpuVboPos, &sGpuVboCap, sGpuScale);
+        sGpuVboBatch = sBatchId;
+    }
+    for (i = 0; i < 3; i++) {
+        const PVtx* p = t[i];
+        GpuVtx* d;
+        int k;
+        if (sGpuVbo == NULL || (u32)*sGpuVboPos >= sGpuVboCap) {
+            return;
+        }
+        ix[i] = (*sGpuVboPos)++;
+        d = &sGpuVbo[ix[i]];
+        d->pos[0] = p->x, d->pos[1] = p->y, d->pos[2] = p->z, d->pos[3] = p->w;
+        d->uv0[0] = p->uv[0][0] * sGpuScale[0];
+        d->uv0[1] = 1 - p->uv[0][1] * sGpuScale[1];
+        d->uv1[0] = p->uv[1][0] * sGpuScale[2];
+        d->uv1[1] = 1 - p->uv[1][1] * sGpuScale[3];
+        d->dpos[0] = d->dpos[1] = d->dpos[2] = 0.0f;
+        d->dpos[3] = 1.0f;
+        for (k = 0; k < 4; k++) {
+            float c = p->c[k] * 255.0f + 0.5f;
+            d->c[k] = (uint8_t)(c < 0.0f ? 0.0f : c > 255.0f ? 255.0f : c);
+        }
+        d->idx = (uint8_t)pal;
+    }
+    if (!gfx_citro3d_idx_push(ix[0], ix[1], ix[2])) {
+        return;
+    }
+    buf_vbo_len = buf_vbo_len ? buf_vbo_len : 1;
+    if (++buf_vbo_num_tris == MAX_BUFFERED) {
+        gfx_flush();
+    }
+}
+
+/* clip z and w of a loaded vertex (two dot products, cached until the slot is reloaded) */
+static inline const float* gpu_vtx_zw(int slot, uint16_t sl) {
+    if (sZWStale[slot]) {
+        const struct LoadedVertex* lv = &rsp.loaded_vertices[slot];
+        float rows[4][4];
+        gfx_gpu_slot_rows(sl, 2, rows);
+        float o2 = rows[2][0] * lv->x + rows[2][1] * lv->y + rows[2][2] * lv->z + rows[2][3];
+        float w = rows[3][0] * lv->x + rows[3][1] * lv->y + rows[3][2] * lv->z + rows[3][3];
+        sZW[slot][0] = -2.0f * o2 - w; /* out.z = -(z + w) / 2 */
+        sZW[slot][1] = w;
+        sZWStale[slot] = 0;
+    }
+    return sZW[slot];
+}
+
+/* the CPU path's N64 triangle setup for one triangle (big near triangles: screen-linear shade/fog by
+ * splitting, near-plane clamp, guard-band clip): build its clip-space vertices and hand it over */
+static void gpu_emit_cpu(const uint8_t vidx[3], const uint16_t sl[3]) {
+    PVtx pv[3];
+    int i;
+    for (i = 0; i < 3; i++) {
+        const struct LoadedVertex* lv = &rsp.loaded_vertices[vidx[i]];
+        float rows[4][4], o[4];
+        int r;
+        PVtx* p = &pv[i];
+        gfx_gpu_slot_rows(sl[i], 2, rows);
+        for (r = 0; r < 4; r++) {
+            o[r] = rows[r][0] * lv->x + rows[r][1] * lv->y + rows[r][2] * lv->z + rows[r][3];
+        }
+        p->x = -o[1], p->y = o[0], p->w = o[3], p->z = -2.0f * o[2] - o[3];
+        gpu_uv(lv, p->uv);
+        p->c[0] = lv->color.r * (1.0f / 255.0f);
+        p->c[1] = lv->color.g * (1.0f / 255.0f);
+        p->c[2] = lv->color.b * (1.0f / 255.0f);
+        if (rsp.geometry_mode & G_FOG) { /* as gfx_sp_vertex on the CPU path */
+            float w = fabsf(p->w) < 0.001f ? 0.001f : p->w, winv = 1.0f / w;
+            float fz;
+            if (winv < 0.0f) winv = 32767.0f;
+            fz = p->z * winv * rsp.fog_mul + rsp.fog_offset;
+            fz = fz < 0.0f ? 0.0f : fz > 255.0f ? 255.0f : fz;
+            p->c[3] = fz * (1.0f / 255.0f);
+        } else {
+            p->c[3] = lv->color.a * (1.0f / 255.0f);
+        }
+        p->s = stereo_offset(p->w);
+    }
+    if (gpu_pal_index(GPU_SLOT_IDENTITY) < 0 && sGpuPalN >= GPU_PAL) {
+        gfx_flush();
+        sGpuPalEpoch++;
+        sGpuPalN = sGpuPalSent = 0;
+    }
+    gpu_pal_add(GPU_SLOT_IDENTITY);
+    sCurVidx = NULL;
+    gfx_emit_tri(&pv[0], &pv[1], &pv[2], sTC.z_is_from_0_to_1);
+}
+
+static void gpu_emit_tri(const uint8_t vidx[3]) {
+    uint16_t sl[3];
+    int i, j, need = 0, ix[3];
+    for (i = 0; i < 3; i++) {
+        sl[i] = vidx[i] >= MAX_VERTICES ? GPU_SLOT_IDENTITY : sLoadSlot[vidx[i]];
+    }
+    if (vidx[0] < MAX_VERTICES && vidx[1] < MAX_VERTICES && vidx[2] < MAX_VERTICES) {
+        /* N64-exact cases stay on the CPU (gfx_emit_tri_one): big depth range (the RDP shades and fogs
+         * screen-linearly; Fire Temple floors were ~25% too dark without the split), a vertex behind
+         * the eye or in front of the near plane (the NoN microcode clamps there; the PICA would clip) */
+        const float* a = gpu_vtx_zw(vidx[0], sl[0]);
+        const float* b = gpu_vtx_zw(vidx[1], sl[1]);
+        const float* c = gpu_vtx_zw(vidx[2], sl[2]);
+        float hi = a[1] > b[1] ? a[1] : b[1], lo = a[1] < b[1] ? a[1] : b[1];
+        hi = c[1] > hi ? c[1] : hi;
+        lo = c[1] < lo ? c[1] : lo;
+        if (lo <= 0.0f || hi >= SUBDIV_MAX_RATIO * lo || a[0] < -a[1] || b[0] < -b[1] || c[0] < -c[1]) {
+            gpu_emit_cpu(vidx, sl);
+            return;
+        }
+    }
+    for (i = 0; i < 3; i++) {
+        int dup = 0;
+        for (j = 0; j < i; j++) dup |= sl[j] == sl[i];
+        if (!dup && gpu_pal_index(sl[i]) < 0) need++;
+    }
+    if (sGpuPalN + need > GPU_PAL) { /* palette full: draw what uses it, then start an empty one */
+        gfx_flush();
+        sGpuPalEpoch++;
+        sGpuPalN = sGpuPalSent = 0;
+    } else if (buf_vbo_num_tris == MAX_BUFFERED) {
+        gfx_flush();
+    }
+    if (sGpuVboBatch != sBatchId) { /* textures are bound per batch: fetch once */
+        sGpuVbo = (GpuVtx*)gfx_citro3d_gpu_vbo(&sGpuVboPos, &sGpuVboCap, sGpuScale);
+        sGpuVboBatch = sBatchId;
+    }
+    for (i = 0; i < 3; i++) {
+        int slot = vidx[i];
+        const struct LoadedVertex* lv = &rsp.loaded_vertices[slot];
+        GpuVtx* d;
+        if (sBatchStamp[slot] == sBatchId) {
+            ix[i] = sBatchVtx[slot];
+            continue;
+        }
+        if (sGpuVbo == NULL || (u32)*sGpuVboPos >= sGpuVboCap) {
+            return; /* this frame's vertex buffer is full */
+        }
+        ix[i] = (*sGpuVboPos)++;
+        d = &sGpuVbo[ix[i]];
+        d->pos[0] = lv->x, d->pos[1] = lv->y, d->pos[2] = lv->z, d->pos[3] = 1.0f;
+        d->dpos[3] = 0.0f;
+        { /* texture coordinates: as gfx_sp_tri1_impl's packed vertices (libultraship per-tile math) */
+            float uv[2][2] = { { 0.0f, 0.0f }, { 0.0f, 0.0f } };
+            int t;
+            for (t = 0; t < 2; t++) {
+                if (sTC.used_textures[t]) {
+                    float u = lv->u * sTC.u_scale[t] - sTC.u_off[t], v = lv->v * sTC.v_scale[t] - sTC.v_off[t];
+                    if (sTC.linear_filter) {
+                        u += 0.5f;
+                        v += 0.5f;
+                    }
+                    uv[t][0] = u * sTC.inv_tex_w[t];
+                    uv[t][1] = v * sTC.inv_tex_h[t];
+                }
+            }
+            d->uv0[0] = uv[0][0] * sGpuScale[0];
+            d->uv0[1] = 1 - uv[0][1] * sGpuScale[1];
+            d->uv1[0] = uv[1][0] * sGpuScale[2];
+            d->uv1[1] = 1 - uv[1][1] * sGpuScale[3];
+        }
+        if (slot < MAX_VERTICES) {
+            d->dpos[0] = sLoadDpos[slot][0], d->dpos[1] = sLoadDpos[slot][1], d->dpos[2] = sLoadDpos[slot][2];
+        } else {
+            d->dpos[0] = d->dpos[1] = d->dpos[2] = 0.0f;
+        }
+        d->c[0] = lv->color.r, d->c[1] = lv->color.g, d->c[2] = lv->color.b, d->c[3] = lv->color.a;
+        d->idx = (uint8_t)gpu_pal_add(sl[i]);
+        sBatchVtx[slot] = (uint16_t)ix[i];
+        sBatchStamp[slot] = sBatchId;
+    }
+    if (stereo_conv() != 0.0f && sStereoDrawMode == 0) {
+        /* 3D on: feed the border probes of the automatic convergence (gfx_3ds.c) as the CPU path does;
+         * clip x/y/w per vertex from its slot rows (out0 = y, out1 = -x, out3 = w), once per frame */
+        static PVtx sProbeV[MAX_VERTICES + 4];
+        const PVtx* t[3];
+        for (i = 0; i < 3; i++) {
+            int slot = vidx[i];
+            if (slot >= MAX_VERTICES || sProbeStale[slot]) { /* rectangles: rewritten without a load */
+                float rows[4][4];
+                const struct LoadedVertex* lv = &rsp.loaded_vertices[slot];
+                gfx_gpu_slot_rows(sl[i], 2, rows);
+                sProbeV[slot].y = rows[0][0] * lv->x + rows[0][1] * lv->y + rows[0][2] * lv->z + rows[0][3];
+                sProbeV[slot].x = -(rows[1][0] * lv->x + rows[1][1] * lv->y + rows[1][2] * lv->z + rows[1][3]);
+                sProbeV[slot].w = rows[3][0] * lv->x + rows[3][1] * lv->y + rows[3][2] * lv->z + rows[3][3];
+                sProbeStale[slot] = 0;
+            }
+            t[i] = &sProbeV[slot];
+        }
+        if (t[0]->w != 1.0f) {
+            stereo_probe_tri(t);
+        }
+    }
+    if (!gfx_citro3d_idx_push(ix[0], ix[1], ix[2])) {
+        return;
+    }
+    buf_vbo_len = buf_vbo_len ? buf_vbo_len : 1;
+    if (++buf_vbo_num_tris == MAX_BUFFERED) {
+        gfx_flush();
+    }
+}
+#endif
+
 static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx);
 static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
     uint64_t t0 = PERF_T(), f0 = gPortPerfFlush;
+    PROF_SET(PROF_TRI);
     gfx_sp_tri1_impl(vtx1_idx, vtx2_idx, vtx3_idx);
+    PROF_SET(PROF_DL);
     gPortPerfTri += (PERF_T() - t0) - (gPortPerfFlush - f0);
 }
 
@@ -2041,6 +2761,11 @@ static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_id
      * here scans the environment for every tri (thousands/frame) and crushes emulated fps. */
     static int nocull = -2;
     if (nocull == -2) nocull = getenv("PORT_NOCULL") ? 1 : 0;
+#ifdef __3DS__
+    if (gPortGpuVtx) { /* the GPU culls (and clips) */
+        if (!gpu_tri_state()) return;
+    } else
+#endif
     if (nocull) { /* skip */ } else
     if ((rsp.geometry_mode & G_CULL_BOTH) != 0) {
         /* PORT PERF (2026-09-30): orientation without the three divisions (~19 cycles each on the ARM11 VFP).
@@ -2064,6 +2789,7 @@ static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_id
     }
     
     if (sTriStateOk) {
+        PROF_SET(PROF_TRI_BUILD);
         goto emit_vertices; /* render state unchanged since the previous triangle */
     }
 #ifdef __3DS__
@@ -2166,7 +2892,15 @@ static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_id
         consts.prim_lod_frac = rdp.prim_lod_frac;
     }
     if (usage & (1u << (8 + CCS_LODF))) { /* fast3d approximation: by distance */
-        float distance_frac = (v1->w - 3000.0f) / 3000.0f;
+        float w1 = v1->w;
+#ifdef __3DS__
+        if (gPortGpuVtx && vtx1_idx < MAX_VERTICES && sGpuSlot != NULL && sLoadSlot[vtx1_idx] < sGpuSlotN) {
+            /* GPU path: the vertex is in model space; its w is the slot's w row (one dot product) */
+            const float* r = sGpuSlot[sLoadSlot[vtx1_idx]].rows[2][3];
+            w1 = r[0] * v1->x + r[1] * v1->y + r[2] * v1->z + r[3];
+        }
+#endif
+        float distance_frac = (w1 - 3000.0f) / 3000.0f;
         if (distance_frac < 0.0f) distance_frac = 0.0f;
         if (distance_frac > 1.0f) distance_frac = 1.0f;
         consts.lod_frac = distance_frac * 255.0f;
@@ -2256,8 +2990,15 @@ static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_id
     sTriStateOk = !(usage & (1u << (8 + CCS_LODF)));
 
 emit_vertices:;
-    PVtx pv[3];
     const uint8_t vidx[3] = { vtx1_idx, vtx2_idx, vtx3_idx };
+#ifdef __3DS__
+    if (gPortGpuVtx) { /* GPU path: indices (+ any vertex new to this batch), nothing else per triangle */
+        PROF_SET(PROF_EMIT);
+        gpu_emit_tri(vidx);
+        return;
+    }
+#endif
+    PVtx pv[3];
     for (int i = 0; i < 3; i++) {
         PVtx* p = &pv[i];
         /* PORT PERF (2026-09-30): a loaded vertex's packed form depends only on the vertex and the render
@@ -2304,10 +3045,21 @@ emit_vertices:;
         uint64_t te = PERF_T(), fe = gPortPerfFlush;
 #ifdef __3DS__
         sCurVidx = vidx; /* unsplit, the triangle's vertices are the loaded ones (reusable) */
+        if (gPortReplayRec) { /* replay recipes of split/clipped pieces refer to these three */
+            int i;
+            sRecTriOk = 1;
+            for (i = 0; i < 3; i++) {
+                sRecTriSrc[i] = sLoadSrc[vidx[i]];
+                sRecTriOk &= sRecTriSrc[i] != REC_NONE;
+                sRecTriPos[i][0] = pv[i].x, sRecTriPos[i][1] = pv[i].y, sRecTriPos[i][2] = pv[i].w;
+            }
+        }
 #endif
+        PROF_SET(PROF_EMIT);
         gfx_emit_tri(&pv[0], &pv[1], &pv[2], sTC.z_is_from_0_to_1);
 #ifdef __3DS__
         sCurVidx = NULL;
+        sRecTriOk = 0;
 #endif
         gPortPerfEmit += (PERF_T() - te) - (gPortPerfFlush - fe);
     }
@@ -2325,6 +3077,7 @@ static void gfx_calc_and_set_viewport(const Vp_t *viewport) {
     float x = (viewport->vtrans[0] / 4.0f) - width / 2.0f;
     float y = SCREEN_HEIGHT - ((viewport->vtrans[1] / 4.0f) + height / 2.0f);
     rsp.half_px_x = width > 0.0f ? 1.0f / width : 0.0f;
+    sGpuSlotCur = -1;
     rsp.half_px_y = height > 0.0f ? 1.0f / height : 0.0f;
     rdp.vp_raw[0] = x;
     rdp.vp_raw[1] = y;
@@ -2753,7 +3506,13 @@ static void gfx_draw_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lr
     }
 }
 
+static void gfx_dp_texture_rectangle_impl(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint8_t tile, int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy, bool flip);
 static void gfx_dp_texture_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint8_t tile, int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy, bool flip) {
+    PROF_SET(PROF_RECT);
+    gfx_dp_texture_rectangle_impl(ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy, flip);
+    PROF_SET(PROF_DL);
+}
+static void gfx_dp_texture_rectangle_impl(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint8_t tile, int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy, bool flip) {
     uint64_t saved_combine_mode = rdp.combine_mode;
     uint8_t saved_first_tile = rdp.first_tile;
     if (rdp.first_tile != (tile & 7)) { /* the rectangle draws with its own tile (libultraship) */
@@ -3137,6 +3896,7 @@ static void gfx_run_dl(Gfx* cmd) {
 #ifdef F3DEX_GBI_2
             {
                 uint64_t tm = PERF_T();
+                PROF_SET(PROF_MTX);
                 gfx_sp_matrix(C0(0, 8) ^ G_MTX_PUSH, (const int32_t *) seg_addr_mtx(cmd->words.w1));
                 gPortPerfMtx += PERF_T() - tm;
             }
@@ -3411,6 +4171,11 @@ void gfx_start_frame(void) {
     rsp.lights_changed = true;
     sPVState++; /* the stereo convergence changes per frame */
 #ifdef __3DS__
+    sGpuSlotN = 0, sGpuSlotCur = -1; /* GPU path: slots are per frame; draw state re-sent on first use */
+    sGpuCull = -1, sGpuFogOn = -1, sGpuConvSet = -1.0f;
+    sGpuPalN = sGpuPalSent = 0, sGpuPalEpoch++;
+#endif
+#ifdef __3DS__
     sBatchId++;
 #endif
     sBgLastFrame = sBgThisFrame; gPortPrerenderedFrame = sBgLastFrame || sStereoRoomThisFrame; sStereoRoomThisFrame = 0;
@@ -3460,16 +4225,83 @@ void gfx_run(Gfx *commands) {
     
     double t0 = gfx_wapi->get_time();
     gfx_rapi->start_frame();
+#ifdef __3DS__
+    if (gPortReplayRec) {
+        extern void gfx_citro3d_rec_begin(void);
+        int k, top;
+        gfx_citro3d_rec_begin();
+        for (k = 0; k < 2; k++) { /* the t = 1/3, 2/3 stacks start like the real one */
+            for (top = 0; top < 11; top++) {
+                memcpy(sAltMV[k][top], rsp.modelview_matrix_stack[top], sizeof(sAltMV[k][top]));
+            }
+            memcpy(sAltP[k], rsp.P_matrix, sizeof(sAltP[k]));
+        }
+    }
+#endif
+    PROF_SET(PROF_DL);
     gfx_run_dl(commands);
     gfx_flush();
     { extern void PortGfx_FrameReady(void); PortGfx_FrameReady(); }
     double t1 = gfx_wapi->get_time();
     //printf("Process %f %f\n", t1, t1 - t0);
+#ifdef __3DS__
+    if (gPortReplayRec) {
+        /* the walk only recorded: draw its first shown frame (t = 1/3, 2/3, or the logic frame) */
+        extern void gfx_citro3d_rec_end(void);
+        extern void gfx_citro3d_replay(void);
+        int k = gPortReplayBroken ? 2 : gPortReplayFirstK;
+        gPortReplayRec = 0;
+        gfx_citro3d_rec_end();
+        PROF_SET(PROF_REPLAY);
+        if (gPortGpuVtx) {
+            extern void gfx_citro3d_replay_variant(int k);
+            gfx_citro3d_replay_variant(k); /* palette matrices of that in-between frame; no VBO rewrite */
+        } else if (k != 2) {
+            gfx_replay_positions(k, gfx_rapi->z_is_from_0_to_1());
+        }
+        gfx_citro3d_replay();
+        if (gPortGpuVtx) {
+            extern void gfx_citro3d_replay_variant(int k);
+            gfx_citro3d_replay_variant(2);
+        }
+        PROF_SET(PROF_SWAP);
+        gPortInterpExtra = k < 2;
+        gfx_wapi->swap_buffers_begin();
+        gPortInterpExtra = 0;
+        port_draw_log_commit();
+        return;
+    }
+#endif
+    PROF_SET(PROF_SWAP);
     gfx_wapi->swap_buffers_begin();
 #ifdef __3DS__
     port_draw_log_commit();
 #endif
 }
+
+#ifdef __3DS__
+int gPortReplayFirstK = 2; /* 3ds_main.c: which replay the recording frame shows (0: t = 1/3, 1: 2/3, 2: t = 1) */
+
+/* 3ds_main.c: another shown frame of the recorded logic frame (k as above), on its own retrace */
+void gfx_replay_frame(int k) {
+    extern void gfx_citro3d_replay(void);
+    gPortInterpExtra = k < 2;
+    gfx_wapi->start_frame();
+    PROF_SET(PROF_REPLAY);
+    if (gPortGpuVtx) {
+        extern void gfx_citro3d_replay_variant(int k);
+        gfx_citro3d_replay_variant(k);
+        gfx_citro3d_replay();
+        gfx_citro3d_replay_variant(2);
+    } else {
+        gfx_replay_positions(k, gfx_rapi->z_is_from_0_to_1());
+        gfx_citro3d_replay();
+    }
+    PROF_SET(PROF_SWAP);
+    gfx_wapi->swap_buffers_begin();
+    gPortInterpExtra = 0;
+}
+#endif
 
 void gfx_end_frame(void) {
     if (!dropped_frame) {

@@ -1,0 +1,33 @@
+#ifndef PORT_PROF_H
+#define PORT_PROF_H
+/* PORT (2026-09-30): sampling profiler for hardware (3ds_main.c Port3ds_ProfThread). The code stores the
+ * stage it is in into one byte (no system call: the tick timers of perf_stages cost a kernel trap each
+ * and distorted the profile); a thread on another core samples that byte every 250 us and the perf report
+ * logs the share of samples per stage. Enabled with prof=1 in settings.txt (the byte stores are always
+ * compiled in: one store per stage change). */
+enum {
+    PROF_GAME,       /* game logic + display-list building (outside the render task) */
+    PROF_DL,         /* display-list walk: command decode, state commands */
+    PROF_VTX,        /* G_VTX: vertex transform + lighting */
+    PROF_TRI,        /* triangle: reject/cull, render-state setup */
+    PROF_TRI_BUILD,  /* triangle: packed vertices (uv, colour) */
+    PROF_EMIT,       /* triangle: clip/split + write to the VBO */
+    PROF_TEX,        /* texture import (decode + upload) */
+    PROF_RECT,       /* texture / fill rectangles */
+    PROF_MTX,        /* G_MTX */
+    PROF_FLUSH,      /* draw submission to the backend */
+    PROF_AUDIO,      /* audio pumps (audio engine on the main thread) */
+    PROF_PACE,       /* waiting for retraces */
+    PROF_SWAP,       /* frame end: GPU submit, readbacks */
+    PROF_GPUWAIT,    /* C3D_FrameBegin: waiting for the GPU */
+    PROF_REPLAY,     /* 60 fps replay: positions + re-issue */
+    PROF_INPUT,      /* input, touch panel */
+    PROF_VTX_LIGHT,  /* G_VTX: lighting + texgen part */
+    PROF_SUBMIT,     /* citro3d draw call (state upload + command emission) */
+    PROF_COUNT
+};
+extern volatile unsigned char gPortProf;
+#define PROF_SET(s) (gPortProf = (unsigned char)(s))
+#define PROF_PUSH(s) unsigned char _profPrev = gPortProf; gPortProf = (unsigned char)(s)
+#define PROF_POP() (gPortProf = _profPrev)
+#endif

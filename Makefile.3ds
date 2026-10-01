@@ -163,6 +163,12 @@ $(GAME_OBJS): CC_FLAGS := $(GAME_CFLAGS) -fno-toplevel-reorder
 # .bss, splitting a segment in two (tools/layout_audit.py flagged 138 segments before these flags).
 $(ASSET_OBJS): CC_FLAGS := $(GAME_CFLAGS) -fno-toplevel-reorder -fno-zero-initialized-in-bss -Dconst=
 $(DEVKIT_OBJS):             CC_FLAGS := $(PORT_CFLAGS)
+# PORT PERF (2026-09-30): the per-frame hot paths (renderer, audio microcode) at -O3 -ffast-math, like the
+# sm64 3DS port's Old-3DS speed-up (RetroGamer02/sm64 "Speed boost"). Game logic keeps -O2 without
+# fast-math so its float results stay those of the N64 code.
+HOT_OBJS := $(BUILD)/port/src/gfx/gfx_pc.o $(BUILD)/port/src/gfx3ds/gfx_citro3d.o \
+            $(BUILD)/port/src/gfx3ds/gfx_3ds.o $(BUILD)/port/src/audio_microcode.o
+$(HOT_OBJS): CC_FLAGS += -O3 -ffast-math
 # gameplay_keep blob must be a VROM-exact contiguous native LE blob (see its header):
 # -O0 keeps order, -fno-toplevel-reorder keeps declaration order, -Dconst= forces data
 # into .data so gpk_blob.ld can gather it with __gpk_blob_start/_end markers.
@@ -176,9 +182,9 @@ $(BUILD)/%.o: %.c
 		$(OBJCOPY) --rename-section .data=ovld_$$ovl --rename-section .bss=ovlb_$$ovl $@ ;; esac
 
 # PICA200 vertex shader -> shader_shbin[] object
-$(BUILD)/shader.shbin: port/src/gfx3ds/shader.v.pica
+$(BUILD)/shader.shbin: port/src/gfx3ds/shader.v.pica port/src/gfx3ds/shader_gpu.v.pica
 	@mkdir -p $(dir $@)
-	$(PICASSO) -o $@ $<
+	$(PICASSO) -o $@ port/src/gfx3ds/shader.v.pica port/src/gfx3ds/shader_gpu.v.pica
 # objcopy -I binary names symbols from the input FILENAME; we cd in first so the input is
 # "shader.shbin" -> _binary_shader_shbin_{start,end,size}. Rename to what the code expects.
 $(SHADER_OBJ): $(BUILD)/shader.shbin

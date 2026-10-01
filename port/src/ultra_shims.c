@@ -224,7 +224,15 @@ void Port3ds_PumpInput(void) {
 extern AudioMgr sAudioMgr;                         /* global instance in main.c */
 extern void AudioMgr_HandleRetrace(AudioMgr* audioMgr);
 extern void PortDbgX(const char* label, unsigned val);
+static void Port3ds_PumpAudio_impl(void);
 void Port3ds_PumpAudio(void) {
+    extern volatile unsigned char gPortProf;
+    unsigned char prev = gPortProf;
+    gPortProf = 10; /* PROF_AUDIO (port_prof.h) */
+    Port3ds_PumpAudio_impl();
+    gPortProf = prev;
+}
+static void Port3ds_PumpAudio_impl(void) {
     /* The threadless port never runs cic6105/AudioMgr_ThreadEntry which set this
      * to ALL, so it can be stuck inhibiting audio updates. Force ALL each frame. */
     R_AUDIOMGR_ACTIVITY_LEVEL = AUDIOMGR_ACTIVITY_LEVEL_ALL;

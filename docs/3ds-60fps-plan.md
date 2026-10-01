@@ -201,3 +201,64 @@ GPU transform (P2) remains the structural fix.
 on New 3DS), so in default adaptive mode they rarely fit yet. 60 fps now depends on pass cost: P2 (GPU
 transform: vertices uploaded once, per-pass matrix uniforms) is the structural fix. Not tagged yet
 (still 20 Hz): EffectSs particles, sword trails, lens flare, billboards outside actors.
+
+### 2026-09-30 (night): replay - in-between frames without re-walking the display list (v21)
+
+- The walk records instead of drawing: `gfx_citro3d.c` logs state calls/draws (`OP_*`, texture uploads run
+  normally); `gfx_pc.c` keeps per VBO vertex a recipe (source vertex: object-space position at t = 1/3
+  and 2/3 + matrix slot + clip adjustments; split/clipped vertices: weights of the original triangle's
+  three vertices, solved in clip x/y/w) and runs the matrix stacks at t = 1/3 and 2/3 alongside the real one.
+- Each shown frame: `C3D_FrameBegin` (waits for the GPU), rewrite VBO positions (+ stereo offset
+  s' = s + dw), re-issue the log, `C3D_FrameEnd`. Colours/lighting/UVs stay those of the logic frame.
+- Fallbacks: an off-screen render target mid-walk (pause menu, PreRender) replays what was recorded and
+  draws the rest directly (no in-between frames that logic frame); readback/capture frames skip recording.
+- Verified (Azahar): replay frames step exactly like the earlier full re-walk passes (9.3 9.6 11.4 10.8
+  10.5); gameplay + pause menu smoke: no crash, 0 UnmappedAccess; Azahar emulated cost walk ~34-50 ms,
+  replay ~10 ms (hardware numbers pending: `perf us/walk+first frame`, `perf us/replay frame`,
+  `perf frames shown/s x10`).
+
+### 2026-10-01: hardware v23 → v24
+
+- **v23 (vsync fix: `C3D_FrameBegin(0)` instead of `C3D_FRAME_SYNCDRAW`, which waited for the next vblank on
+  both screens on top of our pacing):** New 3DS 42–47 frames/s in light scenes (v21: 22–32), 21–25 heavy;
+  Old 3DS 10 updates/s (v21: 8–9). Renderer + audio microcode built `-O3 -ffast-math` (HOT_OBJS).
+- **Sampling profiler (`prof=1`, port_prof.h):** one-byte stage markers, sampler thread on core 1 every 250 us.
+  Old 3DS shares: tri emit 17–25%, swap 9–13%, vtx 11–13%, game 7–9%, audio 8–9%, tri setup 7–9%, mtx 5–7%,
+  replay/submission 5–7%, input 2–7%. New 3DS heavy: swap 15–24%.
+- **v24:** depth readback queued inside the frame (no CPU stall; waited via `C3Di_RenderQueueWaitDone` at the
+  game's first depth read); `C3D_FrameEnd(GX_CMDLIST_FLUSH)` (no whole-linear-heap cache flush; GPU-read
+  buffers are flushed where written); minimap parchment + map texture cached (markers only per redraw).
+- Status report doc: https://claude.ai/code/artifact/5eff6a48-a625-45ec-a3eb-db9e07a1cc82
+
+### 2026-10-01: emulator benchmark, GPU vertex path (gpu_vtx=1, off by default)
+
+**Method.** `tools/perfbench.sh LABEL [secs] [settings...]`: title attract demo (same content every boot),
+sampling profiler on, averages the perf reports. Azahar's clock advances per executed instruction, so the
+numbers are an instruction-count proxy (hardware is 1.5–2.8× slower: cache misses, VFP latency). Repeat
+runs agree within 0.1% (16.318 / 16.337 ms). `perf_stages` distorts even in Azahar (39 vs 16 ms): not used.
+
+| Display-list CPU per frame (Azahar, fps60=0) | ms |
+|---|---|
+| CPU path, baseline | 16.33 |
+| + per-vertex divisions hoisted, alpha/stencil state cached | 15.44 (later 16.1 after restructuring; vertex loop split) |
+| GPU path, first version (palette per draw, no CPU rejection) | 24.5 (367 draws vs 144) |
+| GPU path + persistent palette + lean triangle path | 22.1 |
+| GPU path + per-load bounding-box frustum rejection | **14.1** (179 draws, emit 68 → 27 ‰, build 9 → 0 ‰) |
+
+**GPU path design.** `shader_gpu.v.pica` (second DVLE in shader.shbin): model-space vertices (struct GpuVtx,
+48 bytes: pos, uv0, uv1, skinned delta, shade bytes, palette index), a 20-matrix palette in uniforms (rows
+already produce the portrait output, half-pixel offset and aspect squeeze), fog and the stereo offset in the
+shader, cull mode per draw (`C3D_CullFace`). The CPU keeps lighting/texgen/texture coordinates. Each G_VTX
+load's model-space bounding box is transformed (8 corners) for exact off-screen rejection: a material
+entirely off screen was otherwise still a draw. 60 fps replays re-issue the recorded draws with the palette
+matrices of t = 1/3, 2/3 (no VBO rewrite); skinned vertices blend via the delta attribute.
+
+**Findings.** The per-vertex matrix multiply was NOT the vertex stage's main cost (vertex time barely moved);
+lighting is ~1/3 of it, the rest is bookkeeping. citro3d re-checks every uniform's dirty flag on each draw.
+Title-screen comparison vs the N64 (bootflow, 6 frames): identical to the CPU path (0.9–7.0 mean error).
+
+**Depth readback, lazy (default).** The game reads depth (Navi's glow, lens flare) in its next update; the copy
+now runs at that first read (the v23 synchronous call, outside any frame) instead of right after FrameEnd,
+where it waited for the whole GPU frame (hardware v23: "swap" 15–24% of New 3DS time). Updates that read no
+depth copy nothing. statediff builds keep the eager per-frame copy. The asynchronous in-frame variant
+(v24/v25, hardware freezes) is removed.

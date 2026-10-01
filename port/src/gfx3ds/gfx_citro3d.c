@@ -7,6 +7,7 @@
 #include <string.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #ifndef _LANGUAGE_C
 #define _LANGUAGE_C
@@ -126,6 +127,31 @@ static bool sDepthDecal = false;
 static bool sUseBlend;
 
 static int sBufIdx = 0;
+
+/* PORT (2026-09-30): 60 fps replay (gfx_pc.c "replay"). While recording, every state call and draw is
+ * logged instead of drawn (state calls still run: the texture/shader bookkeeping and citro3d's state
+ * are needed by the walk); gfx_citro3d_replay re-issues the log for each shown frame, after gfx_pc.c
+ * rewrote the VBO positions. Texture uploads are not logged - the textures stay in their slots. */
+enum { OP_SHADER, OP_CONSTS, OP_TEX, OP_SAMPLER, OP_DTEST, OP_DMASK, OP_DECAL, OP_VIEWPORT, OP_SCISSOR,
+       OP_ALPHA, OP_DRAWID, OP_STEREO, OP_DRAWIDX, OP_GPUPAL, OP_GPUPARAM, OP_CULL };
+typedef struct {
+    u8 op;
+    int v[4];
+} RecOp;
+#define REC_OPS 12288
+#define REC_CONSTS 4096
+static RecOp* sOps;
+static struct GfxCombineConsts* sOpConsts;
+static int sOpN, sConstN, sRec, sRecOverflow;
+static void recOp(u8 op, int a, int b, int c, int d) {
+    if (sOpN >= REC_OPS) {
+        sRecOverflow = 1;
+        return;
+    }
+    sOps[sOpN].op = op;
+    sOps[sOpN].v[0] = a, sOps[sOpN].v[1] = b, sOps[sOpN].v[2] = c, sOps[sOpN].v[3] = d;
+    sOpN++;
+}
 
 static void gfx_citro3d_unload_shader(struct ShaderProgram *old_prg) {
 
@@ -492,8 +518,10 @@ static u32 konstColor(u8 krgb, u8 ka) { /* PICA constant: 0xAABBGGRR */
 }
 
 /* program the TEV for the current shader and constants */
+u32 gPortC3dCalls[6]; /* per report: shader loads, const sets, tex binds (same tex), tex binds, samplers, uploads */
 static void updateShader(void)
 {
+    gPortC3dCalls[0]++;
     if (sCurShader < 0 || sCurShader >= SHADER_POOL_CAP) {
         sCurShader = 0;
     }
@@ -520,6 +548,7 @@ static void updateShader(void)
 
 static void gfx_citro3d_load_shader(struct ShaderProgram *new_prg) {
     sCurShader = new_prg - sShaderProgramPool;
+    if (sRec) recOp(OP_SHADER, sCurShader, 0, 0, 0);
     updateShader();
 }
 
@@ -527,7 +556,16 @@ static void gfx_citro3d_set_combine_consts(const struct GfxCombineConsts *consts
     /* only the constant colors change: rewrite them, not the whole TEV program */
     const struct ShaderProgram* prg = &sShaderProgramPool[sCurShader];
     int s;
+    gPortC3dCalls[1]++;
     sConsts = *consts;
+    if (sRec) {
+        if (sConstN < REC_CONSTS) {
+            sOpConsts[sConstN] = *consts;
+            recOp(OP_CONSTS, sConstN++, 0, 0, 0);
+        } else {
+            sRecOverflow = 1;
+        }
+    }
     for (s = 0; s < prg->num_stages; s++) {
         if (prg->stages[s].konst[0] != KC_NONE || prg->stages[s].konst[1] != KC_NONE) {
             C3D_TexEnvColor(C3D_GetTexEnv(s), konstColor(prg->stages[s].konst[0], prg->stages[s].konst[1]));
@@ -589,6 +627,8 @@ static u32 gfx_citro3d_new_texture(void) {
 }
 
 static void gfx_citro3d_select_texture(int tile, u32 texture_id) {
+    gPortC3dCalls[sTexUnits[tile] == (int)texture_id ? 2 : 3]++;
+    if (sRec) recOp(OP_TEX, tile, (int)texture_id, 0, 0);
     C3D_TexBind(tile, &sTexturePool[texture_id]);
     sCurTex = texture_id;
     sTexUnits[tile] = texture_id;
@@ -626,6 +666,7 @@ static void performTexSwizzle(const u8* src, u32* dst, u32 w, u32 h)
 }
 
 static void gfx_citro3d_upload_texture(uint8_t *rgba32_buf, int width, int height) {
+    gPortC3dCalls[5]++;
     if(width < 8 || height < 8 || (width & (width - 1)) || (height & (height - 1)))
     {
         int newWidth = width < 8 ? 8 : (1 << (32 - __builtin_clz(width - 1)));
@@ -693,6 +734,8 @@ static uint32_t gfx_cm_to_opengl(uint32_t val) {
 }
 
 static void gfx_citro3d_set_sampler_parameters(int tile, bool linear_filter, uint32_t cms, uint32_t cmt) {
+    gPortC3dCalls[4]++;
+    if (sRec) recOp(OP_SAMPLER, tile, linear_filter, (int)cms, (int)cmt);
     C3D_TexSetFilter(&sTexturePool[sTexUnits[tile]], linear_filter ? GPU_LINEAR : GPU_NEAREST, linear_filter ? GPU_LINEAR : GPU_NEAREST);
     C3D_TexSetWrap(&sTexturePool[sTexUnits[tile]], gfx_cm_to_opengl(cms), gfx_cm_to_opengl(cmt));
 }
@@ -704,16 +747,19 @@ static void updateDepth()
 }
 
 static void gfx_citro3d_set_depth_test(bool depth_test) {
+    if (sRec) recOp(OP_DTEST, depth_test, 0, 0, 0);
     sDepthTestOn = depth_test;
     updateDepth();
 }
 
 static void gfx_citro3d_set_depth_mask(bool z_upd) {
+    if (sRec) recOp(OP_DMASK, z_upd, 0, 0, 0);
     sDepthUpdateOn = z_upd;
     updateDepth();
 }
 
 static void gfx_citro3d_set_zmode_decal(bool zmode_decal) {
+    if (sRec) recOp(OP_DECAL, zmode_decal, 0, 0, 0);
     sDepthDecal = zmode_decal;
     updateDepth();
 }
@@ -732,6 +778,7 @@ extern int Port3ds_IsOffscreen(void);
 static int sVp[4] = { 0, 0, 400, 240 }, sSc[4] = { 0, 0, 400, 240 };
 
 static void gfx_citro3d_set_viewport(int x, int y, int width, int height) {
+    if (sRec) recOp(OP_VIEWPORT, x, y, width, height);
     if (Port3ds_IsOffscreen()) { /* 1x 320x240-space off-screen target (gfx_3ds.c) */
         C3D_SetViewport(y, 320 - (x + width), height, width);
         return;
@@ -750,6 +797,7 @@ static void gfx_citro3d_set_viewport(int x, int y, int width, int height) {
 
 static void gfx_citro3d_set_scissor(int x, int y, int width, int height)
 {
+    if (sRec) recOp(OP_SCISSOR, x, y, width, height);
     if (Port3ds_IsOffscreen()) {
         C3D_SetScissor(GPU_SCISSOR_NORMAL, y, 320 - (x + width), y + height, 320 - x);
         return;
@@ -771,11 +819,18 @@ static void gfx_citro3d_set_scissor(int x, int y, int width, int height)
  * discard alpha < 8/256. Other translucent draws: discard alpha 0 only (keeps depth clean). */
 static void applyAlphaTest(void)
 {
+    /* PORT PERF (2026-10-01): only when it changes - every C3D_ state call marks state dirty and citro3d
+     * re-sends those GPU registers with the next draw (this ran for every draw, twice in 3D) */
+    static int sLast = -1;
     u32 id = sShaderProgramPool[sCurShader].shader_id1;
-    if (!(id & SHADER_OPT_ALPHA))
+    int want = !(id & SHADER_OPT_ALPHA) ? 0 : (id & SHADER_OPT_TEXTURE_EDGE) ? (sUseBlend ? 1 : 2) : 3;
+    if (want == sLast)
+        return;
+    sLast = want;
+    if (want == 0)
         C3D_AlphaTest(false, GPU_ALWAYS, 0);
-    else if (id & SHADER_OPT_TEXTURE_EDGE)
-        C3D_AlphaTest(true, GPU_GREATER, sUseBlend ? 7 : 48);
+    else if (want != 3)
+        C3D_AlphaTest(true, GPU_GREATER, want == 1 ? 7 : 48);
     else
         C3D_AlphaTest(true, GPU_GREATER, 0);
 }
@@ -790,6 +845,7 @@ static void applyBlend()
 
 static void gfx_citro3d_set_use_alpha(bool use_alpha)
 {
+    if (sRec) recOp(OP_ALPHA, use_alpha, 0, 0, 0);
     sUseBlend = use_alpha;
     applyBlend();
 }
@@ -799,10 +855,16 @@ static void gfx_citro3d_set_use_alpha(bool use_alpha)
 static int sDrawId;
 
 void gfx_citro3d_set_draw_id(int id) {
+    if (sRec) recOp(OP_DRAWID, id, 0, 0, 0);
     sDrawId = id;
 }
 
 static void applyDrawId(void) {
+    static int sLast = -1;
+    if (sDrawId == sLast) {
+        return;
+    }
+    sLast = sDrawId;
     if (sDrawId != 0) {
         C3D_StencilTest(true, GPU_ALWAYS, sDrawId, 0xFF, 0xFF);
         C3D_StencilOp(GPU_STENCIL_KEEP, GPU_STENCIL_KEEP, GPU_STENCIL_REPLACE);
@@ -831,6 +893,7 @@ static float sEyeCur[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
 static int sStereoMode;
 
 void gfx_citro3d_set_stereo_mode(int mode) {
+    if (sRec) recOp(OP_STEREO, mode, 0, 0, 0);
     sStereoMode = mode;
 }
 
@@ -879,7 +942,15 @@ static void setEye(float shift) {
 
 /* submit `count` vertices of the current batch: DrawArrays from `first`, or DrawElements from `idx` -
  * once per eye in stereo (see the viewport/eye notes inside) */
+static void submitDraw_impl(u32 count, u32 first, const u16* idx);
 static void submitDraw(u32 count, u32 first, const u16* idx) {
+    extern volatile unsigned char gPortProf;
+    unsigned char prev = gPortProf;
+    gPortProf = 17; /* PROF_SUBMIT (port_prof.h) */
+    submitDraw_impl(count, first, idx);
+    gPortProf = prev;
+}
+static void submitDraw_impl(u32 count, u32 first, const u16* idx) {
     applyAlphaTest();
     applyDrawId();
     if (gGfx3DSMode == GFX_3DS_MODE_STEREO && !Port3ds_IsOffscreen()) {
@@ -927,6 +998,23 @@ static void submitDraw(u32 count, u32 first, const u16* idx) {
 #define VBO_BYTES (2 * 1024 * 1024)
 #define VBO_VERTS (VBO_BYTES / (VTX_FLOATS * 4))
 
+/* ---- PORT (2026-10-01): GPU vertex path (gpu_vtx=1, shader_gpu.v.pica) ----
+ * Vertices in model space (struct GpuVtx, gfx_pc.c writes them), transformed by a palette of up to
+ * GPU_PAL matrices in vertex-shader uniforms. Fog/stereo parameters and the cull mode are per draw. */
+int gPortGpuVtx;                  /* settings gpu_vtx=1, fixed at init */
+#define GPU_PAL 20
+#define GPU_STRIDE 56             /* sizeof(GpuVtx) in gfx_pc.c */
+#define GPU_VERTS (VBO_BYTES / GPU_STRIDE)
+static int sPalLoc = -1, sFogpLoc = -1, sStpLoc = -1;
+static int sReplayK = 2;          /* the replay being drawn: 0 = t 1/3, 1 = t 2/3, 2 = the logic frame */
+static float sGpuConv, sGpuFog[3];
+#define REC_PALS 4096
+static uint16_t (*sOpPal)[GPU_PAL]; /* recorded palettes (slot ids), OP_GPUPAL v[0] = index, v[1] = count */
+static int sOpPalN;
+static float (*sOpParam)[4];        /* recorded fog/stereo parameters, OP_GPUPARAM v[0] = index */
+static int sOpParamN;
+
+
 /* front-end vertex (gfx_pc.c: x y z w u0 v0 u1 v1 r g b a stereo) -> the PICA layout: portrait target
  * (y, -x), N64 z negated, texcoords scaled into the power-of-two PICA texture of the bound units */
 static inline void writeVertex(float* dst, const float* src, float s0, float t0, float s1, float t1) {
@@ -947,6 +1035,9 @@ static inline void writeVertex(float* dst, const float* src, float s0, float t0,
 
 static void gfx_citro3d_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris)
 {
+    if (sRec) { /* the array path is not recorded (A/B bench only): this frame is not replayable */
+        sRecOverflow = 1;
+    }
     if (sBufIdx * VTX_FLOATS + buf_vbo_len > VBO_BYTES / 4)
     {
         printf("Poly buf over!\n");
@@ -1034,6 +1125,11 @@ void gfx_citro3d_draw_indexed(void) {
     if (n == 0) {
         return;
     }
+    if (sRec) { /* drawn by the replays */
+        recOp(OP_DRAWIDX, (int)sIdxStart, (int)n, 0, 0);
+        sIdxStart = sIdxPos;
+        return;
+    }
     submitDraw(n, 0, sIdxBuf + sIdxStart);
     sIdxStart = sIdxPos;
     {
@@ -1043,25 +1139,121 @@ void gfx_citro3d_draw_indexed(void) {
     }
 }
 
+extern void gfx_gpu_slot_rows(uint16_t slot, int k, float rows[4][4]);
+
+static void gpuUploadPalette(const uint16_t* slots, int start, int n) {
+    int i;
+    float rows[4][4];
+    if (sPalLoc < 0 || n <= 0 || start < 0 || start + n > GPU_PAL) {
+        return;
+    }
+    for (i = 0; i < n; i++) {
+        float* u = (float*)C3D_FVUnifWritePtr(GPU_VERTEX_SHADER, sPalLoc + (start + i) * 4, 4);
+        gfx_gpu_slot_rows(slots[i], sReplayK, rows);
+        /* citro3d uniforms are stored (w, z, y, x) per vec4 */
+        int r;
+        for (r = 0; r < 4; r++) {
+            u[r * 4 + 0] = rows[r][3];
+            u[r * 4 + 1] = rows[r][2];
+            u[r * 4 + 2] = rows[r][1];
+            u[r * 4 + 3] = rows[r][0];
+        }
+    }
+}
+
+static void gpuUploadParams(const float p[4]) {
+    /* p: fog mul, fog offset, fog on, stereo convergence */
+    if (sFogpLoc >= 0) {
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sFogpLoc, p[0], p[1], p[2], 1.0f / 255.0f);
+    }
+    if (sStpLoc >= 0) {
+        /* y = 1 - t of the replay being drawn (skinned vertices' delta toward the previous frame) */
+        float back = sReplayK == 0 ? (2.0f / 3.0f) : sReplayK == 1 ? (1.0f / 3.0f) : 0.0f;
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sStpLoc, p[3], back, 1.0f, 0.0005f);
+    }
+}
+
+/* gfx_pc.c, before a GPU-path draw: palette entries start..start+n-1 (slot ids) added since the last one */
+void gfx_citro3d_gpu_palette(const uint16_t* slots, int start, int n) {
+    if (sRec) {
+        if (sOpPalN < REC_PALS) {
+            memcpy(sOpPal[sOpPalN], slots, sizeof(uint16_t) * n);
+            recOp(OP_GPUPAL, sOpPalN++, start, n, 0);
+        } else {
+            sRecOverflow = 1;
+        }
+    }
+    gpuUploadPalette(slots, start, n);
+}
+
+/* fog multiplier/offset (already folded for z' = -(z + w) / 2), fog on, stereo convergence */
+void gfx_citro3d_gpu_params(float fogMul, float fogOff, float fogOn, float conv) {
+    float p[4] = { fogMul, fogOff, fogOn, conv };
+    if (sRec) {
+        if (sOpParamN < REC_PALS) {
+            memcpy(sOpParam[sOpParamN], p, sizeof(p));
+            recOp(OP_GPUPARAM, sOpParamN++, 0, 0, 0);
+        } else {
+            sRecOverflow = 1;
+        }
+    }
+    gpuUploadParams(p);
+}
+
+/* N64 cull mode (G_CULL_BACK etc. >> 9: 0 none, 1 front, 2 back, 3 both) */
+void gfx_citro3d_gpu_cull(int mode) {
+    if (sRec) recOp(OP_CULL, mode, 0, 0, 0);
+    /* The portrait mapping (y, -x) is a rotation (keeps the winding); the N64 front face is
+     * counter-clockwise on screen. Both = everything culled: the CPU path drew nothing either. */
+    C3D_CullFace(mode == 1 ? GPU_CULL_FRONT_CCW : mode == 2 ? GPU_CULL_BACK_CCW : GPU_CULL_NONE);
+}
+
+/* the GPU-path vertex buffer: base, capacity (vertices) and the running index */
+void* gfx_citro3d_gpu_vbo(int** pos, u32* cap, float scale[4]) {
+    *pos = &sBufIdx;
+    *cap = GPU_VERTS;
+    scale[0] = sTexturePoolScaleS[sTexUnits[0]];
+    scale[1] = sTexturePoolScaleT[sTexUnits[0]];
+    scale[2] = sTexturePoolScaleS[sTexUnits[1]];
+    scale[3] = sTexturePoolScaleT[sTexUnits[1]];
+    return sVboBuffer;
+}
+
 static void gfx_citro3d_init(void)
 {
     sVShaderDvlb = DVLB_ParseFile((u32*)shader_shbin, (u32)(shader_shbin_end - shader_shbin));
 	shaderProgramInit(&sShaderProgram);
-	shaderProgramSetVsh(&sShaderProgram, &sVShaderDvlb->DVLE[0]);
+	shaderProgramSetVsh(&sShaderProgram, &sVShaderDvlb->DVLE[gPortGpuVtx ? 1 : 0]);
 	C3D_BindProgram(&sShaderProgram);
     sEyeLoc = shaderInstanceGetUniformLocation(sShaderProgram.vertexShader, "eye");
     sRemapLoc = shaderInstanceGetUniformLocation(sShaderProgram.vertexShader, "remap");
+    if (gPortGpuVtx) {
+        extern void PortDbgX(const char*, unsigned);
+        sPalLoc = shaderInstanceGetUniformLocation(sShaderProgram.vertexShader, "pal");
+        sFogpLoc = shaderInstanceGetUniformLocation(sShaderProgram.vertexShader, "fogp");
+        sStpLoc = shaderInstanceGetUniformLocation(sShaderProgram.vertexShader, "stp");
+        PortDbgX("[gfx] GPU vertex path ON, palette uniform", (unsigned)sPalLoc);
+    }
     setEye(0.0f);
     setRemap(1.0f, 0.0f);
 
 	// Configure attributes for use with the vertex shader
 	C3D_AttrInfo* attrInfo = C3D_GetAttrInfo();
 	AttrInfo_Init(attrInfo);
+	if (gPortGpuVtx) { /* struct GpuVtx: pos[4] uv0[2] uv1[2] dpos[4] (floats), shade[4] idx (bytes) */
+	    AttrInfo_AddLoader(attrInfo, 0, GPU_FLOAT, 4);         // v0 = position (model space w=1, or clip space)
+	    AttrInfo_AddLoader(attrInfo, 1, GPU_FLOAT, 2);         // v1 = texcoord 0
+	    AttrInfo_AddLoader(attrInfo, 2, GPU_UNSIGNED_BYTE, 4); // v2 = shade 0..255
+	    AttrInfo_AddLoader(attrInfo, 3, GPU_FLOAT, 2);         // v3 = texcoord 1
+	    AttrInfo_AddLoader(attrInfo, 4, GPU_UNSIGNED_BYTE, 1); // v4 = palette index
+	    AttrInfo_AddLoader(attrInfo, 5, GPU_FLOAT, 4);         // v5 = skinned delta; w = 1: fog precomputed
+	} else {
 	AttrInfo_AddLoader(attrInfo, 0, GPU_FLOAT, 4); // v0=position
 	AttrInfo_AddLoader(attrInfo, 1, GPU_FLOAT, 2); // v1=texcoord
 	AttrInfo_AddLoader(attrInfo, 2, GPU_FLOAT, 4); // v2=color
 	AttrInfo_AddLoader(attrInfo, 3, GPU_FLOAT, 2); // v3=texcoord1
 	AttrInfo_AddLoader(attrInfo, 4, GPU_FLOAT, 1); // v4=stereo offset
+	}
 
 	// Create the VBO (vertex buffer object)
 	sVboBuffer = linearAlloc(VBO_BYTES);
@@ -1070,6 +1262,12 @@ static void gfx_citro3d_init(void)
 	// Configure buffers
 	C3D_BufInfo* bufInfo = C3D_GetBufInfo();
 	BufInfo_Init(bufInfo);
+	if (gPortGpuVtx) {
+	    /* buffer order: pos(v0) uv0(v1) uv1(v3) dpos(v5) shade(v2) idx(v4); the stride covers the 3 spare bytes */
+	    BufInfo_Add(bufInfo, sVboBuffer, GPU_STRIDE, 6, 0x425310);
+	    sOpPal = malloc(sizeof(*sOpPal) * REC_PALS);
+	    sOpParam = malloc(sizeof(*sOpParam) * REC_PALS);
+	} else
 	BufInfo_Add(bufInfo, sVboBuffer, VTX_FLOATS * 4, 5, 0x42310); // pos, uv0, uv1, color, stereo
 
     C3D_CullFace(GPU_CULL_NONE);
@@ -1090,11 +1288,110 @@ static void gfx_citro3d_start_frame(void) {
  * showed. Called by gfx_3ds.c right before C3D_FrameEnd submits the frame's commands. */
 void gfx_citro3d_flush_vbo(void) {
     if (sBufIdx > 0) {
-        GSPGPU_FlushDataCache(sVboBuffer, sBufIdx * VTX_FLOATS * sizeof(float));
+        GSPGPU_FlushDataCache(sVboBuffer, sBufIdx * (gPortGpuVtx ? GPU_STRIDE : VTX_FLOATS * sizeof(float)));
     }
     if (sIdxPos > 0) {
         GSPGPU_FlushDataCache(sIdxBuf, sIdxPos * sizeof(u16));
     }
+}
+
+void gfx_citro3d_rec_begin(void) {
+    if (sOps == NULL) {
+        sOps = malloc(sizeof(RecOp) * REC_OPS);
+        sOpConsts = malloc(sizeof(struct GfxCombineConsts) * REC_CONSTS);
+    }
+    sOpN = sConstN = 0;
+    sOpPalN = sOpParamN = 0;
+    sRecOverflow = sOps == NULL || sOpConsts == NULL || (gPortGpuVtx && (sOpPal == NULL || sOpParam == NULL));
+    sRec = !sRecOverflow;
+}
+
+void gfx_citro3d_rec_end(void) {
+    extern int gPortReplayBroken;
+    sRec = 0;
+    if (sRecOverflow) {
+        gPortReplayBroken = 1;
+    }
+}
+
+/* GPU path: which in-between frame the next replay draws (palette matrices, skinned deltas) */
+void gfx_citro3d_replay_variant(int k) {
+    sReplayK = k;
+}
+
+/* re-issue the recorded state calls and draws (one shown frame) */
+void gfx_citro3d_replay(void) {
+    int i;
+    for (i = 0; i < sOpN; i++) {
+        const RecOp* o = &sOps[i];
+        switch (o->op) {
+            case OP_SHADER:
+                gfx_citro3d_load_shader(&sShaderProgramPool[o->v[0]]);
+                break;
+            case OP_CONSTS:
+                gfx_citro3d_set_combine_consts(&sOpConsts[o->v[0]]);
+                break;
+            case OP_TEX:
+                gfx_citro3d_select_texture(o->v[0], (u32)o->v[1]);
+                break;
+            case OP_SAMPLER:
+                gfx_citro3d_set_sampler_parameters(o->v[0], o->v[1] != 0, (uint32_t)o->v[2], (uint32_t)o->v[3]);
+                break;
+            case OP_DTEST:
+                gfx_citro3d_set_depth_test(o->v[0] != 0);
+                break;
+            case OP_DMASK:
+                gfx_citro3d_set_depth_mask(o->v[0] != 0);
+                break;
+            case OP_DECAL:
+                gfx_citro3d_set_zmode_decal(o->v[0] != 0);
+                break;
+            case OP_VIEWPORT:
+                gfx_citro3d_set_viewport(o->v[0], o->v[1], o->v[2], o->v[3]);
+                break;
+            case OP_SCISSOR:
+                gfx_citro3d_set_scissor(o->v[0], o->v[1], o->v[2], o->v[3]);
+                break;
+            case OP_ALPHA:
+                gfx_citro3d_set_use_alpha(o->v[0] != 0);
+                break;
+            case OP_DRAWID:
+                gfx_citro3d_set_draw_id(o->v[0]);
+                break;
+            case OP_STEREO:
+                gfx_citro3d_set_stereo_mode(o->v[0]);
+                break;
+            case OP_GPUPAL:
+                gpuUploadPalette(sOpPal[o->v[0]], o->v[1], o->v[2]);
+                break;
+            case OP_GPUPARAM:
+                gpuUploadParams(sOpParam[o->v[0]]);
+                break;
+            case OP_CULL:
+                gfx_citro3d_gpu_cull(o->v[0]);
+                break;
+            case OP_DRAWIDX:
+                submitDraw((u32)o->v[1], 0, sIdxBuf + o->v[0]);
+                {
+                    extern u32 gPortPerfTris, gPortPerfDraws;
+                    gPortPerfTris += (u32)o->v[1] / 3;
+                    gPortPerfDraws++;
+                }
+                break;
+        }
+    }
+}
+
+/* the walk meets something replay cannot cover (an off-screen render): draw what was recorded so far
+ * now, at the logic frame's own positions, and stop recording - the rest of the frame draws directly */
+void gfx_citro3d_rec_abort(void) {
+    if (!sRec) {
+        return;
+    }
+    sRec = 0;
+    gfx_citro3d_replay();
+    sOpN = sConstN = 0;
+    sOpPalN = sOpParamN = 0;
 }
 
 struct GfxRenderingAPI gfx_citro3d_api = {

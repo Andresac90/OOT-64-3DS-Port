@@ -156,7 +156,13 @@ static void gfx_3ds_init(void)
  * 480x800 AA target alone is 3 MB). */
 static void gfx_3ds_update_stereo(void) {
     float slider = osGet3DSliderState();
-    bool want = slider > 0.02f;
+    bool want;
+    { /* test aid: stereo_test=1 in settings.txt switches 3D on and off every 2 s (no slider needed) */
+        extern int gPortStereoTest;
+        static unsigned sTestFrames;
+        if (gPortStereoTest) slider = ((++sTestFrames / 120) & 1) ? 1.0f : 0.0f;
+    }
+    want = slider > 0.02f;
     bool on = gGfx3DSMode == GFX_3DS_MODE_STEREO;
     int e;
 
@@ -306,12 +312,17 @@ static int sDepthSlot = -1;   /* slot of the most recent depth readback */
 static int sDepthWantFrames;
 static bool sDepthValid;
 static int sFrameSlot;        /* slot this frame's readbacks go to (alternates each frame) */
+static bool sInFrame;         /* between C3D_FrameBegin and C3D_FrameEnd */
+static unsigned sFramesDone;  /* frames ended so far */
+static unsigned sDepthOfFrame = ~0u; /* sFramesDone when the current copy was taken */
+static void gfx_3ds_depth_lazy(void);
 
 void Port3ds_RequestDepth(void) {
     sDepthWantFrames = 60;
 }
 
 const u32* Port3ds_GetDepth(int* width, int* height) {
+    gfx_3ds_depth_lazy();
     *width = ViewW();
     *height = ViewH();
     return (sDepthValid && sDepthSlot >= 0) ? sDepthLinear[sDepthSlot] : NULL;
@@ -327,6 +338,7 @@ const u32* Port3ds_GetDepthSlot(int back, int* width, int* height) {
     return sDepthLinear[back ? (sDepthSlot ^ 1) : sDepthSlot];
 }
 
+/* synchronous depth copy after C3D_FrameEnd (waits for the GPU): the v23 behaviour, default */
 static void gfx_3ds_read_back_depth(void) {
     size_t size = (size_t)ViewW() * ViewH() * 4;
 
@@ -351,6 +363,23 @@ static void gfx_3ds_read_back_depth(void) {
     GSPGPU_InvalidateDataCache(sDepthLinear[sFrameSlot], size);
     sDepthSlot = sFrameSlot;
     sDepthValid = true;
+}
+
+/* PORT PERF (2026-10-01): LAZY depth copy. The game reads depth (Navi's glow, the sun's lens flare) during
+ * its next update; the copy used to run right after C3D_FrameEnd, where C3D_SyncDisplayTransfer first
+ * waits for the GPU to finish the whole frame (hardware v23 profile: "swap" 15-24% of New 3DS time, 9-13%
+ * of Old 3DS). Now the same synchronous copy - the call v23 proved on hardware, outside any frame - runs
+ * at the game's FIRST depth read of an update: the GPU finished long before (pacing + game logic ran in
+ * between), so the wait is about the copy itself, and frames whose update reads no depth copy nothing.
+ * It is still the depth of the frame just shown, which is what the N64 gives (see swap_buffers_begin).
+ * (An asynchronous in-frame copy was tried in v24/v25 together with GX_CMDLIST_FLUSH: hardware froze.) */
+static void gfx_3ds_depth_lazy(void) {
+    if (sInFrame || sTarget == NULL || sDepthOfFrame == sFramesDone || sFramesDone == 0) {
+        return;
+    }
+    sDepthWantFrames = 1;
+    gfx_3ds_read_back_depth();
+    sDepthOfFrame = sFramesDone;
 }
 
 /* Color readback for tools/statediff (renderer ground truth vs ares' RDP framebuffer): the last two
@@ -663,7 +692,19 @@ static bool gfx_3ds_start_frame(void)
     u64 t0;
     gfx_3ds_update_stereo(); /* outside a frame: citro3d refuses to delete targets inside one */
     t0 = svcGetSystemTick();
-    C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+    {
+        extern volatile unsigned char gPortProf;
+        unsigned char prev = gPortProf;
+        gPortProf = 13; /* PROF_GPUWAIT (port_prof.h) */
+        /* PORT PERF (2026-09-30): no C3D_FRAME_SYNCDRAW. That flag runs C3D_FrameSync, which waits for the
+         * NEXT vblank on both screens (citro3d renderqueue.c) - on top of Port3ds_PaceFrame's own retrace
+         * waits. Every frame lost up to a whole retrace there (hardware v21: "gpu wait" 9-15 ms per frame,
+         * each 60 fps replay frame ~16.7 ms = exactly one retrace). Without it FrameBegin only waits for
+         * the GPU to finish the previous frame; presentation stays retrace-paced by 3ds_main.c. */
+        C3D_FrameBegin(0);
+        sInFrame = true;
+        gPortProf = prev;
+    }
     gPortPerfGpuWait += svcGetSystemTick() - t0;
     C3D_RenderTargetClear(sTarget, C3D_CLEAR_ALL, 0x000000FF, 0xFFFFFFFF);
 	C3D_FrameDrawOn(sTarget);
@@ -680,7 +721,27 @@ static void gfx_3ds_swap_buffers_begin(void)
         extern void gfx_citro3d_flush_vbo(void);
         gfx_citro3d_flush_vbo(); /* CPU-written vertices must reach RAM before the GPU runs the frame */
     }
+    {
+        extern int gPortInterpExtra;
+        (void)gPortInterpExtra;
+    }
+    /* C3D_FrameEnd(0) flushes the CPU data cache over the whole linear heap. v24 passed GX_CMDLIST_FLUSH
+     * to skip that, but then the first part of a split command list (the in-frame depth copy splits the
+     * frame) reached the GPU unflushed: hardware froze/crashed (v24, v25), Azahar has no cache to show it.
+     * Kept as is until every GPU-read buffer, command lists included, is flushed explicitly. */
     C3D_FrameEnd(0);
+    sInFrame = false;
+    {
+        extern int gPortInterpExtra;
+        if (!gPortInterpExtra) {
+            sFramesDone++; /* a frame the game may read depth from (gfx_3ds_depth_lazy) */
+            if (sColorWantFrames > 0) {
+                /* tools/statediff (color readback active) compares every frame: eager copy, as before */
+                gfx_3ds_read_back_depth();
+                sDepthOfFrame = sFramesDone;
+            }
+        }
+    }
     {
         /* an in-between frame (60 fps interpolation) re-draws the same display list: the logic frame's
          * readbacks and captures belong to its exact pass, which comes after it */
@@ -698,7 +759,6 @@ static void gfx_3ds_swap_buffers_begin(void)
      * runs once the previous frame's RDP work is done: reading it back here gives the same frame N-1
      * depth. (Reading at the next start_frame was one frame older - measured with tools/statediff:
      * Navi's glow in the adult Water Temple flipped.) */
-    gfx_3ds_read_back_depth();
     gfx_3ds_read_back_color();
     gfx_3ds_capture_frame();
     gfx_3ds_read_back_offscreen();

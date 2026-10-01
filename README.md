@@ -1,203 +1,156 @@
-# The Legend of Zelda: Ocarina of Time
+# Ocarina of Time 3DS Port
 
-[![Build Status][gha-badge]][gha] [![Decompilation Progress][progress-badge]][progress] [![Contributors][contributors-badge]][contributors] [![Discord Channel][discord-badge]][discord]
+An unofficial, fan-made **Nintendo 3DS port of The Legend of Zelda: Ocarina of Time (N64)**, built on the
+[zeldaret/oot](https://github.com/zeldaret/oot) decompilation. The game's own code runs natively on the 3DS
+CPU; a new renderer, audio backend and dual-screen interface replace the N64 hardware.
 
-[gha]: https://github.com/zeldaret/oot/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush
-[gha-badge]: https://img.shields.io/github/actions/workflow/status/zeldaret/oot/ci.yml
+> **This repository contains no ROM and no game assets.** To build and play, you need your own legally
+> obtained copy of the N64 game (NTSC-U 1.0). No prebuilt game binaries are distributed; see [Legal](#legal).
 
-[progress]: https://zelda.deco.mp/games/oot
-[progress-badge]: https://img.shields.io/endpoint?url=https://zelda.deco.mp/assets/csv/progress-oot-shield.json
+This project is not affiliated with, endorsed by, or sponsored by Nintendo.
 
-[contributors]: https://github.com/zeldaret/oot/graphs/contributors
-[contributors-badge]: https://img.shields.io/github/contributors/zeldaret/oot
+## Features
 
-[discord]: https://discord.zelda.deco.mp
-[discord-badge]: https://img.shields.io/discord/688807550715560050?color=%237289DA&logo=discord&logoColor=%23FFFFFF
+- **Both consoles:** New 3DS and Old 3DS (Old 3DS currently runs below full speed, see [Status](#status)).
+- **Top screen:** 400×240 gameplay, original 4:3 or widescreen (toggle on the touch screen, saved).
+- **Stereoscopic 3D** with the 3D slider: automatic convergence on Link, HUD and menus at screen depth.
+- **Bottom screen, in the style of *Ocarina of Time 3D*:** live minimap with Link's position and chest
+  markers, hearts and magic, rupees and keys, touch buttons for the C items (with ammo), first person / Navi,
+  a dedicated **Ocarina** button, a **Boots** button that cycles the boots you own, and shortcuts to the
+  Gear / Map / Items pause pages.
+- **Optional top-screen HUD** (on by default, can be hidden from the touch screen).
+- **Frame interpolation toward 60 fps** (experimental): the game logic keeps the N64's 20 updates per
+  second, and extra in-between frames are shown when there is CPU time for them.
+- **Accuracy work:** the renderer is compared frame by frame against the N64 running the same inputs
+  (tools in `tools/statediff`), and the audio is compared against the N64's output.
+- Saves to the SD card (`sdmc:/3ds/oot/save.bin`).
 
-```diff
-- WARNING! -
+## Status
 
-This repository is a work in progress, and while it can be used to make certain changes, it's still
-constantly evolving. If you use it for modding purposes in its current state, please be aware that
-the codebase can drastically change at any time. Also note that some parts of the ROM may not be
-'shiftable' yet, so modifying them could be difficult at this point.
+Work in progress. The title screen, file select and gameplay run on New 3DS at the N64's full game speed,
+but not every area and dungeon has been tested yet, and known issues remain (tracked in
+[PORT_ROADMAP.md](PORT_ROADMAP.md) and the issue tracker). Keep backups of `sdmc:/3ds/oot/save.bin`.
+
+| | New 3DS | Old 3DS |
+|---|---|---|
+| Game speed (N64 = 20 updates/s) | full speed | about half speed |
+| Frames shown per second | 20–47 depending on the scene | 10 |
+| Stereoscopic 3D | yes | yes |
+
+Performance is the current focus; progress and measurements are in
+[docs/3ds-60fps-plan.md](docs/3ds-60fps-plan.md).
+
+## Requirements
+
+- A Nintendo 3DS family console with custom firmware ([Luma3DS](https://github.com/LumaTeam/Luma3DS)) and
+  [FBI](https://github.com/lifehackerhansol/FBI) (or another CIA installer).
+- Your own **N64 Ocarina of Time NTSC-U 1.0** ROM in big-endian `.z64` format
+  (MD5 `5bd1fe107bf8106b2ab6650abecd54d6`).
+- The 3DS DSP firmware dump for sound: `sdmc:/3ds/dspfirm.cdc`. Luma3DS creates it from your own console:
+  Rosalina menu (L + D-pad down + SELECT) → Miscellaneous options → **Dump DSP firmware**.
+- A computer to build on (macOS or Linux; WSL on Windows) with [devkitPro](https://devkitpro.org/wiki/Getting_Started)
+  (`3ds-dev`: devkitARM, libctru, citro3d, picasso, makerom).
+
+## Building
+
+```bash
+# 1. devkitPro
+sudo dkp-pacman -S 3ds-dev
+export DEVKITPRO=/opt/devkitpro DEVKITARM=/opt/devkitpro/devkitARM
+
+# 2. Your ROM (never commit it; *.z64 is ignored by git)
+cp /path/to/your/oot-us-1.0.z64 baseroms/ntsc-1.0/baserom.z64
+
+# 3. Extract the assets from your ROM (the decompilation's setup step; needs Python 3)
+make setup VERSION=ntsc-1.0          # macOS: gmake (Homebrew make)
+
+# 4. Build the 3DS port
+make -f Makefile.3ds cia             # -> build/3ds/oot.cia (install with FBI)
+make -f Makefile.3ds cci             # -> build/3ds/oot.3ds (for the Azahar emulator)
 ```
 
-This is a WIP **decompilation** of ***The Legend of Zelda: Ocarina of Time***. The purpose of the project is to recreate a source code base for the game from scratch, using information found inside the game along with static and/or dynamic analysis. **It is not producing a PC port.** For more information you can get in touch with the team on our [Discord server][discord].
-
-It builds the following versions:
-
-| Name         | Build timestamp   | Description                               | MD5 hash of input ROM(s) |
-|--------------|-------------------|-------------------------------------------|--------------------------|
-| ntsc-1.0     | 98-10-21 04:56:31 | NTSC 1.0 (Japan/US)                       | `9f04c8e68534b870f707c247fa4b50fc`<br>`5bd1fe107bf8106b2ab6650abecd54d6` |
-| ntsc-1.1     | 98-10-26 10:58:45 | NTSC 1.1 (Japan/US)                       | `1bf5f42b98c3e97948f01155f12e2d88`<br>`721fdcc6f5f34be55c43a807f2a16af4` |
-| pal-1.0      | 98-11-10 14:34:22 | PAL 1.0 (Europe)                          | `e040de91a74b61e3201db0e2323f768a` |
-| ntsc-1.2     | 98-11-12 18:17:03 | NTSC 1.2 (Japan/US)                       | `2258052847bdd056c8406a9ef6427f13`<br>`57a9719ad547c516342e1a15d5c28c3d` |
-| pal-1.1      | 98-11-18 17:36:49 | PAL 1.1 (Europe)                          | `d714580dd74c2c033f5e1b6dc0aeac77` |
-| gc-jp        | 02-10-29 23:49:53 | GameCube Japan                            | `33fb7852c180b18ea0b9620b630f413f` |
-| gc-jp-mq     | 02-10-30 00:15:15 | GameCube Japan Master Quest               | `69895c5c78442260f6eafb2506dc482a` |
-| gc-us        | 02-12-19 13:28:09 | GameCube US                               | `cd09029edcfb7c097ac01986a0f83d3f` |
-| gc-us-mq     | 02-12-19 14:05:42 | GameCube US Master Quest                  | `da35577fe54579f6a266931cc75f512d` |
-| gc-eu-dbg-2  | 03-02-13 19:46:49 | GameCube Europe/PAL Debug (earlier build) | `ab1ca59d0039e3b34d82db650b54d7b9`<br>`2814fde8d6cfe23a220de6be955b4196` |
-| gc-eu-mq-dbg | 03-02-21 00:16:31 | GameCube Europe/PAL Master Quest Debug    | `75e344f41c26ec2ec5ad92caa9e25629`<br>`8ca71e87de4ce5e9f6ec916202a623e9`<br>`f751d1a097764e2337b1ac9ba1e27699`<br>`dde376d47187b931820d5b2957cded14` |
-| gc-eu-dbg    | 03-02-21 00:49:18 | GameCube Europe/PAL Debug                 | `3c10b67a76616ae2c162def7528724cf`<br>`382dc484e317d6522745c95387e7d5b9` |
-| gc-eu        | 03-02-21 20:12:23 | GameCube Europe/PAL                       | `2c27b4e000e85fd78dbca551f1b1c965` |
-| gc-eu-mq     | 03-02-21 20:37:19 | GameCube Europe/PAL Master Quest          | `1618403427e4344a57833043db5ce3c3` |
-| gc-jp-ce     | 03-10-08 21:53:00 | GameCube Japan (Collector's Edition Disc) | `0c13e0449a28ea5b925cdb8af8d29768` |
-| ique-cn      | 03-10-22 16:23:19 | iQue Player (Simplified Chinese)          | `0ab48b2d44a74b3bb2d384f6170c2742` |
-
-The default version is `gc-eu-mq-dbg`, i.e. the GameCube Europe/PAL Master Quest Debug ROM.
-
-**Note: This repository does not include any of the assets necessary to build the ROM. A prior copy of the game is required to extract the needed assets.**
-
-**Website:** <https://zelda.deco.mp>
-
-**Discord:** <https://discord.zelda.deco.mp>
+Step 3 also creates `baseroms/ntsc-1.0/baserom-decompressed.z64`, which the game reads at run time.
+Detailed notes, emulator testing and debugging tools: [docs/BUILDING_3DS.md](docs/BUILDING_3DS.md).
 
 ## Installation
 
-We recommend using WSL on Windows, or native Linux, which the rest of this readme describes. We currently have instructions for
+1. Install `build/3ds/oot.cia` with FBI.
+2. Copy `baseroms/ntsc-1.0/baserom-decompressed.z64` to the SD card as:
+   ```
+   sdmc:/3ds/oot/baserom-decompressed.z64
+   ```
+3. Make sure `sdmc:/3ds/dspfirm.cdc` exists (see Requirements).
+4. Launch *Ocarina of Time* from the HOME Menu.
 
-* [Windows](#Windows), with and without WSL
-* [macOS](docs/BUILDING_MACOS.md)
-* [Linux](#Linux-Native-or-under-WSL--VM), natively or using WSL / VM
-* [Docker](docs/BUILDING_DOCKER.md)
+## Controls
 
-(These will also depend on the Linux instructions.)
-Some of these may also be out of date or unmaintained; usually our contributors use WSL, Linux, and macOS, so these instructions should be up to date.
+| 3DS | Game | Notes |
+|---|---|---|
+| Circle Pad | Control Stick | |
+| A / B | A / B | |
+| Y / X | C-Left / C-Right | item buttons |
+| L | Z (target) | |
+| R | R (shield) | |
+| START | START (pause) | |
+| SELECT | L (minimap on/off) | |
+| D-Pad | C buttons | the N64 D-pad is unused by the game |
+| ZL / ZR (New 3DS) | C-Down / C-Up | third item / first person and Navi |
+| C-Stick (New 3DS) | C buttons | |
+| Touch screen | VIEW, items, Ocarina, Boots, pause pages, 4:3 / wide, top HUD | |
 
-### Windows
+Every action is reachable on an Old 3DS without ZL/ZR or the C-Stick. Details:
+[docs/3ds-touch-panel.md](docs/3ds-touch-panel.md).
 
-For Windows 10 or 11, install WSL and a distribution by following this
-[WSL Installation Guide](https://learn.microsoft.com/en-us/windows/wsl/install).
-We recommend using Ubuntu as the Linux distribution.
+## Settings
 
-For older versions of Windows, install a Linux VM or refer to [Docker](docs/BUILDING_DOCKER.md) instructions.
+Most options are on the touch screen and are saved to `sdmc:/3ds/oot/settings.txt`. A few more can be
+set by editing that file (one `name=value` per line):
 
+| Setting | Default | Effect |
+|---|---|---|
+| `widescreen` | 0 | 1 = widescreen, 0 = original 4:3 |
+| `hud` | 1 | top-screen HUD on/off |
+| `fps60` | 1 | frame interpolation: 0 = off (20 fps, like the N64) |
+| `prof` | 0 | 1 = per-stage CPU profile in `boot.log` (for bug reports about speed) |
 
-### Linux (Native or under WSL / VM)
+## Bug reports
 
-#### 1. Install build dependencies
+Please open an issue with the console model (Old / New 3DS), what happened and where in the game, and attach
+`sdmc:/3ds/oot/boot.log` from the session (it is rewritten each launch, so copy it right after the problem).
+A photo of the screen helps for graphics issues.
 
-The build process has the following package requirements:
+## Legal
 
-* git
-* build-essential
-* curl
-* python3
-* python3-pip
-* python3-venv
-* libxml2-dev
+- This repository contains source code, build scripts and tools only. It does **not** contain a ROM,
+  extracted game assets, or any other Nintendo data. *The Legend of Zelda* and *Ocarina of Time* are
+  trademarks of Nintendo; all game content belongs to Nintendo.
+- The game data is extracted from **your own ROM on your own computer** at build time, and the build
+  embeds it into the binary. For that reason **no `.cia`, `.3dsx` or `.3ds` builds are published** here or in
+  releases: each user builds their own from their own copy of the game. Please do not upload built binaries.
+- You are responsible for owning the game you dump. Dump it from your own cartridge.
+- This is a non-commercial fan project made for preservation and to play a game you own on hardware you own.
 
-Python 3.10+ is required.
+## Credits
 
-Under Debian / Ubuntu (which we recommend using), you can install them with the following commands:
+- [zeldaret/oot](https://github.com/zeldaret/oot): the Ocarina of Time decompilation this port is built on.
+  Its original README is kept in [docs/DECOMP_README.md](docs/DECOMP_README.md).
+- The [Super Mario 64 PC port](https://github.com/sm64-port/sm64-port) (Fast3D renderer) and the
+  [Super Mario 64 3DS port](https://github.com/mkst/sm64-port/tree/3ds-port) (citro3d backend), which the
+  renderer started from.
+- [Ship of Harkinian](https://github.com/HarbourMasters/Shipwright) and
+  [libultraship](https://github.com/Kenix3/libultraship): reference for the audio mixer math and renderer
+  details; its frame interpolation design informed this port's.
+- [Zelda64Recomp](https://github.com/Zelda64Recomp/Zelda64Recomp) and [RT64](https://github.com/rt64/rt64):
+  reference for the transform tagging used by the 60 fps interpolation.
+- [devkitPro](https://devkitpro.org/), libctru and citro3d; [stb_image](https://github.com/nothings/stb);
+  the [Azahar](https://github.com/azahar-emu/azahar) emulator and the [ares](https://ares-emu.net/) N64
+  emulator, used for testing.
+- Built with the help of Claude (Anthropic).
 
-```bash
-sudo apt-get update
-sudo apt-get install git build-essential curl python3 python3-pip python3-venv libxml2-dev
-```
+## Documentation
 
-In addition to these packages, a MIPS binutils installation is required. The project aims to support a couple of commonly-encountered MIPS toolchains out-of-the-box, only one is required and is automatically detected:
-
-* mips64-ultra-elf- or mips64- from the [practicerom toolchain](https://github.com/PracticeROM/packages)
-* mips64-elf- from the [libdragon n64 homebrew library](https://github.com/DragonMinded/libdragon/releases/tag/toolchain-continuous-prerelease)
-* mips-linux-gnu- or mips64-linux-gnu- found in common distribution package managers as e.g. `binutils-mips-linux-gnu`
-
-If none of these are available to install, the makefile exposes `MIPS_BINUTILS_PREFIX` as a means to set your own toolchain prefix. Otherwise, consider building one of the first two options from source.
-
-If you are using GCC as the compiler for Ocarina of Time, you will also need the corresponding gcc compiler for the chosen toolchain. For the first two options above, gcc is included automatically. For mips-linux-gnu- or mips64-linux-gnu- it is often a separate package, e.g. `gcc-mips-linux-gnu`.
-
-#### 2. Clone the repository
-
-**N.B.** If using WSL, we strongly encourage you to clone into WSL's Linux filesystem using Linux's `git`.
-Cloning into the Windows filesystem will result in much slower read/write speeds, and often causes issues when Windows copies the files with the wrong line endings, which the compiler IDO cannot handle correctly.
-
-Clone `https://github.com/zeldaret/oot.git` where you wish to have the project, with a command such as:
-
-```bash
-git clone https://github.com/zeldaret/oot.git
-```
-
-This will copy the GitHub repository contents into a new folder in the current directory called `oot`. Change into this directory before doing anything else:
-
-```bash
-cd oot
-```
-
-#### 3. Prepare a base ROM
-
-First, pick the version of the game you want to build.
-The supported versions and ROM checksums can be found in the table above.
-As an example, the `ntsc-1.0` version will be used in these instructions.
-
-Place a copy of the ROM inside the `baseroms/<the-version>/` folder for your version of choice.
-For example for `ntsc-1.0`, inside the `baseroms/ntsc-1.0/` folder.
-If you are under WSL, you can run the command `explorer.exe .` to open the current directory in the Windows file explorer.
-
-Rename the file to `baserom.z64`, `baserom.n64` or `baserom.v64`, depending on the original extension.
-
-#### 4. Setup the ROM and build process
-
-Setup and extract everything from your ROM with the following command:
-
-```bash
-make setup VERSION=<the-version>
-```
-
-For example for `ntsc-1.0`, run `make setup VERSION=ntsc-1.0`.
-
-This downloads some dependencies (from pip), and compiles tools for the build process.
-Then it generates a new ROM `baseroms/<the-version>/baserom-decompressed.z64`.
-For retail (non-debug) versions, that ROM will be the decompressed equivalent of the ROM.
-For the `gc-eu-mq-dbg` version, that ROM will have the overdump removed and the header patched.
-The other debug ROMs `gc-eu-dbg-2` and `gc-eu-dbg` will also have the overdump removed.
-It will also extract the individual assets from the ROM.
-
-#### 5. Build the ROM
-
-Run make to build the ROM.
-Make sure your path to the project is not too long, otherwise this process may error.
-
-```bash
-make VERSION=<the-version>
-```
-
-For example for `ntsc-1.0`, run `make VERSION=ntsc-1.0`
-
-If all goes well, a new ROM should be built at `build/<the-version>/oot-<the-version>.z64` (for example `build/ntsc-1.0/oot-ntsc-1.0.z64`), and the following text printed:
-
-```
-build/<the-version>/oot-<the-version>.z64: OK
-```
-
-If you instead see the following:
-
-```
-build/<the-version>/oot-<the-version>.z64: FAILED
-md5sum: WARNING: 1 computed checksum did NOT match
-```
-
-This means that the built ROM isn't the same as the base one, so something went wrong or some part of the code doesn't match.
-
-**NOTE:** to speed up the build, you can either:
-
-* pass `-jN` to `make setup` and `make`, where N is the number of threads to use in the build. The generally-accepted wisdom is to use the number of virtual cores your computer has.
-* pass `-j` to `make setup` and `make`, to use as many threads as possible, but beware that this can use too much memory on lower-end systems.
-
-Both of these have the disadvantage that the ordering of the terminal output is scrambled, so for debugging it is best to stick to one thread (i.e. not pass `-j` or `-jN`).
-
-## Changing build options
-
-By default, if you don't specify a version to build with `VERSION=<the-version>` in the make commands, the `gc-eu-mq-dbg` version is used.
-This default can be changed in the Makefile.
-
-The project Makefile is fairly configurable and can also be used to prepare the repo for modding.
-See the options outlined at the top of the Makefile for more information.
-
-## Contributing
-
-All contributions are welcome. This is a group effort, and even small contributions can make a difference.
-Some tasks also don't require much knowledge to get started.
-
-Most discussions happen on our [Discord Server][discord], where you are welcome to ask if you need help getting started, or if you have any questions regarding this project and other decompilation projects.
+- [docs/BUILDING_3DS.md](docs/BUILDING_3DS.md): build, emulator testing and debugging
+- [docs/3ds-touch-panel.md](docs/3ds-touch-panel.md): controls, touch panel, minimap
+- [docs/3ds-stereo-3d.md](docs/3ds-stereo-3d.md): stereoscopic 3D design
+- [docs/3ds-60fps-plan.md](docs/3ds-60fps-plan.md): performance and 60 fps work
+- [PORT_ROADMAP.md](PORT_ROADMAP.md): port status and history
