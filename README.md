@@ -5,7 +5,7 @@
        alt="Kokiri Forest on the top screen; the bottom screen shows the touch panel with the live minimap, hearts, item buttons, Ocarina and Boots">
 </p>
 
-An unofficial, fan-made **Nintendo 3DS port of The Legend of Zelda: Ocarina of Time (N64)**, built on the
+An unofficial, fan-made **native** Nintendo 3DS port of The Legend of Zelda: Ocarina of Time (N64), built on the
 [zeldaret/oot](https://github.com/zeldaret/oot) decompilation. The game's own code runs natively on the 3DS
 CPU; a new renderer, audio backend and dual-screen interface replace the N64 hardware.
 
