@@ -179,7 +179,7 @@ GPU transform (P2) remains the structural fix.
   wobble and sky flicker seen in the emulator. Replaced by game-side tags.
 
 **Implementation:**
-- `port/include/port_interp.h`: G_NOOP tags (`w0 = G_NOOP | 0x6E << 16 | op << 8 | flags`, `w1 = id`),
+- `include/port_interp.h`: G_NOOP tags (`w0 = G_NOOP | 0x6E << 16 | op << 8 | flags`, `w1 = id`),
   push/pop, flags SKIP (record, don't blend) and VERTS (blend CPU-written vertex positions).
 - Tag sites: Actor_Draw (actor instance; SKIP when it moved > 300 units since prevPos), all 12
   SkelAnime limb draw functions (limb index, opa+xlu), Skin_DrawImpl (per skin limb, VERTS for animated

@@ -57,13 +57,14 @@ static u32 sRandInt = 1;
 #if defined(__3DS__) && defined(PORT_STATEDUMP)
 // PORT: tools/statediff RNG trace - record every global-RNG call and its caller (comparison builds only)
 extern void PortRngTrace(u32 kind, const void* caller);
-#define PORT_RNG_TRACE(kind) PortRngTrace(kind, __builtin_return_address(0))
+#define PORT_RNG_TRACE(kind) PortRngTrace(kind, __builtin_return_address(0));
 #define PORT_NOINLINE __attribute__((noinline))
 u32 PortRand_GetState(void) {
     return sRandInt;
 }
 #else
-#define PORT_RNG_TRACE(kind) (void)0
+/* expands to nothing (not even a statement): IDO's C89 rejects a statement before the declarations */
+#define PORT_RNG_TRACE(kind)
 #define PORT_NOINLINE
 #endif
 
@@ -82,7 +83,7 @@ static FloatInt sRandFloat;
  * @note Original name: qrand
  */
 PORT_NOINLINE u32 Rand_Next(void) {
-    PORT_RNG_TRACE(1);
+    PORT_RNG_TRACE(1)
 #if PLATFORM_N64
     u32 next = sRandInt * RAND_MULTIPLIER + RAND_INCREMENT;
 
@@ -112,7 +113,7 @@ void Rand_Seed(u32 seed) {
  * @note Original name: fqrand
  */
 PORT_NOINLINE f32 Rand_ZeroOne(void) {
-    PORT_RNG_TRACE(2);
+    PORT_RNG_TRACE(2)
 #if PLATFORM_N64
     fu v;
     f32 vf;
