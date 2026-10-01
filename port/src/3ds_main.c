@@ -66,6 +66,7 @@ static int sBench;
 #include "port_prof.h"
 volatile unsigned char gPortProf;
 static int sProfOn;
+static int sGpuAB; /* settings gpu_ab=1: the vertex path alternates every 2 perf reports */
 int gPortStereoTest; /* settings stereo_test=1: 3D toggles every 2 s (gfx_3ds.c), freeze reproduction */
 static volatile u32 sProfHist[PROF_COUNT];
 static volatile int sProfRun;
@@ -105,6 +106,7 @@ static void Port3ds_SaveSettings(void) {
             if (gPortPerfStagesOn) fprintf(f, "perf_stages=1\n");
             if (gPortPerfAB) fprintf(f, "perf_ab=1\n");
             if (sProfOn) fprintf(f, "prof=1\n");
+            if (sGpuAB) fprintf(f, "gpu_ab=1\n");
             { extern int gPortGpuVtx; if (gPortGpuVtx) fprintf(f, "gpu_vtx=1\n"); }
             if (sInterp != 1) fprintf(f, "fps60=%d\n", sInterp);
         }
@@ -140,6 +142,9 @@ static void Port3ds_LoadSettings(void) {
         }
         if (sscanf(line, "prof=%d", &v) == 1) {
             sProfOn = v != 0;
+        }
+        if (sscanf(line, "gpu_ab=%d", &v) == 1) { /* alternate the CPU / GPU vertex paths (hardware A/B) */
+            sGpuAB = v != 0;
         }
         if (sscanf(line, "gpu_vtx=%d", &v) == 1) { /* GPU vertex path (gfx_citro3d.c), read before gfx init */
             extern int gPortGpuVtx;
@@ -1055,7 +1060,7 @@ static void Port3ds_PerfReport(unsigned frames) {
         static const char* const names[PROF_COUNT] = {
             "prof game", "prof dl walk", "prof vtx", "prof tri setup", "prof tri build", "prof tri emit",
             "prof tex", "prof rect", "prof mtx", "prof flush", "prof audio", "prof pace", "prof swap",
-            "prof gpu wait", "prof replay", "prof input", "prof vtx.light", "prof submit" };
+            "prof gpu wait", "prof replay", "prof input", "prof vtx.light", "prof submit", "prof tri split" };
         u32 tot = 0;
         int i;
         for (i = 0; i < PROF_COUNT; i++) tot += sProfHist[i];
@@ -1209,6 +1214,13 @@ void PortGfx_RunTask(OSTask* task) {
               bool n3ds = false;
               APT_CheckNew3DS(&n3ds);
               PortDbgX(gPortO3dsSim ? "perf mode O3DS-sim (268MHz no L2)" : "perf mode N3DS (804MHz L2)", 1);
+              { extern int gPortGpuVtx; PortDbgX(gPortGpuVtx ? "perf vertex path GPU" : "perf vertex path CPU", 1); }
+              static unsigned sGpuReports;
+              if (sGpuAB && (++sGpuReports % 2) == 0) { /* between frames: takes effect from the next one */
+                  extern int gPortGpuVtx;
+                  extern void gfx_citro3d_set_gpu_mode(int gpu);
+                  gfx_citro3d_set_gpu_mode(!gPortGpuVtx);
+              }
               if (gPortPerfAB && n3ds && (++sReports % 4) == 0) {
                   gPortO3dsSim = !gPortO3dsSim;
                   osSetSpeedupEnable(!gPortO3dsSim);

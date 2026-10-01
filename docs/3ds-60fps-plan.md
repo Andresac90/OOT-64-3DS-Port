@@ -262,3 +262,30 @@ now runs at that first read (the v23 synchronous call, outside any frame) instea
 where it waited for the whole GPU frame (hardware v23: "swap" 15–24% of New 3DS time). Updates that read no
 depth copy nothing. statediff builds keep the eager per-frame copy. The asynchronous in-frame variant
 (v24/v25, hardware freezes) is removed.
+
+### 2026-10-01 (afternoon): splitting is the triangle cost; GPU path fallback; hardware A/B switch (v27)
+
+- **Where triangle time goes.** With a dedicated profiler stage (`prof tri split`), the N64-exact splitting
+  of big near triangles (screen-linear shade/fog, near-plane clamp, guard-band clip) is most of the
+  triangle cost on both paths: in the GPU path, the ~215–248 triangles routed to the CPU splitter cost as
+  much as the CPU path's whole emit stage.
+- **GPU path fallback.** Triangles needing N64-exact setup (vertex behind the eye, in front of the near
+  plane, or a big depth range on an edge ≥ 10 px) are rebuilt in clip space and sent through the CPU
+  split code, after the same off-screen rejection and face culling the CPU path does; their pieces are
+  drawn through the identity palette entry with fog precomputed (vertex `dpos.w = 1`). The vertex format
+  carries a 4-component position for that (56 bytes).
+- **Shading-aware split skip (both paths).** When the three vertices' shade and fog differ by at most
+  2.5/255, perspective and screen-linear interpolation give the same values, so the triangle is not split.
+  CPU path 16.1 → 15.6 ms (Azahar); the 101-scene N64 comparison is unchanged (avg 5.92).
+- **Texture binds cached** (a bound unit is not re-bound; re-upload and sampler changes re-bind): no
+  measurable gain in Azahar, kept.
+- **Azahar numbers (title demo, display-list CPU):** CPU path 15.6 ms; GPU path 17.4 ms. The GPU path
+  removes mostly float work, which the ARM11's VFP makes far more expensive on hardware than Azahar's
+  per-instruction clock suggests, and its 60 fps replays are much cheaper: the decision is the hardware A/B.
+- **`gpu_ab=1`** switches the vertex path between frames every 2 perf reports (shader program, vertex
+  format and uniforms swapped by `gfx_citro3d_set_gpu_mode`); with `perf_ab=1` (console speed every 4
+  reports) one session measures all four combinations. Each report is labelled `perf vertex path CPU/GPU`.
+- **Environment.** A fresh clone needs: ROM → `baseroms/ntsc-1.0/`, `gmake setup`, the decomp build
+  (`gmake VERSION=ntsc-1.0`) for generated sources, conda off PATH for tools/audio; statediff runs with
+  `.venv/bin/python3`. The N64 build had broken (port_interp.h outside include/, a C89 statement in qrand.c):
+  fixed.

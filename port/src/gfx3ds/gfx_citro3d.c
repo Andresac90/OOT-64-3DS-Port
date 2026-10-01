@@ -44,7 +44,6 @@
 #include "gfx_rendering_api.h"
 
 static DVLB_s* sVShaderDvlb;
-static shaderProgram_s sShaderProgram;
 static void* sVboBuffer;
 
 extern const u8 shader_shbin[];
@@ -626,10 +625,18 @@ static u32 gfx_citro3d_new_texture(void) {
     return sTextureIndex++;
 }
 
+/* PORT PERF (2026-10-01): a unit already bound to this texture is not re-bound - C3D_TexBind marks the
+ * unit dirty and citro3d re-sends its texture registers with the next draw (~32 of ~168 binds per frame
+ * were the same texture again). An upload into a bound texture or a sampler change re-binds explicitly. */
+static bool sTexBoundOk[2];
+
 static void gfx_citro3d_select_texture(int tile, u32 texture_id) {
     gPortC3dCalls[sTexUnits[tile] == (int)texture_id ? 2 : 3]++;
     if (sRec) recOp(OP_TEX, tile, (int)texture_id, 0, 0);
-    C3D_TexBind(tile, &sTexturePool[texture_id]);
+    if (!(sTexBoundOk[tile] && sTexUnits[tile] == (int)texture_id)) {
+        C3D_TexBind(tile, &sTexturePool[texture_id]);
+        sTexBoundOk[tile] = true;
+    }
     sCurTex = texture_id;
     sTexUnits[tile] = texture_id;
 }
@@ -725,6 +732,15 @@ static void gfx_citro3d_upload_texture(uint8_t *rgba32_buf, int width, int heigh
     }
     C3D_TexUpload(&sTexturePool[sCurTex], sTexBuf);
     C3D_TexFlush(&sTexturePool[sCurTex]);
+    {
+        int u;
+        for (u = 0; u < 2; u++) { /* bound here: its registers (address, size) must be re-sent */
+            if (sTexUnits[u] == sCurTex) {
+                C3D_TexBind(u, &sTexturePool[sCurTex]);
+                sTexBoundOk[u] = true;
+            }
+        }
+    }
 }
 
 static uint32_t gfx_cm_to_opengl(uint32_t val) {
@@ -738,6 +754,8 @@ static void gfx_citro3d_set_sampler_parameters(int tile, bool linear_filter, uin
     if (sRec) recOp(OP_SAMPLER, tile, linear_filter, (int)cms, (int)cmt);
     C3D_TexSetFilter(&sTexturePool[sTexUnits[tile]], linear_filter ? GPU_LINEAR : GPU_NEAREST, linear_filter ? GPU_LINEAR : GPU_NEAREST);
     C3D_TexSetWrap(&sTexturePool[sTexUnits[tile]], gfx_cm_to_opengl(cms), gfx_cm_to_opengl(cmt));
+    C3D_TexBind(tile, &sTexturePool[sTexUnits[tile]]); /* the parameters are sent with the binding */
+    sTexBoundOk[tile] = true;
 }
 
 static void updateDepth()
@@ -1219,58 +1237,79 @@ void* gfx_citro3d_gpu_vbo(int** pos, u32* cap, float scale[4]) {
     return sVboBuffer;
 }
 
-static void gfx_citro3d_init(void)
-{
-    sVShaderDvlb = DVLB_ParseFile((u32*)shader_shbin, (u32)(shader_shbin_end - shader_shbin));
-	shaderProgramInit(&sShaderProgram);
-	shaderProgramSetVsh(&sShaderProgram, &sVShaderDvlb->DVLE[gPortGpuVtx ? 1 : 0]);
-	C3D_BindProgram(&sShaderProgram);
-    sEyeLoc = shaderInstanceGetUniformLocation(sShaderProgram.vertexShader, "eye");
-    sRemapLoc = shaderInstanceGetUniformLocation(sShaderProgram.vertexShader, "remap");
-    if (gPortGpuVtx) {
-        extern void PortDbgX(const char*, unsigned);
-        sPalLoc = shaderInstanceGetUniformLocation(sShaderProgram.vertexShader, "pal");
-        sFogpLoc = shaderInstanceGetUniformLocation(sShaderProgram.vertexShader, "fogp");
-        sStpLoc = shaderInstanceGetUniformLocation(sShaderProgram.vertexShader, "stp");
-        PortDbgX("[gfx] GPU vertex path ON, palette uniform", (unsigned)sPalLoc);
+/* the vertex path's shader program, vertex format and uniforms. PORT (2026-10-01): switchable between
+ * frames (gpu_ab=1 alternates the CPU and GPU vertex paths for a hardware A/B in one session) */
+static shaderProgram_s sProg[2];
+static bool sProgInit[2];
+static void gfx_citro3d_setup_mode(int gpu) {
+    extern void PortDbgX(const char*, unsigned);
+    C3D_AttrInfo* attrInfo;
+    C3D_BufInfo* bufInfo;
+    if (!sProgInit[gpu]) {
+        shaderProgramInit(&sProg[gpu]);
+        shaderProgramSetVsh(&sProg[gpu], &sVShaderDvlb->DVLE[gpu]);
+        sProgInit[gpu] = true;
     }
+    C3D_BindProgram(&sProg[gpu]);
+    sEyeLoc = shaderInstanceGetUniformLocation(sProg[gpu].vertexShader, "eye");
+    sRemapLoc = shaderInstanceGetUniformLocation(sProg[gpu].vertexShader, "remap");
+    sPalLoc = sFogpLoc = sStpLoc = -1;
+    if (gpu) {
+        sPalLoc = shaderInstanceGetUniformLocation(sProg[gpu].vertexShader, "pal");
+        sFogpLoc = shaderInstanceGetUniformLocation(sProg[gpu].vertexShader, "fogp");
+        sStpLoc = shaderInstanceGetUniformLocation(sProg[gpu].vertexShader, "stp");
+        if (sOpPal == NULL) {
+            sOpPal = malloc(sizeof(*sOpPal) * REC_PALS);
+            sOpParam = malloc(sizeof(*sOpParam) * REC_PALS);
+        }
+    }
+    PortDbgX(gpu ? "[gfx] vertex path: GPU (gpu_vtx)" : "[gfx] vertex path: CPU", 1);
+    /* a new program: its uniforms start unset */
+    sEyeCur[0] = sEyeCur[1] = sEyeCur[2] = sEyeCur[3] = -1.0f;
+    sRemapCur[0] = sRemapCur[1] = -1.0f;
     setEye(0.0f);
     setRemap(1.0f, 0.0f);
 
-	// Configure attributes for use with the vertex shader
-	C3D_AttrInfo* attrInfo = C3D_GetAttrInfo();
-	AttrInfo_Init(attrInfo);
-	if (gPortGpuVtx) { /* struct GpuVtx: pos[4] uv0[2] uv1[2] dpos[4] (floats), shade[4] idx (bytes) */
-	    AttrInfo_AddLoader(attrInfo, 0, GPU_FLOAT, 4);         // v0 = position (model space w=1, or clip space)
-	    AttrInfo_AddLoader(attrInfo, 1, GPU_FLOAT, 2);         // v1 = texcoord 0
-	    AttrInfo_AddLoader(attrInfo, 2, GPU_UNSIGNED_BYTE, 4); // v2 = shade 0..255
-	    AttrInfo_AddLoader(attrInfo, 3, GPU_FLOAT, 2);         // v3 = texcoord 1
-	    AttrInfo_AddLoader(attrInfo, 4, GPU_UNSIGNED_BYTE, 1); // v4 = palette index
-	    AttrInfo_AddLoader(attrInfo, 5, GPU_FLOAT, 4);         // v5 = skinned delta; w = 1: fog precomputed
-	} else {
-	AttrInfo_AddLoader(attrInfo, 0, GPU_FLOAT, 4); // v0=position
-	AttrInfo_AddLoader(attrInfo, 1, GPU_FLOAT, 2); // v1=texcoord
-	AttrInfo_AddLoader(attrInfo, 2, GPU_FLOAT, 4); // v2=color
-	AttrInfo_AddLoader(attrInfo, 3, GPU_FLOAT, 2); // v3=texcoord1
-	AttrInfo_AddLoader(attrInfo, 4, GPU_FLOAT, 1); // v4=stereo offset
-	}
+    attrInfo = C3D_GetAttrInfo();
+    AttrInfo_Init(attrInfo);
+    bufInfo = C3D_GetBufInfo();
+    BufInfo_Init(bufInfo);
+    if (gpu) { /* struct GpuVtx: pos[4] uv0[2] uv1[2] dpos[4] (floats), shade[4] idx (bytes) */
+        AttrInfo_AddLoader(attrInfo, 0, GPU_FLOAT, 4);         // v0 = position (model space w=1, or clip space)
+        AttrInfo_AddLoader(attrInfo, 1, GPU_FLOAT, 2);         // v1 = texcoord 0
+        AttrInfo_AddLoader(attrInfo, 2, GPU_UNSIGNED_BYTE, 4); // v2 = shade 0..255
+        AttrInfo_AddLoader(attrInfo, 3, GPU_FLOAT, 2);         // v3 = texcoord 1
+        AttrInfo_AddLoader(attrInfo, 4, GPU_UNSIGNED_BYTE, 1); // v4 = palette index
+        AttrInfo_AddLoader(attrInfo, 5, GPU_FLOAT, 4);         // v5 = skinned delta; w = 1: fog precomputed
+        /* buffer order: pos(v0) uv0(v1) uv1(v3) dpos(v5) shade(v2) idx(v4); the stride covers the 3 spare bytes */
+        BufInfo_Add(bufInfo, sVboBuffer, GPU_STRIDE, 6, 0x425310);
+    } else {
+        AttrInfo_AddLoader(attrInfo, 0, GPU_FLOAT, 4); // v0=position
+        AttrInfo_AddLoader(attrInfo, 1, GPU_FLOAT, 2); // v1=texcoord
+        AttrInfo_AddLoader(attrInfo, 2, GPU_FLOAT, 4); // v2=color
+        AttrInfo_AddLoader(attrInfo, 3, GPU_FLOAT, 2); // v3=texcoord1
+        AttrInfo_AddLoader(attrInfo, 4, GPU_FLOAT, 1); // v4=stereo offset
+        BufInfo_Add(bufInfo, sVboBuffer, VTX_FLOATS * 4, 5, 0x42310); // pos, uv0, uv1, color, stereo
+    }
+    C3D_CullFace(GPU_CULL_NONE); /* the CPU path culls itself; the GPU path sets it per draw */
+}
 
-	// Create the VBO (vertex buffer object)
-	sVboBuffer = linearAlloc(VBO_BYTES);
-	sIdxBuf = linearAlloc(IDX_CAP * sizeof(u16));
+/* gfx_pc.c / 3ds_main.c, between frames only */
+void gfx_citro3d_set_gpu_mode(int gpu) {
+    gpu = gpu != 0;
+    if (gpu != gPortGpuVtx) {
+        gPortGpuVtx = gpu;
+        gfx_citro3d_setup_mode(gpu);
+    }
+}
 
-	// Configure buffers
-	C3D_BufInfo* bufInfo = C3D_GetBufInfo();
-	BufInfo_Init(bufInfo);
-	if (gPortGpuVtx) {
-	    /* buffer order: pos(v0) uv0(v1) uv1(v3) dpos(v5) shade(v2) idx(v4); the stride covers the 3 spare bytes */
-	    BufInfo_Add(bufInfo, sVboBuffer, GPU_STRIDE, 6, 0x425310);
-	    sOpPal = malloc(sizeof(*sOpPal) * REC_PALS);
-	    sOpParam = malloc(sizeof(*sOpParam) * REC_PALS);
-	} else
-	BufInfo_Add(bufInfo, sVboBuffer, VTX_FLOATS * 4, 5, 0x42310); // pos, uv0, uv1, color, stereo
-
-    C3D_CullFace(GPU_CULL_NONE);
+static void gfx_citro3d_init(void)
+{
+    sVShaderDvlb = DVLB_ParseFile((u32*)shader_shbin, (u32)(shader_shbin_end - shader_shbin));
+    // Create the VBO (vertex buffer object)
+    sVboBuffer = linearAlloc(VBO_BYTES);
+    sIdxBuf = linearAlloc(IDX_CAP * sizeof(u16));
+    gfx_citro3d_setup_mode(gPortGpuVtx != 0);
     C3D_DepthMap(true, -1.0f, 0);
     C3D_DepthTest(false, GPU_LEQUAL, GPU_WRITE_ALL);
     C3D_AlphaTest(true, GPU_GREATER, 0x00);

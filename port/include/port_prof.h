@@ -24,6 +24,7 @@ enum {
     PROF_INPUT,      /* input, touch panel */
     PROF_VTX_LIGHT,  /* G_VTX: lighting + texgen part */
     PROF_SUBMIT,     /* citro3d draw call (state upload + command emission) */
+    PROF_SPLIT,      /* N64-exact triangle splitting/clipping (gfx_emit_tri_one's slow path) */
     PROF_COUNT
 };
 extern volatile unsigned char gPortProf;

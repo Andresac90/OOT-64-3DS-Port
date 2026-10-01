@@ -1544,6 +1544,15 @@ static int gpu_slot_get(void) {
     return sGpuSlotCur;
 }
 
+/* the logic frame's (replay k = 2) output rows of a slot, without copying */
+static inline const float (*gpu_rows2(uint16_t slot))[4] {
+    static const float ident[4][4] = { { 0, 1, 0, 0 }, { -1, 0, 0, 0 }, { 0, 0, -0.5f, -0.5f }, { 0, 0, 0, 1 } };
+    if (slot == GPU_SLOT_IDENTITY || sGpuSlot == NULL || slot >= sGpuSlotN) {
+        return ident;
+    }
+    return (const float(*)[4])sGpuSlot[slot].rows[2];
+}
+
 /* gfx_citro3d.c: the rows of a palette entry for replay k */
 void gfx_gpu_slot_rows(uint16_t slot, int k, float rows[4][4]) {
     if (slot == GPU_SLOT_IDENTITY || sGpuSlot == NULL || slot >= sGpuSlotN) {
@@ -2046,6 +2055,7 @@ static inline float stereo_offset(float w) {
 #define SUBDIV_MAX_RATIO 1.15f /* w ratio along an edge below which interpolation differences are < ~3.5% */
 #define SUBDIV_MIN_PIXELS 10.0f
 #define SUBDIV_MAX_DEPTH 6
+#define SUBDIV_FLAT_RANGE (2.5f / 255.0f) /* shade/fog spread below which splitting changes nothing visible */
 
 #ifdef __3DS__
 /* PORT PERF (2026-09-30): indexed batches (gfx_citro3d.c). Each vertex is written once per batch straight
@@ -2295,14 +2305,26 @@ static void gfx_emit_tri_one(const PVtx* a, const PVtx* b, const PVtx* c, bool z
     }
     if (!outside) {
         bool big = false, near = false;
+        /* PORT PERF (2026-10-01): the split only exists because the RDP interpolates shade/fog screen-
+         * linearly and the PICA perspective-correctly; when the three vertices' shade and fog are (almost)
+         * equal both interpolations give the same values (the difference is bounded by their range), so
+         * there is nothing to split. Splitting was the bulk of the triangle cost (GPU-path profile). */
+        float crange = 0.0f;
+        for (int k = 0; k < 4; k++) {
+            float lo = t[0]->c[k], hi = lo;
+            lo = t[1]->c[k] < lo ? t[1]->c[k] : lo, hi = t[1]->c[k] > hi ? t[1]->c[k] : hi;
+            lo = t[2]->c[k] < lo ? t[2]->c[k] : lo, hi = t[2]->c[k] > hi ? t[2]->c[k] : hi;
+            crange = hi - lo > crange ? hi - lo : crange;
+        }
         for (int e = 0; e < 3; e++) {
-            big |= pvtx_edge_score(t[e], t[(e + 1) % 3]) > 0.0f;
+            big |= crange > SUBDIV_FLAT_RANGE && pvtx_edge_score(t[e], t[(e + 1) % 3]) > 0.0f;
             near |= t[e]->z < -t[e]->w;
         }
         if (!big && !near) {
             gfx_pack_tri(t, zf); /* unsplit: may reuse the loaded vertices (sCurVidx) */
             return;
         }
+        PROF_SET(PROF_SPLIT);
 #ifdef __3DS__
         sCurVidx = NULL; /* split pieces are new vertices */
 #endif
@@ -2316,6 +2338,7 @@ static void gfx_emit_tri_one(const PVtx* a, const PVtx* b, const PVtx* c, bool z
         gfx_subdiv_tri(&poly[0], &poly[1], &poly[2], 0, zf);
         return;
     }
+    PROF_SET(PROF_SPLIT);
 #ifdef __3DS__
     sBatchBehind++; /* counts guard-band clips */
     sCurVidx = NULL; /* clipped pieces are new vertices */
@@ -2540,8 +2563,7 @@ static void gpu_pack_clip_tri(const PVtx* t[3]) {
 static inline const float* gpu_vtx_zw(int slot, uint16_t sl) {
     if (sZWStale[slot]) {
         const struct LoadedVertex* lv = &rsp.loaded_vertices[slot];
-        float rows[4][4];
-        gfx_gpu_slot_rows(sl, 2, rows);
+        const float(*rows)[4] = gpu_rows2(sl);
         float o2 = rows[2][0] * lv->x + rows[2][1] * lv->y + rows[2][2] * lv->z + rows[2][3];
         float w = rows[3][0] * lv->x + rows[3][1] * lv->y + rows[3][2] * lv->z + rows[3][3];
         sZW[slot][0] = -2.0f * o2 - w; /* out.z = -(z + w) / 2 */
@@ -2558,10 +2580,10 @@ static void gpu_emit_cpu(const uint8_t vidx[3], const uint16_t sl[3]) {
     int i;
     for (i = 0; i < 3; i++) {
         const struct LoadedVertex* lv = &rsp.loaded_vertices[vidx[i]];
-        float rows[4][4], o[4];
+        const float(*rows)[4] = gpu_rows2(sl[i]);
+        float o[4];
         int r;
         PVtx* p = &pv[i];
-        gfx_gpu_slot_rows(sl[i], 2, rows);
         for (r = 0; r < 4; r++) {
             o[r] = rows[r][0] * lv->x + rows[r][1] * lv->y + rows[r][2] * lv->z + rows[r][3];
         }
@@ -2582,6 +2604,32 @@ static void gpu_emit_cpu(const uint8_t vidx[3], const uint16_t sl[3]) {
         }
         p->s = stereo_offset(p->w);
     }
+    {
+        /* what the CPU path does before splitting: trivial off-screen rejection (all three outside the
+         * same plane) and back/front-face culling (without them the split code also cut up triangles
+         * the CPU path never drew: 156 vs 68 per-mille of frame time in "emit") */
+        uint8_t rej = 0x2F;
+        for (i = 0; i < 3; i++) {
+            const PVtx* p = &pv[i];
+            uint8_t r = 0;
+            if (p->x < -p->w) r |= 1;
+            if (p->x > p->w) r |= 2;
+            if (p->y < -p->w) r |= 4;
+            if (p->y > p->w) r |= 8;
+            if (p->z > p->w) r |= 32;
+            rej &= r;
+        }
+        if (rej) {
+            return;
+        }
+        if ((rsp.geometry_mode & G_CULL_BOTH) != 0) {
+            float cross = -(pv[0].x * (pv[1].y * pv[2].w - pv[2].y * pv[1].w) - pv[1].x * (pv[0].y * pv[2].w - pv[2].y * pv[0].w) +
+                            pv[2].x * (pv[0].y * pv[1].w - pv[1].y * pv[0].w));
+            if ((rsp.geometry_mode & G_CULL_BOTH) == G_CULL_FRONT ? cross <= 0 : cross >= 0) {
+                return;
+            }
+        }
+    }
     if (gpu_pal_index(GPU_SLOT_IDENTITY) < 0 && sGpuPalN >= GPU_PAL) {
         gfx_flush();
         sGpuPalEpoch++;
@@ -2592,7 +2640,7 @@ static void gpu_emit_cpu(const uint8_t vidx[3], const uint16_t sl[3]) {
     gfx_emit_tri(&pv[0], &pv[1], &pv[2], sTC.z_is_from_0_to_1);
 }
 
-u32 gPortGpuRoute[4]; /* TEMP: tested / behind eye / near plane / routed to the CPU */
+u32 gPortGpuRoute[4]; /* perf report: GPU-path triangles tested / behind the eye / near plane / split on the CPU */
 static void gpu_emit_tri(const uint8_t vidx[3]) {
     uint16_t sl[3];
     int i, j, need = 0, ix[3];
@@ -2612,14 +2660,46 @@ static void gpu_emit_tri(const uint8_t vidx[3]) {
         int cpu = lo <= 0.0f || a[0] < -a[1] || b[0] < -b[1] || c[0] < -c[1];
         { extern u32 gPortGpuRoute[4]; gPortGpuRoute[0]++; if (lo <= 0.0f) gPortGpuRoute[1]++; else if (cpu) gPortGpuRoute[2]++; }
         if (!cpu && hi >= SUBDIV_MAX_RATIO * lo) {
+            /* shade/fog (almost) equal at the three vertices: interpolation-independent, no split needed */
+            int kk, flat = 1;
+            int fog = (rsp.geometry_mode & G_FOG) != 0;
+            float al[3];
+            for (kk = 0; kk < 3; kk++) {
+                const struct LoadedVertex* lv = &rsp.loaded_vertices[vidx[kk]];
+                if (fog) {
+                    const float* zw = kk == 0 ? a : kk == 1 ? b : c;
+                    float w = zw[1] < 0.001f ? 0.001f : zw[1];
+                    float fz = zw[0] / w * rsp.fog_mul + rsp.fog_offset;
+                    al[kk] = fz < 0.0f ? 0.0f : fz > 255.0f ? 255.0f : fz;
+                } else {
+                    al[kk] = lv->color.a;
+                }
+            }
+            {
+                const struct LoadedVertex* v0 = &rsp.loaded_vertices[vidx[0]];
+                const struct LoadedVertex* v1 = &rsp.loaded_vertices[vidx[1]];
+                const struct LoadedVertex* v2 = &rsp.loaded_vertices[vidx[2]];
+                int d;
+#define CH_RANGE(x0, x1, x2) ((x0 > x1 ? (x0 > x2 ? x0 : x2) : (x1 > x2 ? x1 : x2)) - (x0 < x1 ? (x0 < x2 ? x0 : x2) : (x1 < x2 ? x1 : x2)))
+                d = CH_RANGE(v0->color.r, v1->color.r, v2->color.r);
+                flat &= d <= 2;
+                d = CH_RANGE(v0->color.g, v1->color.g, v2->color.g);
+                flat &= d <= 2;
+                d = CH_RANGE(v0->color.b, v1->color.b, v2->color.b);
+                flat &= d <= 2;
+                flat &= CH_RANGE(al[0], al[1], al[2]) <= 2.5f;
+#undef CH_RANGE
+            }
+            if (flat) {
+                goto gpu_no_split;
+            }
             /* depth range alone is not enough: like pvtx_edge_score, only edges at least SUBDIV_MIN_PIXELS
              * long on screen get split (most such triangles are small: walls, distant ground) */
             PVtx q[3];
             int e, k;
             for (k = 0; k < 3; k++) {
                 const struct LoadedVertex* lv = &rsp.loaded_vertices[vidx[k]];
-                float rows[4][4];
-                gfx_gpu_slot_rows(sl[k], 2, rows);
+                const float(*rows)[4] = gpu_rows2(sl[k]);
                 q[k].y = rows[0][0] * lv->x + rows[0][1] * lv->y + rows[0][2] * lv->z + rows[0][3];
                 q[k].x = -(rows[1][0] * lv->x + rows[1][1] * lv->y + rows[1][2] * lv->z + rows[1][3]);
                 q[k].w = (k == 0 ? a : k == 1 ? b : c)[1];
@@ -2628,8 +2708,10 @@ static void gpu_emit_tri(const uint8_t vidx[3]) {
                 cpu = pvtx_edge_score(&q[e], &q[(e + 1) % 3]) > 0.0f;
             }
         }
+    gpu_no_split:
         if (cpu) {
             { extern u32 gPortGpuRoute[4]; gPortGpuRoute[3]++; }
+            PROF_SET(PROF_SPLIT);
             gpu_emit_cpu(vidx, sl);
             return;
         }
@@ -2702,9 +2784,8 @@ static void gpu_emit_tri(const uint8_t vidx[3]) {
         for (i = 0; i < 3; i++) {
             int slot = vidx[i];
             if (slot >= MAX_VERTICES || sProbeStale[slot]) { /* rectangles: rewritten without a load */
-                float rows[4][4];
                 const struct LoadedVertex* lv = &rsp.loaded_vertices[slot];
-                gfx_gpu_slot_rows(sl[i], 2, rows);
+                const float(*rows)[4] = gpu_rows2(sl[i]);
                 sProbeV[slot].y = rows[0][0] * lv->x + rows[0][1] * lv->y + rows[0][2] * lv->z + rows[0][3];
                 sProbeV[slot].x = -(rows[1][0] * lv->x + rows[1][1] * lv->y + rows[1][2] * lv->z + rows[1][3]);
                 sProbeV[slot].w = rows[3][0] * lv->x + rows[3][1] * lv->y + rows[3][2] * lv->z + rows[3][3];
