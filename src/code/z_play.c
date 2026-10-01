@@ -474,6 +474,12 @@ void Play_Init(GameState* thisx) {
     FrameAdvance_Init(&this->frameAdvCtx);
 #ifdef PORT_STATEDUMP
     Rand_Seed(0x5EED0000); // PORT: tools/statediff - same fixed seed as the reference ROM
+    {
+        /* comparison builds draw the minimap on the top screen like the N64 reference, so fbdiff doesn't
+         * count the touch-panel minimap as a rendering difference in every overworld scene */
+        extern int gPortMinimapOnBottom;
+        gPortMinimapOnBottom = 0;
+    }
 #else
     Rand_Seed((u32)osGetTime());
 #endif

@@ -1,3 +1,4 @@
+#include "port_interp.h"
 #include "gfx.h"
 #include "segmented_address.h"
 #include "sys_matrix.h"
@@ -227,11 +228,16 @@ void Skin_DrawImpl(Actor* actor, PlayState* play, Skin* skin, SkinPostDraw postD
 
         segmentType = ((SkinLimb*)SEGMENTED_TO_VIRTUAL(skeleton[i]))->segmentType;
 
+        /* PORT: 60 fps interpolation group per skin limb; animated limbs' vertices are written by the CPU
+         * each logic frame, so the renderer blends those too (Zelda64Recomp push_skin_limb_matrix_group) */
+        gPortInterpPush(POLY_OPA_DISP++, PORT_INTERP_ID_SKIN(i),
+                        segmentType == SKIN_LIMB_TYPE_ANIMATED ? PORT_INTERP_VERTS : 0);
         if (segmentType == SKIN_LIMB_TYPE_ANIMATED && shouldDraw == true) {
             Skin_DrawAnimatedLimb(gfxCtx, skin, i, arg6, drawFlags);
         } else if (segmentType == SKIN_LIMB_TYPE_NORMAL && shouldDraw == true) {
             Skin_DrawLimb(gfxCtx, skin, i, NULL, drawFlags);
         }
+        gPortInterpPop(POLY_OPA_DISP++);
     }
 
     if (postDraw != NULL) {

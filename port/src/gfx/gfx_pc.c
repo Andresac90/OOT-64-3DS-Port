@@ -217,6 +217,15 @@ static bool dropped_frame;
 static float buf_vbo[MAX_BUFFERED * (26 * 3)]; // 3 vertices in a triangle and 26 floats per vtx
 static size_t buf_vbo_len;
 static size_t buf_vbo_num_tris;
+#ifdef __3DS__
+/* bench=1 (3ds_main.c): the array path on alternate frames, to A/B the indexed batches on hardware */
+int gPortLegacyVbo;
+/* indexed batches (see pack_vertex) */
+static const uint8_t* sCurVidx;          /* loaded-vertex slots of the triangle emitted unsplit, or NULL */
+static uint32_t sBatchId = 1;
+static uint16_t sBatchVtx[MAX_VERTICES + 4];
+static uint32_t sBatchStamp[MAX_VERTICES + 4];
+#endif
 
 static struct GfxWindowManagerAPI *gfx_wapi;
 static struct GfxRenderingAPI *gfx_rapi;
@@ -239,6 +248,8 @@ u32 gPortPerfTexImports;
 int gPortPerfStagesOn;
 u32 gPortPerfDlCmds, gPortPerfDlCalls; /* display-list commands interpreted / G_DL calls, per report */
 u32 gPortPerfOpCounts[256];              /* per opcode, per report (top ones logged) */
+u64 gPortPerfOpTicks[256];
+u32 gPortPerfSlowTris; /* triangles that re-evaluated the render state (not the fast path) */               /* perf_stages: ticks per opcode (G_DL sub-lists excluded) */
 int gPortO3dsSim;
 int gPortPerfAB; /* settings perf_ab=1: 3ds_main.c alternates N3DS / O3DS-sim speed for measurements */
 #ifdef PORT_PERF_STAGES
@@ -411,9 +422,16 @@ static void gfx_flush_impl(void) {
 #ifdef __3DS__
         port_draw_id_begin();
 #endif
-        gfx_rapi->draw_triangles(buf_vbo, buf_vbo_len, buf_vbo_num_tris);
 #ifdef __3DS__
+        if (gPortLegacyVbo) {
+            gfx_rapi->draw_triangles(buf_vbo, buf_vbo_len, buf_vbo_num_tris); /* array path (A/B bench) */
+        } else {
+            gfx_citro3d_draw_indexed();
+        }
+        sBatchId++; /* vertex reuse is per batch */
         sBatchSub = sBatchBehind = 0;
+#else
+        gfx_rapi->draw_triangles(buf_vbo, buf_vbo_len, buf_vbo_num_tris);
 #endif
         buf_vbo_len = 0;
         buf_vbo_num_tris = 0;
@@ -1013,6 +1031,289 @@ static void gfx_matrix_mul(float res[4][4], const float a[4][4], const float b[4
     memcpy(res, tmp, sizeof(tmp));
 }
 
+/* ---- PORT (2026-09-30): frame interpolation for 60 fps (docs/3ds-60fps-plan.md) ----
+ * OoT's logic runs at 20 Hz. The port draws each logic frame's display list again for in-between frames
+ * (t = 1/3, 2/3), with matrices (and skinned vertices) interpolated from the previous logic frame's to
+ * this one's. Same model as Zelda64Recomp's RT64 matrix groups (gEXMatrixGroup) and Ship of Harkinian's
+ * labelled recording: identity comes from TAGS the game code emits (port_interp.h: actor, limb, skin
+ * limb, camera, skybox), never from guessing. A matrix is keyed by its group path (nested tag ids) and
+ * its index inside the group; untagged matrices are drawn as they are. Rigid transforms are
+ * interpolated decomposed (translation, per-axis scale, re-orthonormalised rotation) like RT64's
+ * G_EX_INTERPOLATE_DECOMPOSE, so a turning limb does not shrink. The exact pass (t = 1) records. */
+#include "port_interp.h"
+#define INTERP_MAX 4096
+#define INTERP_HASH 8192
+typedef struct {
+    uint32_t key;
+    float m[4][4];
+} InterpMtx;
+static InterpMtx sInterpTab[2][INTERP_MAX]; /* [sInterpCurTab] is being recorded, the other is the previous */
+static int sInterpN[2];
+static int sInterpCurTab;
+static int16_t sInterpHash[INTERP_HASH]; /* previous table: key -> index + 1 */
+/* skinned vertices (Skin system: Epona, ...): positions per keyed vertex load */
+#define INTERP_VTX_MAX 12288
+#define INTERP_VLOADS 512
+typedef struct {
+    uint32_t key;
+    uint16_t n, first;
+} InterpVLoad;
+static int16_t sInterpVPos[2][INTERP_VTX_MAX][3];
+static InterpVLoad sInterpVLoad[2][INTERP_VLOADS];
+static int sInterpVN[2], sInterpVLN[2];
+static float sInterpT = 1.0f; /* 1 = the logic frame itself */
+static int sInterpRecord = 0;
+/* group stack (G_NOOP tags) */
+#define INTERP_DEPTH 16
+static uint32_t sGrpId[INTERP_DEPTH], sGrpMtx[INTERP_DEPTH], sGrpVtx[INTERP_DEPTH];
+static uint8_t sGrpFlags[INTERP_DEPTH];
+static int sGrpDepth;
+/* occurrences of the same group path within one pass (a model drawn twice under one tag) */
+static uint32_t sOccKey[2048], sOccCnt[2048], sOccStamp[2048], sInterpStamp;
+uint32_t gPortInterpMatched, gPortInterpMissed, gPortInterpSame, gPortInterpJump, gPortInterpVtx, gPortInterpVtxMiss;
+
+static uint32_t interp_mix(uint32_t a, uint32_t b) {
+    uint32_t h = a * 0x9E3779B1u ^ (b + 0x7F4A7C15u + (a << 6) + (a >> 2));
+    h ^= h >> 15;
+    h *= 0x85EBCA6Bu;
+    h ^= h >> 13;
+    return h;
+}
+
+static void interp_group(uint32_t w0, uint32_t w1) {
+    int op = (w0 >> 8) & 0xFF;
+    if (op == PORT_INTERP_OP_PUSH) {
+        if (sGrpDepth < INTERP_DEPTH) {
+            uint32_t parent = sGrpDepth > 0 ? sGrpId[sGrpDepth - 1] : 0x51ED5EEDu;
+            uint32_t id = interp_mix(parent, w1), h = (id ^ (id >> 11)) & 2047;
+            /* the same path pushed again in this pass (e.g. a model drawn twice): number it */
+            for (;;) {
+                if (sOccStamp[h] != sInterpStamp) {
+                    sOccStamp[h] = sInterpStamp;
+                    sOccKey[h] = id;
+                    sOccCnt[h] = 0;
+                    break;
+                }
+                if (sOccKey[h] == id) {
+                    break;
+                }
+                h = (h + 1) & 2047;
+            }
+            id = interp_mix(id, sOccCnt[h]++);
+            sGrpId[sGrpDepth] = id;
+            sGrpFlags[sGrpDepth] = (uint8_t)(w0 & 0xFF) | (sGrpDepth > 0 ? (sGrpFlags[sGrpDepth - 1] & PORT_INTERP_SKIP) : 0);
+            sGrpMtx[sGrpDepth] = 0;
+            sGrpVtx[sGrpDepth] = 0;
+        }
+        sGrpDepth++;
+    } else if (op == PORT_INTERP_OP_POP) {
+        if (sGrpDepth > 0) {
+            sGrpDepth--;
+        }
+    }
+}
+
+static int interp_find(uint32_t key) {
+    uint32_t h = (key * 2654435761u) & (INTERP_HASH - 1);
+    while (sInterpHash[h] != 0) {
+        int i = sInterpHash[h] - 1;
+        if (i < 0x4000 ? sInterpTab[sInterpCurTab ^ 1][i].key == key : 0) {
+            return i;
+        }
+        h = (h + 1) & (INTERP_HASH - 1);
+    }
+    return -1;
+}
+
+/* decomposed blend of rigid transforms (row-vector N64 layout: rows 0-2 = scaled axes, row 3 = translation) */
+static int interp_decomposed(float out[4][4], const float a[4][4], const float b[4][4], float t) {
+    float ax[3][3], bx[3][3], sa[3], sb[3];
+    int i, k;
+    for (i = 0; i < 3; i++) {
+        sa[i] = sqrtf(a[i][0] * a[i][0] + a[i][1] * a[i][1] + a[i][2] * a[i][2]);
+        sb[i] = sqrtf(b[i][0] * b[i][0] + b[i][1] * b[i][1] + b[i][2] * b[i][2]);
+        if (sa[i] < 1e-6f || sb[i] < 1e-6f) {
+            return 0;
+        }
+        for (k = 0; k < 3; k++) {
+            ax[i][k] = a[i][k] / sa[i];
+            bx[i][k] = b[i][k] / sb[i];
+        }
+        /* more than ~90 degrees in one logic frame: a snap, not motion (Ship of Harkinian's angle rule) */
+        if (ax[i][0] * bx[i][0] + ax[i][1] * bx[i][1] + ax[i][2] * bx[i][2] < 0.0f) {
+            return 0;
+        }
+    }
+    /* nlerp the axes, then Gram-Schmidt (keeps the rotation rigid) */
+    {
+        float r[3][3], l;
+        for (i = 0; i < 3; i++) {
+            for (k = 0; k < 3; k++) {
+                r[i][k] = ax[i][k] + (bx[i][k] - ax[i][k]) * t;
+            }
+        }
+        l = sqrtf(r[0][0] * r[0][0] + r[0][1] * r[0][1] + r[0][2] * r[0][2]);
+        for (k = 0; k < 3; k++) r[0][k] /= l;
+        {
+            float d = r[1][0] * r[0][0] + r[1][1] * r[0][1] + r[1][2] * r[0][2];
+            for (k = 0; k < 3; k++) r[1][k] -= d * r[0][k];
+        }
+        l = sqrtf(r[1][0] * r[1][0] + r[1][1] * r[1][1] + r[1][2] * r[1][2]);
+        if (l < 1e-6f) {
+            return 0;
+        }
+        for (k = 0; k < 3; k++) r[1][k] /= l;
+        {
+            /* third axis: the cross product, with the handedness of the source (mirrored models) */
+            float c0 = r[0][1] * r[1][2] - r[0][2] * r[1][1];
+            float c1 = r[0][2] * r[1][0] - r[0][0] * r[1][2];
+            float c2 = r[0][0] * r[1][1] - r[0][1] * r[1][0];
+            float sgn = (c0 * bx[2][0] + c1 * bx[2][1] + c2 * bx[2][2]) < 0.0f ? -1.0f : 1.0f;
+            r[2][0] = c0 * sgn, r[2][1] = c1 * sgn, r[2][2] = c2 * sgn;
+        }
+        for (i = 0; i < 3; i++) {
+            float s = sa[i] + (sb[i] - sa[i]) * t;
+            for (k = 0; k < 3; k++) {
+                out[i][k] = r[i][k] * s;
+            }
+            out[i][3] = 0.0f;
+        }
+        for (k = 0; k < 3; k++) {
+            out[3][k] = a[3][k] + (b[3][k] - a[3][k]) * t;
+        }
+        out[3][3] = 1.0f;
+    }
+    return 1;
+}
+
+/* interpolate `m` (this logic frame's matrix) from the previous frame's; record it on the exact pass */
+static void interp_matrix(float m[4][4], uint8_t parameters) {
+    uint32_t key;
+    int idx;
+    if (sGrpDepth <= 0 || sGrpDepth > INTERP_DEPTH) {
+        return; /* untagged: drawn as it is */
+    }
+    key = interp_mix(sGrpId[sGrpDepth - 1], sGrpMtx[sGrpDepth - 1]++ * 4 + (parameters & G_MTX_PROJECTION ? 1 : 0)) | 1;
+    if (sInterpRecord) {
+        int n = sInterpN[sInterpCurTab];
+        if (n < INTERP_MAX) {
+            sInterpTab[sInterpCurTab][n].key = key;
+            memcpy(sInterpTab[sInterpCurTab][n].m, m, sizeof(float) * 16);
+            sInterpN[sInterpCurTab] = n + 1;
+        }
+    }
+    if (sInterpT >= 1.0f || (sGrpFlags[sGrpDepth - 1] & PORT_INTERP_SKIP)) {
+        return;
+    }
+    idx = interp_find(key);
+    if (idx < 0) {
+        gPortInterpMissed++;
+        return;
+    }
+    gPortInterpMatched++;
+    {
+        const float(*p)[4] = sInterpTab[sInterpCurTab ^ 1][idx].m;
+        float out[4][4];
+        int i, j;
+        if (memcmp(p, m, sizeof(float) * 16) == 0) {
+            gPortInterpSame++;
+            return;
+        }
+        if (p[0][3] == 0.0f && p[1][3] == 0.0f && p[2][3] == 0.0f && p[3][3] == 1.0f && m[0][3] == 0.0f &&
+            m[1][3] == 0.0f && m[2][3] == 0.0f && m[3][3] == 1.0f) {
+            /* rigid (modelview, camera view): decomposed. Teleports are the game side's call (the group's
+             * SKIP flag: actor moved too far, camera cut), as in Zelda64Recomp - a translation threshold here
+             * cannot work, limb matrices are in unscaled model units (x100). */
+            if (interp_decomposed(out, p, m, sInterpT)) {
+                memcpy(m, out, sizeof(out));
+            } else {
+                gPortInterpJump++;
+            }
+            return;
+        }
+        for (i = 0; i < 4; i++) { /* perspective projections: per element */
+            for (j = 0; j < 4; j++) {
+                m[i][j] = p[i][j] + (m[i][j] - p[i][j]) * sInterpT;
+            }
+        }
+    }
+}
+
+/* skinned vertex loads (groups tagged PORT_INTERP_VERTS): positions blended per vertex. Returns the
+ * vertices to transform (a blended copy in `tmp`, or the originals). */
+static const Vtx* interp_vertices(const Vtx* v, size_t n, Vtx* tmp) {
+    uint32_t key;
+    int g = sGrpDepth - 1;
+    size_t i;
+    if (g < 0 || g >= INTERP_DEPTH || !(sGrpFlags[g] & PORT_INTERP_VERTS) || n == 0 || n > 64) {
+        return v;
+    }
+    key = interp_mix(sGrpId[g] ^ 0x5EB1u, sGrpVtx[g]++) | 1;
+    if (sInterpRecord) {
+        int c = sInterpVLN[sInterpCurTab], f = sInterpVN[sInterpCurTab];
+        if (c < INTERP_VLOADS && f + (int)n <= INTERP_VTX_MAX) {
+            sInterpVLoad[sInterpCurTab][c].key = key;
+            sInterpVLoad[sInterpCurTab][c].n = (uint16_t)n;
+            sInterpVLoad[sInterpCurTab][c].first = (uint16_t)f;
+            for (i = 0; i < n; i++) {
+                sInterpVPos[sInterpCurTab][f + i][0] = v[i].v.ob[0];
+                sInterpVPos[sInterpCurTab][f + i][1] = v[i].v.ob[1];
+                sInterpVPos[sInterpCurTab][f + i][2] = v[i].v.ob[2];
+            }
+            sInterpVLN[sInterpCurTab] = c + 1;
+            sInterpVN[sInterpCurTab] = f + (int)n;
+        }
+    }
+    if (sInterpT >= 1.0f || (sGrpFlags[g] & PORT_INTERP_SKIP)) {
+        return v;
+    }
+    {
+        const int pt = sInterpCurTab ^ 1;
+        int c;
+        for (c = 0; c < sInterpVLN[pt]; c++) { /* few skinned loads per frame: a linear scan is enough */
+            const InterpVLoad* L = &sInterpVLoad[pt][c];
+            if (L->key == key && L->n == n) {
+                memcpy(tmp, v, n * sizeof(Vtx));
+                for (i = 0; i < n; i++) {
+                    const int16_t* p = sInterpVPos[pt][L->first + i];
+                    int k;
+                    for (k = 0; k < 3; k++) {
+                        tmp[i].v.ob[k] = (short)(p[k] + (int)((v[i].v.ob[k] - p[k]) * sInterpT));
+                    }
+                }
+                gPortInterpVtx += (uint32_t)n;
+                return tmp;
+            }
+        }
+        gPortInterpVtxMiss++;
+    }
+    return v;
+}
+
+/* 3ds_main.c: once per logic frame, before its passes: the tables the previous exact pass recorded
+ * become "previous" and are indexed; the exact pass of this frame records into the other ones */
+void gfx_interp_begin_frame(void) {
+    int i;
+    sInterpCurTab ^= 1;
+    sInterpN[sInterpCurTab] = 0;
+    sInterpVN[sInterpCurTab] = 0;
+    sInterpVLN[sInterpCurTab] = 0;
+    memset(sInterpHash, 0, sizeof(sInterpHash));
+    for (i = 0; i < sInterpN[sInterpCurTab ^ 1]; i++) {
+        uint32_t h = (sInterpTab[sInterpCurTab ^ 1][i].key * 2654435761u) & (INTERP_HASH - 1);
+        while (sInterpHash[h] != 0) h = (h + 1) & (INTERP_HASH - 1);
+        sInterpHash[h] = (int16_t)(i + 1);
+    }
+}
+
+/* before each pass: t = 1 is the logic frame itself (recorded when `record`), t < 1 an in-between frame */
+void gfx_interp_pass(float t, int record) {
+    sInterpStamp++;
+    sGrpDepth = 0;
+    sInterpT = t;
+    sInterpRecord = record;
+}
+
 static void gfx_sp_matrix(uint8_t parameters, const int32_t *addr) {
     float matrix[4][4];
 #ifndef GBI_FLOATS
@@ -1038,6 +1339,9 @@ static void gfx_sp_matrix(uint8_t parameters, const int32_t *addr) {
 #else
     memcpy(matrix, addr, sizeof(matrix));
 #endif
+    if (sInterpRecord || sInterpT < 1.0f) {
+        interp_matrix(matrix, parameters);
+    }
     
     { /* PORT rawmtx */
         extern unsigned int gfx_port_frame_index;
@@ -1100,9 +1404,14 @@ static float gfx_adjust_x_for_aspect_ratio(float x) {
     return x * (4.0f / 3.0f) / ((float)gfx_current_dimensions.width / (float)gfx_current_dimensions.height);
 }
 
+static uint32_t sPVStamp[MAX_VERTICES + 4]; /* see sPVCache */
 static void gfx_sp_vertex_impl(size_t n_vertices, size_t dest_index, const Vtx *vertices);
 static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *vertices) {
     uint64_t t0 = PERF_T();
+    Vtx tmp[64];
+    if (sGrpDepth > 0) {
+        vertices = interp_vertices(vertices, n_vertices, tmp);
+    }
     gfx_sp_vertex_impl(n_vertices, dest_index, vertices);
     gPortPerfVtx += PERF_T() - t0;
 }
@@ -1112,6 +1421,10 @@ static void gfx_sp_vertex_impl(size_t n_vertices, size_t dest_index, const Vtx *
         const Vtx_t *v = &vertices[i].v;
         const Vtx_tn *vn = &vertices[i].n;
         struct LoadedVertex *d = &rsp.loaded_vertices[dest_index];
+        sPVStamp[dest_index] = 0; /* its packed form (gfx_sp_tri1_impl) is stale */
+#ifdef __3DS__
+        sBatchStamp[dest_index] = 0; /* and so is its VBO copy in the current batch */
+#endif
         
         float x = v->ob[0] * rsp.MP_matrix[0][0] + v->ob[1] * rsp.MP_matrix[1][0] + v->ob[2] * rsp.MP_matrix[2][0] + rsp.MP_matrix[3][0];
         float y = v->ob[0] * rsp.MP_matrix[0][1] + v->ob[1] * rsp.MP_matrix[1][1] + v->ob[2] * rsp.MP_matrix[2][1] + rsp.MP_matrix[3][1];
@@ -1135,18 +1448,21 @@ static void gfx_sp_vertex_impl(size_t n_vertices, size_t dest_index, const Vtx *
                     calculate_normal_dir(&rsp.current_lights[i], rsp.current_lights_coeffs[i]);
                 }
                 /* PORT (2026-09-30): the game's LookAt (camera direction for G_TEXTURE_GEN environment maps
-                 * and hilites), transformed like the lights - libultraship GfxSpVertex. This was a fixed
-                 * +x/+y (sm64 PC port), so every env-mapped surface sampled the wrong part of its texture:
-                 * dull swords/metal, the flat N64 boot logo. Until a LookAt arrives, the old fixed one. */
-                if (rsp.current_lookat[0].dir[0] == 0 && rsp.current_lookat[0].dir[1] == 0 &&
-                    rsp.current_lookat[0].dir[2] == 0) {
-                    static const Light_t lookat_x = {{0, 0, 0}, 0, {0, 0, 0}, 0, {127, 0, 0}, 0};
-                    static const Light_t lookat_y = {{0, 0, 0}, 0, {0, 0, 0}, 0, {0, 127, 0}, 0};
-                    calculate_normal_dir(&lookat_x, rsp.current_lookat_coeffs[0]);
-                    calculate_normal_dir(&lookat_y, rsp.current_lookat_coeffs[1]);
-                } else {
-                    calculate_normal_dir(&rsp.current_lookat[0], rsp.current_lookat_coeffs[0]);
-                    calculate_normal_dir(&rsp.current_lookat[1], rsp.current_lookat_coeffs[1]);
+                 * and hilites), transformed like the lights - libultraship GfxSpVertex. It was always a fixed
+                 * +x/+y (sm64 PC port): dull swords/metal, the flat N64 boot logo. */
+                /* No LookAt loaded yet this frame: a fixed +x/+y (sm64 PC port). Measured with tools/statediff
+                 * (Chamber of the Sages pedestal, the one surface env-mapped before any LookAt): this 263
+                 * wrong flat px, a ZERO LookAt 449, the previous frame's last one 446. On the N64 the LookAt
+                 * lives outside the 0x420-byte F3DZEX2 data image reloaded per task (that image is zero
+                 * there), so it keeps what an earlier task left - not reproducible exactly. */
+                static const Light_t lookat_def[2] = { {{0, 0, 0}, 0, {0, 0, 0}, 0, {127, 0, 0}, 0},
+                                                       {{0, 0, 0}, 0, {0, 0, 0}, 0, {0, 127, 0}, 0} };
+                for (int k = 0; k < 2; k++) {
+                    const Light_t* la = &rsp.current_lookat[k];
+                    if (la->dir[0] == 0 && la->dir[1] == 0 && la->dir[2] == 0) {
+                        la = &lookat_def[k];
+                    }
+                    calculate_normal_dir(la, rsp.current_lookat_coeffs[k]);
                 }
                 rsp.lights_changed = false;
             }
@@ -1273,6 +1589,10 @@ typedef struct {
  * shader: bent split edges = white crack dots, and a flat near floor; a smooth curve interpolated
  * across big ground triangles took the far vertex's depth.) 2D/ortho draws (w exactly 1) stay at the
  * screen; 0 when 3D is off. Vertices behind the camera (w <= 0, floors under it) follow the near slope. */
+/* per loaded vertex: packed form cached for the triangles sharing it (gfx_sp_tri1_impl) */
+static PVtx sPVCache[MAX_VERTICES + 4];
+static uint32_t sPVState = 1;
+
 #define STEREO_NEAR_SLOPE 1.0f /* 1 = true stereo everywhere (v4); the split below is skipped */
 
 /* PORT (2026-09-30, stereo v4): automatic convergence against stereo-window violations. Geometry in front
@@ -1326,10 +1646,89 @@ static inline float stereo_offset(float w) {
 #define SUBDIV_MIN_PIXELS 10.0f
 #define SUBDIV_MAX_DEPTH 6
 
+#ifdef __3DS__
+/* PORT PERF (2026-09-30): indexed batches (gfx_citro3d.c). Each vertex is written once per batch straight
+ * into the VBO; a loaded N64 vertex (sCurVidx: the slots of the triangle being emitted unsplit) is reused
+ * by index while the batch lasts. sBatchId bumps on every flush / packed-state change / frame; G_VTX
+ * clears the stamp of each slot it rewrites. Split or clipped pieces (new vertices) are never reused. */
+extern float* gfx_citro3d_vtx_reserve(u32 n, u32* first);
+extern void gfx_citro3d_vtx_write(float* dst, const float* src);
+extern int gfx_citro3d_idx_push(u32 a, u32 b, u32 c);
+extern void gfx_citro3d_draw_indexed(void);
+
+extern float* gfx_citro3d_vbo_info(int** pos, u32* cap, float scale[4]);
+static float* sVbo;           /* VBO base (gfx_citro3d.c) */
+static int* sVboPos;          /* its running vertex index */
+static u32 sVboCap;
+static float sVboScale[4];    /* texcoord scales of the bound texture units, per batch */
+static uint32_t sVboInfoBatch; /* batch the above were fetched for */
+
+static int pack_vertex(const PVtx* p, bool z_is_from_0_to_1, int slot) {
+    u32 first;
+    float* d;
+    if (slot >= 0 && sBatchStamp[slot] == sBatchId) {
+        return sBatchVtx[slot];
+    }
+    if (sVboInfoBatch != sBatchId) { /* textures are bound per batch: fetch once */
+        sVbo = gfx_citro3d_vbo_info(&sVboPos, &sVboCap, sVboScale);
+        sVboInfoBatch = sBatchId;
+    }
+    if (sVbo == NULL || (u32)*sVboPos >= sVboCap) {
+        return -1;
+    }
+    first = (*sVboPos)++;
+    d = sVbo + first * 13;
+    /* the PICA layout (gfx_citro3d.c writeVertex): portrait (y, -x), z negated, scaled texcoords */
+    d[0] = p->y;
+    d[1] = -p->x;
+    d[2] = -(z_is_from_0_to_1 ? (p->z + p->w) * 0.5f : p->z);
+    d[3] = p->w;
+    d[4] = p->uv[0][0] * sVboScale[0];
+    d[5] = 1 - p->uv[0][1] * sVboScale[1];
+    d[6] = p->uv[1][0] * sVboScale[2];
+    d[7] = 1 - p->uv[1][1] * sVboScale[3];
+    d[8] = p->c[0];
+    d[9] = p->c[1];
+    d[10] = p->c[2];
+    d[11] = p->c[3];
+    d[12] = p->s;
+    if (buf_vbo_len == 0) { /* the batch's first vertex, for the draw log (port_draw_snapshot) */
+        buf_vbo[0] = p->x, buf_vbo[1] = p->y, buf_vbo[2] = z_is_from_0_to_1 ? (p->z + p->w) * 0.5f : p->z;
+        buf_vbo[3] = p->w, buf_vbo[4] = p->uv[0][0], buf_vbo[5] = p->uv[0][1], buf_vbo[6] = p->uv[1][0];
+        buf_vbo[7] = p->uv[1][1], buf_vbo[8] = p->c[0], buf_vbo[9] = p->c[1];
+        buf_vbo_len = 1;
+    }
+    if (slot >= 0) {
+        sBatchVtx[slot] = (uint16_t)first;
+        sBatchStamp[slot] = sBatchId;
+    }
+    return (int)first;
+}
+#endif
+
 static void gfx_pack_tri(const PVtx* t[3], bool z_is_from_0_to_1) {
     if (buf_vbo_num_tris == MAX_BUFFERED) {
         gfx_flush();
     }
+#ifdef __3DS__
+    if (!gPortLegacyVbo) {
+        int ix[3], i;
+        for (i = 0; i < 3; i++) {
+            ix[i] = pack_vertex(t[i], z_is_from_0_to_1, sCurVidx != NULL ? sCurVidx[i] : -1);
+            if (ix[i] < 0) {
+                return; /* this frame's vertex buffer is full */
+            }
+        }
+        if (!gfx_citro3d_idx_push(ix[0], ix[1], ix[2])) {
+            return;
+        }
+        buf_vbo_len = buf_vbo_len ? buf_vbo_len : 1;
+        if (++buf_vbo_num_tris == MAX_BUFFERED) {
+            gfx_flush();
+        }
+        return;
+    }
+#endif
     for (int i = 0; i < 3; i++) {
         const PVtx* p = t[i];
         float z = p->z, w = p->w;
@@ -1445,6 +1844,9 @@ static void gfx_emit_tri(const PVtx* a, const PVtx* b, const PVtx* c, bool zf) {
         gfx_emit_tri_one(a, b, c, zf);
         return;
     }
+#ifdef __3DS__
+    sCurVidx = NULL; /* pieces split at the convergence plane are new vertices */
+#endif
     PVtx side[2][4];
     int n[2] = { 0, 0 };
     for (int i = 0; i < 3; i++) {
@@ -1487,9 +1889,12 @@ static void gfx_emit_tri_one(const PVtx* a, const PVtx* b, const PVtx* c, bool z
             near |= t[e]->z < -t[e]->w;
         }
         if (!big && !near) {
-            gfx_pack_tri(t, zf);
+            gfx_pack_tri(t, zf); /* unsplit: may reuse the loaded vertices (sCurVidx) */
             return;
         }
+#ifdef __3DS__
+        sCurVidx = NULL; /* split pieces are new vertices */
+#endif
         for (int i = 0; i < 3; i++) {
             poly[i] = *t[i];
             pvtx_clamp_near(&poly[i]);
@@ -1502,6 +1907,7 @@ static void gfx_emit_tri_one(const PVtx* a, const PVtx* b, const PVtx* c, bool z
     }
 #ifdef __3DS__
     sBatchBehind++; /* counts guard-band clips */
+    sCurVidx = NULL; /* clipped pieces are new vertices */
 #endif
     for (int i = 0; i < 3; i++) {
         poly[n++] = *t[i];
@@ -1637,19 +2043,12 @@ static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_id
     if (nocull == -2) nocull = getenv("PORT_NOCULL") ? 1 : 0;
     if (nocull) { /* skip */ } else
     if ((rsp.geometry_mode & G_CULL_BOTH) != 0) {
-        /* PORT PERF: one reciprocal per vertex (VFP divides are slow on the ARM11) */
-        float q1 = 1.0f / v1->w, q2 = 1.0f / v2->w, q3 = 1.0f / v3->w;
-        float dx1 = v1->x * q1 - v2->x * q2;
-        float dy1 = v1->y * q1 - v2->y * q2;
-        float dx2 = v3->x * q3 - v2->x * q2;
-        float dy2 = v3->y * q3 - v2->y * q2;
-        float cross = dx1 * dy2 - dy1 * dx2;
-        
-        if ((v1->w < 0) ^ (v2->w < 0) ^ (v3->w < 0)) {
-            // If one vertex lies behind the eye, negating cross will give the correct result.
-            // If all vertices lie behind the eye, the triangle will be rejected anyway.
-            cross = -cross;
-        }
+        /* PORT PERF (2026-09-30): orientation without the three divisions (~19 cycles each on the ARM11 VFP).
+         * det(x, y, w) = w1 w2 w3 * O(p1, p2, p3), with O the NDC orientation. The former value was
+         * (p1 - p2) x (p3 - p2) = -O, negated once per vertex behind the eye (= times sign(w1 w2 w3)):
+         * its sign is exactly that of -det. Only the sign is used below. */
+        float cross = -(v1->x * (v2->y * v3->w - v3->y * v2->w) - v2->x * (v1->y * v3->w - v3->y * v1->w) +
+                        v3->x * (v1->y * v2->w - v2->y * v1->w));
         
         switch (rsp.geometry_mode & G_CULL_BOTH) {
             case G_CULL_FRONT:
@@ -1667,6 +2066,9 @@ static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_id
     if (sTriStateOk) {
         goto emit_vertices; /* render state unchanged since the previous triangle */
     }
+#ifdef __3DS__
+    { extern u32 gPortPerfSlowTris; gPortPerfSlowTris++; }
+#endif
 
     bool depth_test = (rsp.geometry_mode & G_ZBUFFER) == G_ZBUFFER;
     if (depth_test != rendering_state.depth_test) {
@@ -1846,13 +2248,25 @@ static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_id
     }
     sTC.linear_filter = linear_filter;
     sTC.z_is_from_0_to_1 = z_is_from_0_to_1;
+    sPVState++; /* packed vertices depend on sTC */
+#ifdef __3DS__
+    sBatchId++;
+#endif
     /* LOD fraction is derived from each triangle's w: keep re-evaluating state for those draws */
     sTriStateOk = !(usage & (1u << (8 + CCS_LODF)));
 
 emit_vertices:;
     PVtx pv[3];
+    const uint8_t vidx[3] = { vtx1_idx, vtx2_idx, vtx3_idx };
     for (int i = 0; i < 3; i++) {
         PVtx* p = &pv[i];
+        /* PORT PERF (2026-09-30): a loaded vertex's packed form depends only on the vertex and the render
+         * state (sTC); triangles sharing it (strips, TRI2, quads) reuse it. sPVState bumps whenever sTC is
+         * rebuilt and every frame; G_VTX clears the stamp of each slot it writes. */
+        if (sPVStamp[vidx[i]] == sPVState) {
+            *p = sPVCache[vidx[i]];
+            continue;
+        }
         p->x = v_arr[i]->x;
         p->y = v_arr[i]->y;
         p->z = v_arr[i]->z;
@@ -1883,10 +2297,18 @@ emit_vertices:;
         p->c[2] = v_arr[i]->color.b * (1.0f / 255.0f);
         p->c[3] = v_arr[i]->color.a * (1.0f / 255.0f);
         p->s = stereo_offset(p->w);
+        sPVCache[vidx[i]] = *p;
+        sPVStamp[vidx[i]] = sPVState;
     }
     {
         uint64_t te = PERF_T(), fe = gPortPerfFlush;
+#ifdef __3DS__
+        sCurVidx = vidx; /* unsplit, the triangle's vertices are the loaded ones (reusable) */
+#endif
         gfx_emit_tri(&pv[0], &pv[1], &pv[2], sTC.z_is_from_0_to_1);
+#ifdef __3DS__
+        sCurVidx = NULL;
+#endif
         gPortPerfEmit += (PERF_T() - te) - (gPortPerfFlush - fe);
     }
 }
@@ -1961,8 +2383,17 @@ static void gfx_sp_movemem(uint8_t index, uint8_t offset, const void* data) {
                 const uint8_t* b = (const uint8_t*)data;
                 int y = offset / 24; /* 0 = X, 1 = Y */
                 uint8_t want = y ? 0x80 : 0x00;
-                if (b[0] == 0 && b[1] == want && b[2] == 0 && b[4] == 0 && b[5] == want && b[6] == 0) {
+                /* native (built by game code: guLookAtHilite): col/colc at bytes 0-2 / 4-6, dir at 8-10,
+                 * 12-15 zero. Stored in a ROM segment the same bytes sit at k ^ 7 (all DMA'd data): col at
+                 * 7,6,5 / colc at 3,2,1, dir at 15,14,13, logical 12-15 at physical 11-8 (zero). */
+                if (b[0] == 0 && b[1] == want && b[2] == 0 && b[4] == 0 && b[5] == want && b[6] == 0 &&
+                    (b[12] | b[13] | b[14] | b[15]) == 0) {
                     memcpy(rsp.current_lookat + y, data, sizeof(Light_t));
+                } else if (b[7] == 0 && b[6] == want && b[5] == 0 && b[3] == 0 && b[2] == want && b[1] == 0 &&
+                           (b[8] | b[9] | b[10] | b[11]) == 0) {
+                    uint8_t tmp[16];
+                    for (int k = 0; k < 16; k++) tmp[k] = b[k ^ 7];
+                    memcpy(rsp.current_lookat + y, tmp, sizeof(Light_t));
                 }
             }
             rsp.lights_changed = true;
@@ -2067,11 +2498,12 @@ static void gfx_dp_set_texture_image(uint32_t format, uint32_t size, uint32_t wi
 
 static void gfx_dp_set_tile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t tmem, uint8_t tile, uint32_t palette, uint32_t cmt, uint32_t maskt, uint32_t shiftt, uint32_t cms, uint32_t masks, uint32_t shifts) {
     struct TileDesc* t = &rdp.tiles[tile & 7];
-    /* libultraship: wrapping without a mask clamps */
-    if (cms == G_TX_WRAP && masks == G_TX_NOMASK) {
+    /* RDP: without a mask a coordinate neither wraps nor mirrors - it clamps (libultraship did this for
+     * WRAP only; MIRROR with mask 0 clamps too) */
+    if (!(cms & G_TX_CLAMP) && masks == G_TX_NOMASK) {
         cms = G_TX_CLAMP;
     }
-    if (cmt == G_TX_WRAP && maskt == G_TX_NOMASK) {
+    if (!(cmt & G_TX_CLAMP) && maskt == G_TX_NOMASK) {
         cmt = G_TX_CLAMP;
     }
     t->fmt = fmt;
@@ -2666,6 +3098,10 @@ static void gfx_run_dl(Gfx* cmd) {
             case G_DL:
             case (uint8_t)G_ENDDL:
             case (uint8_t)G_NOOP:
+            case (uint8_t)G_RDPPIPESYNC: /* PORT PERF (2026-09-30): the syncs are no-ops here (~1000/frame) */
+            case (uint8_t)G_RDPLOADSYNC:
+            case (uint8_t)G_RDPTILESYNC:
+            case (uint8_t)G_RDPFULLSYNC:
 #ifdef F3DEX_GBI_2
             case (uint8_t)G_RDPHALF_1:
             case (uint8_t)G_BRANCH_Z:
@@ -2677,12 +3113,17 @@ static void gfx_run_dl(Gfx* cmd) {
                 break;
         }
 
+#ifdef __3DS__
+        uint64_t tOp = PERF_T(); /* perf_stages: time per opcode (G_DL sub-lists excluded) */
+#endif
         switch (opcode) {
 #ifdef __3DS__
             /* PORT (2026-09-30): stereo depth tags (gDPNoOpTag 0x3D5E3D0m; z_vr_box_draw.c): m = 0 normal,
              * 1 infinity (sky), 2 pre-rendered room picture, 3 flat at screen depth (HUD). */
             case (uint8_t)G_NOOP:
-                if ((cmd->words.w1 & 0xFFFFFF00u) == 0x3D5E3D00u) {
+                if (((cmd->words.w0 >> 16) & 0xFF) == PORT_INTERP_TAG) {
+                    interp_group(cmd->words.w0, cmd->words.w1);
+                } else if ((cmd->words.w1 & 0xFFFFFF00u) == 0x3D5E3D00u) {
                     extern void gfx_citro3d_set_stereo_mode(int mode);
                     gfx_flush();
                     gfx_citro3d_set_stereo_mode((int)(cmd->words.w1 & 0xFF));
@@ -2933,6 +3374,12 @@ static void gfx_run_dl(Gfx* cmd) {
                 gfx_dp_set_color_image(C0(21, 3), C0(19, 2), C0(0, 11), seg_addr(cmd->words.w1));
                 break;
         }
+#ifdef __3DS__
+        if (gPortPerfStagesOn && opcode != G_DL) {
+            extern u64 gPortPerfOpTicks[256];
+            gPortPerfOpTicks[opcode & 0xFF] += PERF_T() - tOp;
+        }
+#endif
         ++cmd;
     }
 }
@@ -2958,6 +3405,14 @@ void gfx_init(struct GfxWindowManagerAPI *wapi, struct GfxRenderingAPI *rapi) {
 
 void gfx_start_frame(void) {
     sTriStateOk = false;
+    /* the LookAt does not carry over to the next frame (kept, the last actor hilite's LookAt env-mapped
+     * the next frame's room geometry: Chamber of the Sages pedestal worst; see gfx_sp_vertex) */
+    memset(rsp.current_lookat, 0, sizeof(rsp.current_lookat));
+    rsp.lights_changed = true;
+    sPVState++; /* the stereo convergence changes per frame */
+#ifdef __3DS__
+    sBatchId++;
+#endif
     sBgLastFrame = sBgThisFrame; gPortPrerenderedFrame = sBgLastFrame || sStereoRoomThisFrame; sStereoRoomThisFrame = 0;
     sBgThisFrame = 0;
     gfx_wapi->handle_events();
@@ -2982,8 +3437,10 @@ static void gbi_audit_dump(unsigned frame) {
     for (i = 0; i < 256; i++) if (gPortGbiCounts[i]) { PortDbgX("GBI op", (unsigned)i); PortDbgX("GBI   n", gPortGbiCounts[i]); }
 }
 #endif
+int gPortInterpExtra; /* 1 while an in-between (interpolated) pass re-runs the display list */
+
 void gfx_run(Gfx *commands) {
-    gfx_port_frame_index++;
+    if (!gPortInterpExtra) gfx_port_frame_index++;
 #ifdef PORT_GBIAUDIT
     if (gfx_port_frame_index == 600 || gfx_port_frame_index == 1500) gbi_audit_dump(gfx_port_frame_index);
 #endif

@@ -61,6 +61,22 @@ this section is the current status.
 8. The touch panel's OCARINA, BOOTS and the tabs are still unchecked on hardware.
 9. **Fades, flashes and scene intros stayed 4:3 in widescreen: fixed.** The full-width test
    missed 1-cycle fills, whose right edge is 319 << 2.
+13. **HOME → Close crash, the real fix (v19):** v18's fix wasn't enough. `gfxInitDefault` ran twice
+    (`main` + `gfx_3ds_init`), so GSP had 2 references and one `gfxExit` left its event thread
+    running. The duplicate init is removed.
+14. **Pause menu: occasional white square and a top line of pixels (hardware only; Azahar renders
+    clean).** Open. Photo (hardware v19): a white box above Link's preview on the Equipment page, a faint
+    second Link to his right, and a thin vertical line, all in the off-screen-rendered preview
+    (`Port3ds_SetDrawTarget` / `gfx_3ds_read_back_offscreen`). (An L+R+Y screenshot combo was tried and
+    removed: L/R page the pause menu.)
+11. **HOME → Close crash: first attempt (v18).** The data abort was in libctru's GSP event thread: `exit()`
+    unmapped the heap while that thread still ran. Graphics are now shut down first.
+12. **How to find remaining render bugs:** run `tour.py --skip-n64 --age child`, then
+    `fbdiff.py --tour tour_child_40_101 --top 3 --png > fb.txt`, then
+    `fbreport.py fb.txt tour_child_40_101`. That writes `build/statediff/fbdiff/report.html`: scenes
+    worst-first, with the N64 | 3DS | heatmap image and the responsible draws. As of 2026-09-30 the
+    average error is 5.92. Found this way: the HUD hearts lack the N64's dark outline, which shows up in
+    every scene.
 10. **Minimap flashing: fixed.** It is now drawn off-screen and copied in one pass, and only redrawn
     when something visible changed.
 

@@ -1,3 +1,4 @@
+#include "port_interp.h"
 #include "libu64/debug.h"
 #include "avoid_ub.h"
 #include "gfx.h"
@@ -46,6 +47,7 @@ void SkelAnime_DrawLimbLod(PlayState* play, s32 limbIndex, void** skeleton, Vec3
 
     dList = limb->dLists[lod];
 
+    gPortInterpPush2(play->state.gfxCtx, PORT_INTERP_ID_LIMB(limbIndex), 0); /* PORT: 60 fps limb group */
     if ((overrideLimbDraw == NULL) || !overrideLimbDraw(play, limbIndex, &dList, &pos, &rot, arg)) {
         Matrix_TranslateRotateZYX(&pos, &rot);
         if (dList != NULL) {
@@ -57,6 +59,7 @@ void SkelAnime_DrawLimbLod(PlayState* play, s32 limbIndex, void** skeleton, Vec3
     if (postLimbDraw != NULL) {
         postLimbDraw(play, limbIndex, &dList, &rot, arg);
     }
+    gPortInterpPop2(play->state.gfxCtx);
 
     if (limb->child != LIMB_DONE) {
         SkelAnime_DrawLimbLod(play, limb->child, skeleton, jointTable, overrideLimbDraw, postLimbDraw, arg, lod);
@@ -102,6 +105,7 @@ void SkelAnime_DrawLod(PlayState* play, void** skeleton, Vec3s* jointTable, Over
     rot = jointTable[1];
     dList = rootLimb->dLists[lod];
 
+    gPortInterpPush2(play->state.gfxCtx, PORT_INTERP_ID_LIMB(1), 0); /* PORT: 60 fps limb group */
     if ((overrideLimbDraw == NULL) || !overrideLimbDraw(play, 1, &dList, &pos, &rot, arg)) {
         Matrix_TranslateRotateZYX(&pos, &rot);
         if (dList != NULL) {
@@ -112,6 +116,7 @@ void SkelAnime_DrawLod(PlayState* play, void** skeleton, Vec3s* jointTable, Over
     if (postLimbDraw != NULL) {
         postLimbDraw(play, 1, &dList, &rot, arg);
     }
+    gPortInterpPop2(play->state.gfxCtx);
 
     if (rootLimb->child != LIMB_DONE) {
         SkelAnime_DrawLimbLod(play, rootLimb->child, skeleton, jointTable, overrideLimbDraw, postLimbDraw, arg, lod);
@@ -148,6 +153,7 @@ void SkelAnime_DrawFlexLimbLod(PlayState* play, s32 limbIndex, void** skeleton, 
 
     newDList = limbDList = limb->dLists[lod];
 
+    gPortInterpPush2(play->state.gfxCtx, PORT_INTERP_ID_LIMB(limbIndex), 0); /* PORT: 60 fps limb group */
     if ((overrideLimbDraw == NULL) || !overrideLimbDraw(play, limbIndex, &newDList, &pos, &rot, arg)) {
         Matrix_TranslateRotateZYX(&pos, &rot);
         if (newDList != NULL) {
@@ -168,6 +174,7 @@ void SkelAnime_DrawFlexLimbLod(PlayState* play, s32 limbIndex, void** skeleton, 
     if (postLimbDraw != NULL) {
         postLimbDraw(play, limbIndex, &limbDList, &rot, arg);
     }
+    gPortInterpPop2(play->state.gfxCtx);
     if (limb->child != LIMB_DONE) {
         SkelAnime_DrawFlexLimbLod(play, limb->child, skeleton, jointTable, overrideLimbDraw, postLimbDraw, arg, lod,
                                   mtx);
@@ -217,6 +224,7 @@ void SkelAnime_DrawFlexLod(PlayState* play, void** skeleton, Vec3s* jointTable, 
 
     newDList = limbDList = rootLimb->dLists[lod];
 
+    gPortInterpPush2(play->state.gfxCtx, PORT_INTERP_ID_LIMB(1), 0); /* PORT: 60 fps limb group */
     if ((overrideLimbDraw == NULL) || !overrideLimbDraw(play, 1, &newDList, &pos, &rot, arg)) {
         Matrix_TranslateRotateZYX(&pos, &rot);
         if (newDList != NULL) {
@@ -233,6 +241,7 @@ void SkelAnime_DrawFlexLod(PlayState* play, void** skeleton, Vec3s* jointTable, 
     if (postLimbDraw != NULL) {
         postLimbDraw(play, 1, &limbDList, &rot, arg);
     }
+    gPortInterpPop2(play->state.gfxCtx);
     if (rootLimb->child != LIMB_DONE) {
         SkelAnime_DrawFlexLimbLod(play, rootLimb->child, skeleton, jointTable, overrideLimbDraw, postLimbDraw, arg, lod,
                                   &mtx);
@@ -264,6 +273,7 @@ void SkelAnime_DrawLimbOpa(PlayState* play, s32 limbIndex, void** skeleton, Vec3
     pos.z = limb->jointPos.z;
     dList = limb->dList;
 
+    gPortInterpPush2(play->state.gfxCtx, PORT_INTERP_ID_LIMB(limbIndex), 0); /* PORT: 60 fps limb group */
     if ((overrideLimbDraw == NULL) || !overrideLimbDraw(play, limbIndex, &dList, &pos, &rot, arg)) {
         Matrix_TranslateRotateZYX(&pos, &rot);
         if (dList != NULL) {
@@ -275,6 +285,7 @@ void SkelAnime_DrawLimbOpa(PlayState* play, s32 limbIndex, void** skeleton, Vec3
     if (postLimbDraw != NULL) {
         postLimbDraw(play, limbIndex, &dList, &rot, arg);
     }
+    gPortInterpPop2(play->state.gfxCtx);
 
     if (limb->child != LIMB_DONE) {
         SkelAnime_DrawLimbOpa(play, limb->child, skeleton, jointTable, overrideLimbDraw, postLimbDraw, arg);
@@ -318,6 +329,7 @@ void SkelAnime_DrawOpa(PlayState* play, void** skeleton, Vec3s* jointTable, Over
     rot = jointTable[1];
     dList = rootLimb->dList;
 
+    gPortInterpPush2(play->state.gfxCtx, PORT_INTERP_ID_LIMB(1), 0); /* PORT: 60 fps limb group */
     if ((overrideLimbDraw == NULL) || !overrideLimbDraw(play, 1, &dList, &pos, &rot, arg)) {
         Matrix_TranslateRotateZYX(&pos, &rot);
         if (dList != NULL) {
@@ -329,6 +341,7 @@ void SkelAnime_DrawOpa(PlayState* play, void** skeleton, Vec3s* jointTable, Over
     if (postLimbDraw != NULL) {
         postLimbDraw(play, 1, &dList, &rot, arg);
     }
+    gPortInterpPop2(play->state.gfxCtx);
 
     if (rootLimb->child != LIMB_DONE) {
         SkelAnime_DrawLimbOpa(play, rootLimb->child, skeleton, jointTable, overrideLimbDraw, postLimbDraw, arg);
@@ -365,6 +378,7 @@ void SkelAnime_DrawFlexLimbOpa(PlayState* play, s32 limbIndex, void** skeleton, 
 
     newDList = limbDList = limb->dList;
 
+    gPortInterpPush2(play->state.gfxCtx, PORT_INTERP_ID_LIMB(limbIndex), 0); /* PORT: 60 fps limb group */
     if ((overrideLimbDraw == NULL) || !overrideLimbDraw(play, limbIndex, &newDList, &pos, &rot, arg)) {
         Matrix_TranslateRotateZYX(&pos, &rot);
         if (newDList != NULL) {
@@ -382,6 +396,7 @@ void SkelAnime_DrawFlexLimbOpa(PlayState* play, s32 limbIndex, void** skeleton, 
     if (postLimbDraw != NULL) {
         postLimbDraw(play, limbIndex, &limbDList, &rot, arg);
     }
+    gPortInterpPop2(play->state.gfxCtx);
 
     if (limb->child != LIMB_DONE) {
         SkelAnime_DrawFlexLimbOpa(play, limb->child, skeleton, jointTable, overrideLimbDraw, postLimbDraw, arg,
@@ -435,6 +450,7 @@ void SkelAnime_DrawFlexOpa(PlayState* play, void** skeleton, Vec3s* jointTable, 
 
     newDList = limbDList = rootLimb->dList;
 
+    gPortInterpPush2(play->state.gfxCtx, PORT_INTERP_ID_LIMB(1), 0); /* PORT: 60 fps limb group */
     if ((overrideLimbDraw == NULL) || !overrideLimbDraw(play, 1, &newDList, &pos, &rot, arg)) {
         Matrix_TranslateRotateZYX(&pos, &rot);
         if (newDList != NULL) {
@@ -451,6 +467,7 @@ void SkelAnime_DrawFlexOpa(PlayState* play, void** skeleton, Vec3s* jointTable, 
     if (postLimbDraw != NULL) {
         postLimbDraw(play, 1, &limbDList, &rot, arg);
     }
+    gPortInterpPop2(play->state.gfxCtx);
 
     if (rootLimb->child != LIMB_DONE) {
         SkelAnime_DrawFlexLimbOpa(play, rootLimb->child, skeleton, jointTable, overrideLimbDraw, postLimbDraw, arg,
@@ -529,6 +546,7 @@ Gfx* SkelAnime_DrawLimb(PlayState* play, s32 limbIndex, void** skeleton, Vec3s* 
 
     dList = limb->dList;
 
+    gPortInterpPush(gfx++, PORT_INTERP_ID_LIMB(limbIndex), 0); /* PORT: 60 fps limb group */
     if ((overrideLimbDraw == NULL) || !overrideLimbDraw(play, limbIndex, &dList, &pos, &rot, arg, &gfx)) {
         Matrix_TranslateRotateZYX(&pos, &rot);
         if (dList != NULL) {
@@ -540,6 +558,7 @@ Gfx* SkelAnime_DrawLimb(PlayState* play, s32 limbIndex, void** skeleton, Vec3s* 
     if (postLimbDraw != NULL) {
         postLimbDraw(play, limbIndex, &dList, &rot, arg, &gfx);
     }
+    gPortInterpPop(gfx++);
 
     if (limb->child != LIMB_DONE) {
         gfx = SkelAnime_DrawLimb(play, limb->child, skeleton, jointTable, overrideLimbDraw, postLimbDraw, arg, gfx);
@@ -584,6 +603,7 @@ Gfx* SkelAnime_Draw(PlayState* play, void** skeleton, Vec3s* jointTable, Overrid
 
     dList = rootLimb->dList;
 
+    gPortInterpPush(gfx++, PORT_INTERP_ID_LIMB(1), 0); /* PORT: 60 fps limb group */
     if ((overrideLimbDraw == NULL) || !overrideLimbDraw(play, 1, &dList, &pos, &rot, arg, &gfx)) {
         Matrix_TranslateRotateZYX(&pos, &rot);
         if (dList != NULL) {
@@ -595,6 +615,7 @@ Gfx* SkelAnime_Draw(PlayState* play, void** skeleton, Vec3s* jointTable, Overrid
     if (postLimbDraw != NULL) {
         postLimbDraw(play, 1, &dList, &rot, arg, &gfx);
     }
+    gPortInterpPop(gfx++);
 
     if (rootLimb->child != LIMB_DONE) {
         gfx = SkelAnime_DrawLimb(play, rootLimb->child, skeleton, jointTable, overrideLimbDraw, postLimbDraw, arg, gfx);
@@ -628,6 +649,7 @@ Gfx* SkelAnime_DrawFlexLimb(PlayState* play, s32 limbIndex, void** skeleton, Vec
     pos.z = limb->jointPos.z;
 
     newDList = limbDList = limb->dList;
+    gPortInterpPush(gfx++, PORT_INTERP_ID_LIMB(limbIndex), 0); /* PORT: 60 fps limb group */
     if ((overrideLimbDraw == NULL) || !overrideLimbDraw(play, limbIndex, &newDList, &pos, &rot, arg, &gfx)) {
         Matrix_TranslateRotateZYX(&pos, &rot);
         if (newDList != NULL) {
@@ -643,6 +665,7 @@ Gfx* SkelAnime_DrawFlexLimb(PlayState* play, s32 limbIndex, void** skeleton, Vec
     if (postLimbDraw != NULL) {
         postLimbDraw(play, limbIndex, &limbDList, &rot, arg, &gfx);
     }
+    gPortInterpPop(gfx++);
     if (limb->child != LIMB_DONE) {
         gfx = SkelAnime_DrawFlexLimb(play, limb->child, skeleton, jointTable, overrideLimbDraw, postLimbDraw, arg, mtx,
                                      gfx);
@@ -692,6 +715,7 @@ Gfx* SkelAnime_DrawFlex(PlayState* play, void** skeleton, Vec3s* jointTable, s32
 
     newDList = limbDList = rootLimb->dList;
 
+    gPortInterpPush(gfx++, PORT_INTERP_ID_LIMB(1), 0); /* PORT: 60 fps limb group */
     if ((overrideLimbDraw == NULL) || !overrideLimbDraw(play, 1, &newDList, &pos, &rot, arg, &gfx)) {
         Matrix_TranslateRotateZYX(&pos, &rot);
         if (newDList != NULL) {
@@ -707,6 +731,7 @@ Gfx* SkelAnime_DrawFlex(PlayState* play, void** skeleton, Vec3s* jointTable, s32
     if (postLimbDraw != NULL) {
         postLimbDraw(play, 1, &limbDList, &rot, arg, &gfx);
     }
+    gPortInterpPop(gfx++);
     if (rootLimb->child != LIMB_DONE) {
         gfx = SkelAnime_DrawFlexLimb(play, rootLimb->child, skeleton, jointTable, overrideLimbDraw, postLimbDraw, arg,
                                      &mtx, gfx);

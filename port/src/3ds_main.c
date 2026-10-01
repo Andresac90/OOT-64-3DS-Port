@@ -57,7 +57,15 @@ unsigned short PortInput_GetPad(signed char* outX, signed char* outY) {
 /* PORT (2026-09-30): widescreen option (gfx_pc.c gPortWidescreen): SELECT toggles it (the N64 pad has
  * no SELECT), saved in sdmc:/3ds/oot/settings.txt. Off = the N64's 4:3 picture with side bars. */
 #define PORT_SETTINGS_PATH "sdmc:/3ds/oot/settings.txt"
-static int sO3dsSimSetting; /* o3ds_sim as read from settings.txt (not perf_ab's run-time toggling) */
+static int sO3dsSimSetting;
+/* bench=1: A/B benchmark - frames alternate between the indexed and the array vertex path (gfx_pc.c
+ * gPortLegacyVbo); display-list time is accumulated per variant and logged with each report. Leave the
+ * title screen's attract demo running (same content every boot). */
+static int sBench;
+/* fps60=0 turns the 60 fps frame interpolation off (on by default; docs/3ds-60fps-plan.md) */
+static int sInterp = 1;
+static u64 sBenchDl[2];
+static u32 sBenchFrames[2]; /* o3ds_sim as read from settings.txt (not perf_ab's run-time toggling) */
 static void Port3ds_SaveSettings(void) {
     extern int gPortWidescreen;
     FILE* f = fopen(PORT_SETTINGS_PATH, "w");
@@ -72,6 +80,7 @@ static void Port3ds_SaveSettings(void) {
             if (sO3dsSimSetting) fprintf(f, "o3ds_sim=1\n");
             if (gPortPerfStagesOn) fprintf(f, "perf_stages=1\n");
             if (gPortPerfAB) fprintf(f, "perf_ab=1\n");
+            if (sInterp != 1) fprintf(f, "fps60=%d\n", sInterp);
         }
         fclose(f);
     }
@@ -99,6 +108,12 @@ static void Port3ds_LoadSettings(void) {
             extern int gPortO3dsSim;
             gPortO3dsSim = v != 0;
             sO3dsSimSetting = v != 0;
+        }
+        if (sscanf(line, "bench=%d", &v) == 1) {
+            sBench = v != 0;
+        }
+        if (sscanf(line, "fps60=%d", &v) == 1) {
+            sInterp = v;
         }
         if (sscanf(line, "perf_ab=%d", &v) == 1) {
             extern int gPortPerfAB;
@@ -780,10 +795,28 @@ void Port3ds_MaybePumpAudio(void) {
         if (now - sLastPumpMs > 4 * PORT_RETRACE_MS) sLastPumpMs = now; /* far behind: don't burst */
     }
 }
+static u64 sLast = 0; /* when the previous logic frame was presented (retrace-aligned) */
+static int Port3ds_UpdateRate(void) {
+    extern void* gRegEditor;
+    int rate = 3;
+    if (gRegEditor) rate = *(short*)((char*)gRegEditor + 0x14 + 126 * 2); /* R_UPDATE_RATE = SREG(30) */
+    if (rate < 1) rate = 1;
+    if (rate > 6) rate = 6;
+    return rate;
+}
+/* wait whole retraces (pumping audio on each) until `targetMs` is under one retrace away */
+static void Port3ds_WaitUntil(double targetMs) {
+    extern void Port3ds_PumpAudio(void);
+    while ((double)osGetTime() + 2.0 < targetMs) {
+        gspWaitForVBlank();
+        Port3ds_PumpAudio();
+        sLastPumpMs = (double)osGetTime();
+        sMidFramePumps++;
+    }
+}
 static void Port3ds_PaceFrame(void) {
     extern void* gRegEditor;
     extern void Port3ds_PumpAudio(void);
-    static u64 sLast = 0;
     const double kRetraceMs = 1000.0 / 59.83; /* 3DS LCD refresh */
     int rate = 3;
     if (gRegEditor) rate = *(short*)((char*)gRegEditor + 0x14 + 126 * 2); /* R_UPDATE_RATE = SREG(30) */
@@ -878,6 +911,7 @@ static void Port3ds_PerfReport(unsigned frames) {
     }
     PortDbgX("perf tris/frame", gPortPerfTris / frames);
     PortDbgX("perf tris in/frame (before clip+subdivision)", gPortPerfTrisIn / frames);
+    { extern u32 gPortPerfSlowTris; PortDbgX("perf tris slow-path/frame", gPortPerfSlowTris / frames); gPortPerfSlowTris = 0; }
     gPortPerfTrisIn = 0;
     { /* memory budget (Old 3DS target: 96MB mode): linear free, regular heap in use (KB) */
         extern u32 linearSpaceFree(void);
@@ -912,11 +946,28 @@ static void Port3ds_PerfReport(unsigned frames) {
             }
             memset(gPortPerfOpCounts, 0, sizeof(gPortPerfOpCounts));
         }
+        { /* perf_stages: the 8 most expensive opcodes, opcode << 20 | us per frame */
+            extern u64 gPortPerfOpTicks[256];
+            extern int gPortPerfStagesOn;
+            int k, i;
+            for (k = 0; k < 8 && gPortPerfStagesOn; k++) {
+                int best = 0;
+                for (i = 1; i < 256; i++) if (gPortPerfOpTicks[i] > gPortPerfOpTicks[best]) best = i;
+                if (gPortPerfOpTicks[best] == 0) break;
+                PortDbgX("perf dl op<<20|us/frame", ((unsigned)best << 20) | (unsigned)(gPortPerfOpTicks[best] / div));
+                gPortPerfOpTicks[best] = 0;
+            }
+            memset(gPortPerfOpTicks, 0, sizeof(gPortPerfOpTicks));
+        }
     }
     sPerfGame = sPerfDl = sPerfSwap = sPerfPace = 0;
     gPortPerfTris = gPortPerfDraws = 0;
 }
 
+static double sInterpPassMs = 20.0; /* measured cost of one pass (DL + frame end), ms */
+static u64 sPerfInterp;             /* ticks in in-between passes */
+static u32 sInterpFrames;           /* in-between frames drawn */
+static double sInterpElapsedSum;    /* logic time before the passes, ms (summed per report) */
 void PortGfx_RunTask(OSTask* task) {
     u64 tA = svcGetSystemTick(), tB, tC, tD;
     if (sPerfLastEnd != 0) sPerfGame += tA - sPerfLastEnd;
@@ -924,11 +975,67 @@ void PortGfx_RunTask(OSTask* task) {
     Port3ds_PollInput();
     { extern void Port3ds_PumpInput(void); Port3ds_PumpInput(); } /* live buttons -> game PadMgr */
     { extern void Audio_PortEnsureNullChannels(void); Audio_PortEnsureNullChannels(); } /* keep uninit audio channels non-NULL so direct game audio calls don't crash */
+    if (sBench) {
+        extern int gPortLegacyVbo;
+        static unsigned sBenchTick;
+        gPortLegacyVbo = (++sBenchTick) & 1;
+    }
+    if (sInterp) {
+        /* PORT (2026-09-30): 60 fps. The logic runs at 20/s (R_UPDATE_RATE retraces per update); the
+         * retraces in between show the same display list drawn with every matrix interpolated from the
+         * previous logic frame to this one (gfx_pc.c interp_matrix), each on its own retrace. As many
+         * in-between frames as fit: pass cost is measured, so a slow scene/console drops to 1 or 0
+         * and the logic keeps its N64 speed. Shows the world one logic frame (50 ms) later than
+         * drawing it straight away, as in Ship of Harkinian's interpolation. */
+        extern void gfx_interp_begin_frame(void);
+        extern void gfx_interp_pass(float t, int record);
+        extern int gPortInterpExtra, Port3ds_InterpBlocked(void);
+        const double kRetraceMs = 1000.0 / 59.83;
+        int rate = Port3ds_UpdateRate(), n = 0, k;
+        gfx_interp_begin_frame();
+        if (sLast != 0 && rate > 1 && !sBench && !Port3ds_InterpBlocked()) {
+            double budget = rate * kRetraceMs, elapsed = (double)(osGetTime() - sLast);
+            /* n in-between passes fit when they and the exact pass finish inside the logic budget (a pass
+             * that ends after its retrace is shown one retrace late, which is still smoother than none).
+             * fps60=2 forces them (emulator verification: its timing is not the console's). */
+            for (n = rate - 1; n > 0 && sInterp < 2; n--) {
+                if (elapsed + (n + 1) * sInterpPassMs <= budget) break;
+            }
+            sInterpElapsedSum += elapsed;
+        }
+        for (k = 1; k <= n; k++) {
+            u64 t0 = svcGetSystemTick();
+            gfx_interp_pass((float)k / (float)(n + 1), 0);
+            gPortInterpExtra = 1;
+            gfx_start_frame();
+            gfx_run((Gfx*)task->t.data_ptr);
+            gfx_end_frame();
+            gPortInterpExtra = 0;
+            {
+                double ms = (double)(svcGetSystemTick() - t0) / (SYSCLOCK_ARM11 / 1000.0);
+                sInterpPassMs += (ms - sInterpPassMs) * 0.25;
+                sPerfInterp += svcGetSystemTick() - t0;
+                sInterpFrames++;
+            }
+            Port3ds_WaitUntil((double)sLast + (rate * kRetraceMs) * k / (n + 1));
+        }
+        gfx_interp_pass(1.0f, 1);
+        tA = svcGetSystemTick(); /* dl/swap below = the exact pass only */
+    }
     gfx_start_frame();
     gfx_run((Gfx*)task->t.data_ptr);
     tB = svcGetSystemTick();
+    if (sBench) {
+        extern int gPortLegacyVbo;
+        sBenchDl[gPortLegacyVbo] += tB - tA;
+        sBenchFrames[gPortLegacyVbo]++;
+    }
     gfx_end_frame();
     tC = svcGetSystemTick();
+    if (sInterp) {
+        double ms = (double)(tC - tA) / (SYSCLOCK_ARM11 / 1000.0);
+        sInterpPassMs += (ms - sInterpPassMs) * 0.25; /* in-between passes cost about the same */
+    }
     Port3ds_PaceFrame();
     tD = svcGetSystemTick();
     sPerfDl += tB - tA;
@@ -942,10 +1049,35 @@ void PortGfx_RunTask(OSTask* task) {
       if (++n == 300) { u64 t1 = osGetTime();
           extern void PortDbgX(const char*, unsigned); extern void* gRegEditor;
           PortDbgX("perf updates/s x10", (unsigned)(3000000ull / (t1 - t0 ? t1 - t0 : 1)));
+          PortDbgX("perf frames shown/s x10 (60fps interp)",
+                   (unsigned)((300ull + sInterpFrames) * 10000ull / (t1 - t0 ? t1 - t0 : 1)));
+          { extern uint32_t gPortInterpMatched, gPortInterpMissed;
+            PortDbgX("perf interp mtx matched/frame", sInterpFrames ? gPortInterpMatched / sInterpFrames : 0);
+            PortDbgX("perf interp mtx missed/frame", sInterpFrames ? gPortInterpMissed / sInterpFrames : 0);
+            PortDbgX("perf us/interp pass", sInterpFrames ? (unsigned)(sPerfInterp / sInterpFrames / (SYSCLOCK_ARM11 / 1000000)) : 0);
+            PortDbgX("perf us/pass estimate", (unsigned)(sInterpPassMs * 1000.0));
+            PortDbgX("perf us/frame logic before passes", (unsigned)(sInterpElapsedSum * 1000.0 / n));
+            sInterpElapsedSum = 0;
+            { extern uint32_t gPortInterpSame, gPortInterpJump;
+              PortDbgX("perf interp mtx identical/frame", sInterpFrames ? gPortInterpSame / sInterpFrames : 0);
+              PortDbgX("perf interp mtx jump (not blended)/frame", sInterpFrames ? gPortInterpJump / sInterpFrames : 0);
+              gPortInterpSame = gPortInterpJump = 0; }
+            { extern uint32_t gPortInterpVtx, gPortInterpVtxMiss;
+              PortDbgX("perf interp skin vtx blended/frame", sInterpFrames ? gPortInterpVtx / sInterpFrames : 0);
+              PortDbgX("perf interp skin vtx loads unmatched/frame", sInterpFrames ? gPortInterpVtxMiss / sInterpFrames : 0);
+              gPortInterpVtx = gPortInterpVtxMiss = 0; }
+            gPortInterpMatched = gPortInterpMissed = 0; }
+          sInterpFrames = 0; sPerfInterp = 0;
           if (gRegEditor) PortDbgX("perf R_UPDATE_RATE", (unsigned)*(short*)((char*)gRegEditor + 0x14 + 126 * 2));
           PortDbgX("perf audio pumps/s x10", (unsigned)((u64)sPortAudioPumps * 10000ull / (t1 - t0 ? t1 - t0 : 1)));
           sPortAudioPumps = 0;
           Port3ds_PerfReport(n);
+          if (sBench && sBenchFrames[0] && sBenchFrames[1]) {
+              PortDbgX("bench us/frame INDEXED", (unsigned)(sBenchDl[0] / sBenchFrames[0] / (SYSCLOCK_ARM11 / 1000000)));
+              PortDbgX("bench us/frame ARRAY", (unsigned)(sBenchDl[1] / sBenchFrames[1] / (SYSCLOCK_ARM11 / 1000000)));
+              sBenchDl[0] = sBenchDl[1] = 0;
+              sBenchFrames[0] = sBenchFrames[1] = 0;
+          }
           { /* perf_ab=1: alternate New 3DS speed / Old 3DS approximation every 4 reports (~1 min) so one
              * play session measures both (docs/3ds-60fps-plan.md P0) */
               extern int gPortPerfAB, gPortO3dsSim;

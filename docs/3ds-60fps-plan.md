@@ -136,3 +136,68 @@ Texture setup and state commands dominate, so per-command overhead is the target
   | MIXER | 1303 | 1040 |
 
   Total −23%.
+
+**Hardware per-opcode profile (v18, `perf_stages` + `perf_ab`), ms per frame:**
+
+| Mode | DL total | TRI2 + QUAD | TEXRECT | VTX | All state/texture commands |
+|---|---|---|---|---|---|
+| O3DS-sim | 75–79 | 30–33 | 7–8 | 3.5 | < 5 |
+| N3DS | 27–51 | 8–17 | 0.4–2 | 1–3.6 | < 2 |
+
+**Triangle processing dominates:** about 16 µs (~4,300 cycles) per triangle at 268 MHz. The next P1
+targets are in `gfx_sp_tri1_impl`:
+1. Per-vertex UV/color conversion is recomputed for every triangle sharing a vertex.
+2. Double vertex copy (gfx_pc packs, then gfx_citro3d re-swizzles into the VBO).
+3. State re-evaluation.
+
+GPU transform (P2) remains the structural fix.
+
+**v20 (P1, verified in Azahar: all 101 child-tour scenes unchanged vs the N64 reference, avg 5.92):**
+- **Indexed batches.** Each vertex is written once per batch straight into the VBO in the final PICA
+  layout; loaded N64 vertices are reused by index across the triangles sharing them. Triangles push 3
+  u16 indices and batches draw with `C3D_DrawElements`. This removed the per-triangle 39-float staging
+  write and the backend's copy/re-arrange pass.
+- **Division-free backface culling:** the sign of the homogeneous determinant det(x, y, w).
+- **Per-loaded-vertex packed-vertex cache.** Correct but no measurable gain in Azahar; kept.
+- **VBO/index buffer data-cache flush before `C3D_FrameEnd`.** A hardware correctness fix: the GPU could
+  read stale vertices from the CPU cache.
+
+**Note:** Azahar's system tick doesn't model the 3DS CPU (the title demo shows ~18 ms in Azahar vs
+27–51 ms on a New 3DS). CPU gains must be measured on hardware (`perf_ab` + `perf_stages`).
+
+### 2026-09-30 (later): frame interpolation implemented (P3), verified in Azahar
+
+**Design, taken from the two working references:**
+- Zelda64Recomp (Majora's Mask, RT64): the game emits `gEXMatrixGroup(id, ...)` around every transform
+  it wants interpolated (patches/actor_transform_tagging.c, sky_/camera_/effect_transform_tagging.c,
+  ids in transform_ids.h). RT64 pairs matrices by id, interpolates them DECOMPOSED, blends skin vertices,
+  and skips a group on camera cuts (camera_transform_tagging.c heuristics) or teleported/new actors.
+- Ship of Harkinian (OoT): `FrameInterpolation_RecordOpenChild(actor, limb)` labels; the renderer swaps
+  each Mtx for the interpolated one; angle jumps > 90 degrees are not blended.
+- First attempt here guessed identity in the renderer (next static DL + occurrence): wrong pairings
+  (same model drawn twice, order swapped between frames), camera keyed differently from the sky -> the
+  wobble and sky flicker seen in the emulator. Replaced by game-side tags.
+
+**Implementation:**
+- `port/include/port_interp.h`: G_NOOP tags (`w0 = G_NOOP | 0x6E << 16 | op << 8 | flags`, `w1 = id`),
+  push/pop, flags SKIP (record, don't blend) and VERTS (blend CPU-written vertex positions).
+- Tag sites: Actor_Draw (actor instance; SKIP when it moved > 300 units since prevPos), all 12
+  SkelAnime limb draw functions (limb index, opa+xlu), Skin_DrawImpl (per skin limb, VERTS for animated
+  limbs: Epona), View_ApplyPerspective (camera; cut = eye/at jump > 300 or eye velocity change > 100),
+  Skybox_Draw (SKIP on camera cut).
+- `gfx_pc.c`: group stack with nested ids; matrix key = group path + index in group; tables recorded by
+  the exact pass; rigid matrices interpolated decomposed (translation lerp, per-axis scale lerp,
+  nlerp + Gram-Schmidt rotation, > 90 degrees = snap); perspective per element; untagged = as is.
+  No translation threshold in the renderer: limb matrices are in unscaled model units (x100), a gallop
+  step looked like a 2000-unit teleport.
+- `3ds_main.c`: per logic frame, n = in-between passes that fit (`elapsed + (n+1) * pass <= budget`),
+  each presented on its own retrace, then the exact pass. `fps60=0` off, `fps60=2` forces passes (emulator
+  verification only - the game slows down). In-between passes skip readbacks/captures.
+- Verification: `sdmc:/3ds/oot/capture_interp` dumps logic frames 198/199 (+200k) all passes; the step
+  sizes between consecutive frames are even (e.g. 7.9 7.7 7.9 7.7 7.7; leg region 37 38 41 around a 43
+  boundary step) - before the tags the boundary step was 60 vs 24 in-between.
+
+**Status:** correct, but passes cost a full display-list walk (Azahar ~22 ms emulated; hardware DL 27-51 ms
+on New 3DS), so in default adaptive mode they rarely fit yet. 60 fps now depends on pass cost: P2 (GPU
+transform: vertices uploaded once, per-pass matrix uniforms) is the structural fix. Not tagged yet
+(still 20 Hz): EffectSs particles, sword trails, lens flare, billboards outside actors.

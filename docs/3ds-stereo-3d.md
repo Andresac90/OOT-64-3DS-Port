@@ -150,3 +150,11 @@ they came out at mixed depths ("hurts the eye" on hardware). These gamestates se
 `gPortStereoFlatScene` each frame (`FileSelect_Main`; `Play_Draw` while `IS_PAUSED`). 3D geometry is
 then a flat screen-depth layer, and the sky / room background sits at half depth behind it. Measured:
 file-select panels and text at 0, sky behind; all pause pages at 0.
+
+### Pre-rendered room edges (v18)
+
+The room picture is shifted sideways for depth, which uncovered its edge: a "void" strip beside shop
+rooms in 3D (hardware v17). In pre-rendered rooms, everything but the HUD is now zoomed horizontally by
+the shift plus 50% (`sRoomZoom`, shader `eye.z`). Zooming the picture *and* the 3D actors keeps them
+aligned; it acts as a slight FOV change. Measured in the Kokiri Shop: no void pixels at the 4:3 edges
+in either eye.

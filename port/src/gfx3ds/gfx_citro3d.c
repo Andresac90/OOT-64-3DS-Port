@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include <math.h>
 #include <stdio.h>
 
 #ifndef _LANGUAGE_C
@@ -844,6 +845,14 @@ static void setRemap(float a, float b) {
     }
 }
 
+/* pre-rendered rooms in 3D: the room picture is shifted sideways for depth, which uncovered its edge (a
+ * "void" strip beside shop rooms, hardware v17). Everything but the HUD is zoomed horizontally by the
+ * shift plus a margin - picture and 3D actors alike, so they stay aligned (a slight FOV change). */
+static float sRoomZoom(float shift) {
+    extern int gPortPrerenderedFrame;
+    return gPortPrerenderedFrame ? fabsf(shift * STEREO_ROOM_DEPTH) * 1.5f : 0.0f;
+}
+
 static void setEye(float shift) {
     float u[4];
     if (sEyeLoc < 0) {
@@ -854,13 +863,13 @@ static void setEye(float shift) {
         /* mono, a flat screen-depth layer (the HUD), or a menu's panels */
         u[0] = u[1] = u[2] = u[3] = 0.0f;
     } else if (gPortStereoFlatScene) { /* a menu's sky / room background: behind the panels */
-        u[0] = 0.0f, u[1] = 0.0f, u[2] = 0.0f, u[3] = shift * 0.5f;
+        u[0] = 0.0f, u[1] = 0.0f, u[2] = fabsf(shift * 0.5f), u[3] = shift * 0.5f;
     } else if (sStereoMode == 1) { /* sky: the full shift, independent of the skybox box's own w */
         u[0] = 0.0f, u[1] = 0.0f, u[2] = 0.0f, u[3] = shift;
-    } else if (sStereoMode == 2) { /* flat picture (w = 1): constant shift */
-        u[0] = 0.0f, u[1] = 0.0f, u[2] = 0.0f, u[3] = shift * STEREO_ROOM_DEPTH;
+    } else if (sStereoMode == 2) { /* flat picture (w = 1): constant shift, zoomed (see sRoomZoom) */
+        u[0] = 0.0f, u[1] = 0.0f, u[2] = sRoomZoom(shift), u[3] = shift * STEREO_ROOM_DEPTH;
     } else {
-        u[0] = shift, u[1] = 0.0f, u[2] = 0.0f, u[3] = 0.0f; /* depth curve per vertex (gfx_pc.c) */
+        u[0] = shift, u[1] = 0.0f, u[2] = sRoomZoom(shift), u[3] = 0.0f; /* depth curve per vertex (gfx_pc.c) */
     }
     if (u[0] != sEyeCur[0] || u[1] != sEyeCur[1] || u[2] != sEyeCur[2] || u[3] != sEyeCur[3]) {
         C3D_FVUnifSet(GPU_VERTEX_SHADER, sEyeLoc, u[0], u[1], u[2], u[3]);
@@ -868,50 +877,10 @@ static void setEye(float shift) {
     }
 }
 
-static void gfx_citro3d_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris)
-{
-    if (sBufIdx * VTX_FLOATS + buf_vbo_len > 2 * 1024 * 1024 / 4)
-    {
-        printf("Poly buf over!\n");
-        return;
-    }
-    /* Invariant: gfx_pc.c packs VTX_FLOATS per vertex. A mismatch means the front end and this backend
-     * disagree on the vertex layout; reading with the wrong stride walks off the buffer. */
-    if (buf_vbo_len != buf_vbo_num_tris * 3 * VTX_FLOATS) {
-        static int sReported;
-        if (sReported < 4) {
-            extern void PortDbgX(const char* label, unsigned val);
-            sReported++;
-            PortDbgX("VTX-STRIDE MISMATCH buf_vbo_len", (unsigned)buf_vbo_len);
-            PortDbgX("  tris", (unsigned)buf_vbo_num_tris);
-        }
-        return;
-    }
+/* submit `count` vertices of the current batch: DrawArrays from `first`, or DrawElements from `idx` -
+ * once per eye in stereo (see the viewport/eye notes inside) */
+static void submitDraw(u32 count, u32 first, const u16* idx) {
     applyAlphaTest();
-
-    const struct ShaderProgram* prg = &sShaderProgramPool[sCurShader];
-    /* texcoords are normalized to the uploaded texture; scale into the power-of-two PICA texture */
-    float s0 = sTexturePoolScaleS[sTexUnits[0]], t0 = sTexturePoolScaleT[sTexUnits[0]];
-    float s1 = sTexturePoolScaleS[sTexUnits[1]], t1 = sTexturePoolScaleT[sTexUnits[1]];
-    const float* src = buf_vbo;
-    float* dst = &((float*)sVboBuffer)[sBufIdx * VTX_FLOATS];
-    for (size_t i = 0; i < 3 * buf_vbo_num_tris; i++, src += VTX_FLOATS)
-    {
-        *dst++ = src[1];
-        *dst++ = -src[0];
-        *dst++ = -src[2];
-        *dst++ = src[3];
-        *dst++ = src[4] * s0;
-        *dst++ = 1 - (src[5] * t0);
-        *dst++ = src[6] * s1;
-        *dst++ = 1 - (src[7] * t1);
-        *dst++ = src[8];
-        *dst++ = src[9];
-        *dst++ = src[10];
-        *dst++ = src[11];
-        *dst++ = src[12]; /* stereo offset (gfx_pc.c stereo_offset) */
-    }
-
     applyDrawId();
     if (gGfx3DSMode == GFX_3DS_MODE_STEREO && !Port3ds_IsOffscreen()) {
         /* both eyes from the same vertices: left half then right half of the stereo target */
@@ -938,17 +907,138 @@ static void gfx_citro3d_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size
                 C3D_SetViewport(sVp[1], vy, sVp[3], vh);
             }
             C3D_SetScissor(GPU_SCISSOR_NORMAL, sSc[1], sx + off, sSc[1] + sSc[3], sx + sSc[2] + off);
-            C3D_DrawArrays(GPU_TRIANGLES, sBufIdx, buf_vbo_num_tris * 3);
+            if (idx != NULL) {
+                C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, idx);
+            } else {
+                C3D_DrawArrays(GPU_TRIANGLES, first, count);
+            }
         }
     } else {
         setEye(0.0f);
         setRemap(1.0f, 0.0f);
-        C3D_DrawArrays(GPU_TRIANGLES, sBufIdx, buf_vbo_num_tris * 3);
+        if (idx != NULL) {
+            C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, idx);
+        } else {
+            C3D_DrawArrays(GPU_TRIANGLES, first, count);
+        }
     }
+}
+
+#define VBO_BYTES (2 * 1024 * 1024)
+#define VBO_VERTS (VBO_BYTES / (VTX_FLOATS * 4))
+
+/* front-end vertex (gfx_pc.c: x y z w u0 v0 u1 v1 r g b a stereo) -> the PICA layout: portrait target
+ * (y, -x), N64 z negated, texcoords scaled into the power-of-two PICA texture of the bound units */
+static inline void writeVertex(float* dst, const float* src, float s0, float t0, float s1, float t1) {
+    dst[0] = src[1];
+    dst[1] = -src[0];
+    dst[2] = -src[2];
+    dst[3] = src[3];
+    dst[4] = src[4] * s0;
+    dst[5] = 1 - (src[5] * t0);
+    dst[6] = src[6] * s1;
+    dst[7] = 1 - (src[7] * t1);
+    dst[8] = src[8];
+    dst[9] = src[9];
+    dst[10] = src[10];
+    dst[11] = src[11];
+    dst[12] = src[12]; /* stereo offset (gfx_pc.c stereo_offset) */
+}
+
+static void gfx_citro3d_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris)
+{
+    if (sBufIdx * VTX_FLOATS + buf_vbo_len > VBO_BYTES / 4)
+    {
+        printf("Poly buf over!\n");
+        return;
+    }
+    /* Invariant: gfx_pc.c packs VTX_FLOATS per vertex. A mismatch means the front end and this backend
+     * disagree on the vertex layout; reading with the wrong stride walks off the buffer. */
+    if (buf_vbo_len != buf_vbo_num_tris * 3 * VTX_FLOATS) {
+        static int sReported;
+        if (sReported < 4) {
+            extern void PortDbgX(const char* label, unsigned val);
+            sReported++;
+            PortDbgX("VTX-STRIDE MISMATCH buf_vbo_len", (unsigned)buf_vbo_len);
+            PortDbgX("  tris", (unsigned)buf_vbo_num_tris);
+        }
+        return;
+    }
+    /* texcoords are normalized to the uploaded texture; scale into the power-of-two PICA texture */
+    float s0 = sTexturePoolScaleS[sTexUnits[0]], t0 = sTexturePoolScaleT[sTexUnits[0]];
+    float s1 = sTexturePoolScaleS[sTexUnits[1]], t1 = sTexturePoolScaleT[sTexUnits[1]];
+    const float* src = buf_vbo;
+    float* dst = &((float*)sVboBuffer)[sBufIdx * VTX_FLOATS];
+    for (size_t i = 0; i < 3 * buf_vbo_num_tris; i++, src += VTX_FLOATS, dst += VTX_FLOATS) {
+        writeVertex(dst, src, s0, t0, s1, t1);
+    }
+    submitDraw(buf_vbo_num_tris * 3, sBufIdx, NULL);
     sBufIdx += buf_vbo_num_tris * 3;
     {
         extern u32 gPortPerfTris, gPortPerfDraws;
         gPortPerfTris += buf_vbo_num_tris;
+        gPortPerfDraws++;
+    }
+}
+
+/* PORT PERF (2026-09-30): indexed batches. The front end (gfx_pc.c) writes each vertex once per batch
+ * straight into the VBO in the final layout (a loaded N64 vertex shared by several triangles is reused
+ * by index) and each triangle adds 3 indices; the batch is drawn with DrawElements. The array path
+ * above wrote 3 vertices per triangle into a staging buffer and copied/re-arranged all of them here
+ * (hardware profile: triangle handling ~16 us each on Old 3DS). */
+#define IDX_CAP (96 * 1024)
+static u16* sIdxBuf;
+static u32 sIdxPos, sIdxStart;
+
+/* n vertices at the end of this frame's VBO; NULL when full (index of the first in *first) */
+float* gfx_citro3d_vtx_reserve(u32 n, u32* first) {
+    if (sVboBuffer == NULL || sBufIdx + n > VBO_VERTS) {
+        return NULL;
+    }
+    *first = sBufIdx;
+    sBufIdx += n;
+    return &((float*)sVboBuffer)[*first * VTX_FLOATS];
+}
+
+void gfx_citro3d_vtx_write(float* dst, const float* src) {
+    writeVertex(dst, src, sTexturePoolScaleS[sTexUnits[0]], sTexturePoolScaleT[sTexUnits[0]],
+                sTexturePoolScaleS[sTexUnits[1]], sTexturePoolScaleT[sTexUnits[1]]);
+}
+
+/* the VBO base, capacity (vertices), the running index and the bound units' texcoord scales, so the
+ * front end can write vertices inline (one call per batch instead of two per vertex) */
+float* gfx_citro3d_vbo_info(int** pos, u32* cap, float scale[4]) {
+    *pos = &sBufIdx;
+    *cap = VBO_VERTS;
+    scale[0] = sTexturePoolScaleS[sTexUnits[0]];
+    scale[1] = sTexturePoolScaleT[sTexUnits[0]];
+    scale[2] = sTexturePoolScaleS[sTexUnits[1]];
+    scale[3] = sTexturePoolScaleT[sTexUnits[1]];
+    return (float*)sVboBuffer;
+}
+
+/* one triangle's indices; 0 when the index buffer is full */
+int gfx_citro3d_idx_push(u32 a, u32 b, u32 c) {
+    if (sIdxBuf == NULL || sIdxPos + 3 > IDX_CAP) {
+        return 0;
+    }
+    sIdxBuf[sIdxPos++] = (u16)a;
+    sIdxBuf[sIdxPos++] = (u16)b;
+    sIdxBuf[sIdxPos++] = (u16)c;
+    return 1;
+}
+
+/* draw the indices pushed since the last batch */
+void gfx_citro3d_draw_indexed(void) {
+    u32 n = sIdxPos - sIdxStart;
+    if (n == 0) {
+        return;
+    }
+    submitDraw(n, 0, sIdxBuf + sIdxStart);
+    sIdxStart = sIdxPos;
+    {
+        extern u32 gPortPerfTris, gPortPerfDraws;
+        gPortPerfTris += n / 3;
         gPortPerfDraws++;
     }
 }
@@ -974,7 +1064,8 @@ static void gfx_citro3d_init(void)
 	AttrInfo_AddLoader(attrInfo, 4, GPU_FLOAT, 1); // v4=stereo offset
 
 	// Create the VBO (vertex buffer object)
-	sVboBuffer = linearAlloc(2 * 1024 * 1024);
+	sVboBuffer = linearAlloc(VBO_BYTES);
+	sIdxBuf = linearAlloc(IDX_CAP * sizeof(u16));
 
 	// Configure buffers
 	C3D_BufInfo* bufInfo = C3D_GetBufInfo();
@@ -989,6 +1080,21 @@ static void gfx_citro3d_init(void)
 
 static void gfx_citro3d_start_frame(void) {
     sBufIdx = 0;
+    sIdxPos = sIdxStart = 0;
+}
+
+/* PORT (2026-09-30): the vertex buffer is cached linear memory written by the CPU every frame; the GPU
+ * reads RAM. Nothing flushed it, so on hardware the GPU could draw stale vertices still sitting in the
+ * data cache (the New 3DS has a 2 MB L2): intermittent hardware-only glitches - a ghost of a previous
+ * frame's Link in the pause preview, stray pixel lines. Azahar has no CPU cache model, so it never
+ * showed. Called by gfx_3ds.c right before C3D_FrameEnd submits the frame's commands. */
+void gfx_citro3d_flush_vbo(void) {
+    if (sBufIdx > 0) {
+        GSPGPU_FlushDataCache(sVboBuffer, sBufIdx * VTX_FLOATS * sizeof(float));
+    }
+    if (sIdxPos > 0) {
+        GSPGPU_FlushDataCache(sIdxBuf, sIdxPos * sizeof(u16));
+    }
 }
 
 struct GfxRenderingAPI gfx_citro3d_api = {

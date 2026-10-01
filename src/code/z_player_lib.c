@@ -2010,6 +2010,7 @@ void Player_DrawPauseImpl(PlayState* play, void* gameplayKeep, void* linkObject,
     gDPSetScissor(POLY_OPA_DISP++, G_SC_NON_INTERLACE, 0, 0, width, height);
     gSPClipRatio(POLY_OPA_DISP++, FRUSTRATIO_1);
 
+#ifndef __3DS__
     gDPSetColorImage(POLY_OPA_DISP++, G_IM_FMT_RGBA, G_IM_SIZ_16b, width, depthFrameBuffer);
     gDPSetCycleType(POLY_OPA_DISP++, G_CYC_FILL);
     gDPSetRenderMode(POLY_OPA_DISP++, G_RM_NOOP, G_RM_NOOP2);
@@ -2017,6 +2018,13 @@ void Player_DrawPauseImpl(PlayState* play, void* gameplayKeep, void* linkObject,
     gDPFillRectangle(POLY_OPA_DISP++, 0, 0, width - 1, height - 1);
 
     gDPPipeSync(POLY_OPA_DISP++);
+#else
+    /* PORT (2026-09-30): the N64 clears the preview's depth buffer by filling it as a color image with the
+     * max-Z value. The port's off-screen target (gfx_3ds.c) has its own GPU depth buffer, cleared when the
+     * target is first drawn to each frame; routed as a color image, this fill became an extra off-screen
+     * render read back into framebuffer memory as near-white 0xFFFC pixels (a white box on the Equipment
+     * page, hardware v19) and took an off-screen slot. */
+#endif
 
     gDPSetColorImage(POLY_OPA_DISP++, G_IM_FMT_RGBA, G_IM_SIZ_16b, width, colorFrameBuffer);
     gDPSetCycleType(POLY_OPA_DISP++, G_CYC_FILL);

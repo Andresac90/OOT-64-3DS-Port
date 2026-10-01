@@ -77,7 +77,7 @@ case "${1:-}" in
   boot)
     SECS="${2:-40}"; kill_azahar; clear_log
     echo ">> boot $(basename "$ROM") for ${SECS}s"
-    nohup "$AZAHAR_BIN" "$ROM" >/tmp/azahar.out 2>&1 & disown
+    open -n -a "$AZAHAR_APP" --args "$ROM"
     sleep "$SECS"; verdict; kill_azahar ;;
   record)
     # Azahar's parser is short-flag getopt (--movie-record gets mangled) -> use -r.
@@ -93,12 +93,12 @@ case "${1:-}" in
     [ -f "$MOVIE_DIR/$NAME.ctm" ] || die "no movie: $MOVIE_DIR/$NAME.ctm (record it first)"
     kill_azahar; clear_log
     echo ">> REPLAY $NAME.ctm for ${SECS}s"
-    nohup "$AZAHAR_BIN" -p "$MOVIE_DIR/$NAME.ctm" "$ROM" >/tmp/azahar.out 2>&1 & disown
+    open -n -a "$AZAHAR_APP" --args -p "$MOVIE_DIR/$NAME.ctm" "$ROM"
     sleep "$SECS"; verdict; kill_azahar ;;
   smoke)
     NAME="${2:-smoke}"; SECS="${3:-45}"; kill_azahar; clear_log
     echo ">> smoke '$NAME' — boot + scripted inputs (needs Terminal Accessibility)"
-    nohup "$AZAHAR_BIN" "$ROM" >/tmp/azahar.out 2>&1 & disown
+    open -n -a "$AZAHAR_APP" --args "$ROM"
     sleep 20   # let it reach Hyrule Field
     open -a "$AZAHAR_APP" >/dev/null 2>&1; sleep 1
     # scripted sequence: pause menu tour, then walk each way + interact

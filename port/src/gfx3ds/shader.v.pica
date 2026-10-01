@@ -6,7 +6,8 @@
 ; comfort curve (gfx_pc.c stereo_offset: convergence on Link, soft pop-out limit, 0 for the 2D HUD) and
 ; interpolated like the position when triangles are clipped/split, so there are no cracks.
 ; eye.x = this eye's shift (NDC, signed), eye.w = a constant NDC shift for flat layers (sky, pre-rendered
-; room pictures). eye = 0 (mono, off-screen targets, the HUD layer) leaves positions untouched.
+; room pictures), eye.z = a matching zoom for those pictures (a shifted picture uncovered its edge: the
+; "void" beside shop rooms in 3D). eye = 0 (mono, off-screen targets, the HUD layer) leaves positions untouched.
 .fvec eye
 ; remap: out.y = out.y * remap.x + w * remap.y (right-eye viewports whose origin would be >= 512 on the
 ; long axis are moved down to 400 and made taller; this puts the geometry back on the same pixels)
@@ -28,6 +29,9 @@
 .proc main
 	mov r0, inpos
 	mov r1, eye
+	; eye.z: horizontal zoom for shifted flat pictures (pre-rendered rooms), so their edges stay covered
+	mul r8.x, r1.z, r0.y
+	add r0.y, r0.y, r8.x
 	; eye.x * stereo + eye.w * w
 	mul r2.x, r1.x, instereo.x
 	mul r3.x, r1.w, inpos.w

@@ -27,7 +27,8 @@ pkill -9 -f "MacOS/azahar" >/dev/null 2>&1; sleep 1
 : > "$BOOTLOG"
 # Orphan Azahar (subshell backgrounds it then exits) so it keeps window-server access
 # while this script polls; a script that stays the parent would lose GUI access on macOS.
-( "$AZ" "$ROM" >/tmp/regress_az.out 2>&1 & )
+# via `open` (the bundle): Azahar 2126+ shows a blocking dialog when its binary is started directly
+open -n -a "${AZ%/Contents/MacOS/azahar}" --args "$ROM"
 
 # Phase 1: reach the render loop, or catch an early crash/hang.
 seen=""

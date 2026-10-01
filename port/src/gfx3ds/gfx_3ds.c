@@ -85,7 +85,10 @@ static void gfx_3ds_init(void)
     if (checkN3DS() && !gPortO3dsSim)
 		osSetSpeedupEnable(true);
 
-    gfxInitDefault();
+    /* PORT (2026-09-30): gfx is already initialized by main() (for the boot log). A second gfxInitDefault
+     * took a second GSP reference (libctru reference-counts gspInit) and allocated unused framebuffers;
+     * the single gfxExit at shutdown then left GSP's event thread running while exit() unmapped the heap
+     * holding its stack: HOME -> Close crashed in gspEventThreadMain (hardware v17, v18). */
     consoleInit(GFX_BOTTOM, NULL);
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
 
@@ -284,7 +287,12 @@ static void gfx_3ds_get_dimensions(uint32_t *width, uint32_t *height)
 static void gfx_3ds_handle_events(void)
 {
     if (!aptMainLoop()) {
+        /* PORT (2026-09-30): shut graphics down before exit(). exit() unmaps the app heap, and libctru's
+         * GSP event thread (stack on that heap) was still running: HOME -> Close crashed with a data
+         * abort in gspEventThreadMain (hardware, v17). gfxExit stops that thread. */
         ndspExit();
+        C3D_Fini();
+        gfxExit();
         exit(0);
     }
 }
@@ -411,6 +419,11 @@ static void* sCaptureDst;
 
 void Port3ds_CaptureFrame5551(void* dst) {
     sCaptureDst = dst;
+}
+
+/* 60 fps interpolation: no in-between frames while a capture/readback is pending for this frame */
+int Port3ds_InterpBlocked(void) {
+    return sCaptureDst != NULL || sColorWantFrames > 0;
 }
 
 /* buffers sized for the previous target: dropped on a stereo switch, reallocated at the new size */
@@ -599,6 +612,50 @@ static void gfx_3ds_debug_dump_stereo(void) {
     }
 }
 
+/* verification aid for the 60 fps interpolation: with sdmc:/3ds/oot/capture_interp present, every 200th
+ * logic frame's passes (in-between ones, then the exact one) go to sdmc:/3ds/oot/interp_fb_<n>_<pass>.bin */
+static void gfx_3ds_debug_dump_interp(void) {
+    extern int gPortInterpExtra;
+    static int sLogic, sPass, sOn = -1;
+    static u32* sLin;
+    FILE* f;
+    int W, H;
+    if (sOn < 0) {
+        f = fopen("sdmc:/3ds/oot/capture_interp", "rb");
+        sOn = f != NULL;
+        if (f != NULL) fclose(f);
+    }
+    if (!sOn) {
+        return;
+    }
+    if ((sLogic % 200) >= 198) {
+        W = sTarget->frameBuf.width, H = sTarget->frameBuf.height;
+        if (sLin == NULL) sLin = linearAlloc((size_t)W * H * 4 * 2);
+        if (sLin != NULL) {
+            char path[64];
+            C3D_SyncDisplayTransfer((u32*)sTarget->frameBuf.colorBuf, GX_BUFFER_DIM(W, H), sLin, GX_BUFFER_DIM(W, H),
+                                    GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
+                                        GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+                                        GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+                                        GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+            GSPGPU_InvalidateDataCache(sLin, (size_t)W * H * 4);
+            snprintf(path, sizeof path, "sdmc:/3ds/oot/interp_fb_%d_%d.bin", sLogic, sPass);
+            f = fopen(path, "wb");
+            if (f != NULL) {
+                u32 hdr[2] = { (u32)W, (u32)H };
+                fwrite(hdr, 4, 2, f);
+                fwrite(sLin, 4, (size_t)W * H, f);
+                fclose(f);
+            }
+        }
+    }
+    sPass++;
+    if (!gPortInterpExtra) {
+        sLogic++;
+        sPass = 0;
+    }
+}
+
 u64 gPortPerfGpuWait; /* ticks in C3D_FrameBegin: waiting for the previous frame's GPU work */
 
 static bool gfx_3ds_start_frame(void)
@@ -619,7 +676,22 @@ static void gfx_3ds_swap_buffers_begin(void)
         /* drawn through the stereo target: mark the aliased outputs for FrameEnd's transfers */
         sEyeOut[0]->used = sEyeOut[1]->used = true;
     }
+    {
+        extern void gfx_citro3d_flush_vbo(void);
+        gfx_citro3d_flush_vbo(); /* CPU-written vertices must reach RAM before the GPU runs the frame */
+    }
     C3D_FrameEnd(0);
+    {
+        /* an in-between frame (60 fps interpolation) re-draws the same display list: the logic frame's
+         * readbacks and captures belong to its exact pass, which comes after it */
+        extern int gPortInterpExtra;
+        if (gPortInterpExtra) {
+            gfx_3ds_debug_dump_interp();
+            sOffCur = -1;
+            return;
+        }
+        gfx_3ds_debug_dump_interp();
+    }
     gPortStereoFlatScene = 0; /* the next frame's gamestate sets it again if it is a menu */
     /* Depth readback right after this frame's render (C3D_SyncDisplayTransfer outside a frame waits
      * for the queued render first). The game samples it from Environment_GraphCallback, which the N64

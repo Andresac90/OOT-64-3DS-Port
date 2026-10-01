@@ -1,3 +1,4 @@
+#include "port_interp.h"
 #include "libc64/math64.h"
 #include "libu64/overlay.h"
 #include "array_count.h"
@@ -2637,6 +2638,19 @@ void Actor_Draw(PlayState* play, Actor* actor) {
         }
     }
 
+#ifdef __3DS__
+    /* PORT: 60 fps interpolation group (port_interp.h): this actor's transforms, keyed by the actor
+     * instance (Zelda64Recomp actor_transform_tagging.c; Ship of Harkinian RecordOpenChild(actor)) */
+    {
+        /* moved more than 300 units in one update (warp, respawn, cutscene placement): drawn without
+         * blending this frame (Zelda64Recomp actor_set_interpolation_skipped) */
+        f32 dx = actor->world.pos.x - actor->prevPos.x, dy = actor->world.pos.y - actor->prevPos.y,
+            dz = actor->world.pos.z - actor->prevPos.z;
+        u32 f = (dx * dx + dy * dy + dz * dz > 300.0f * 300.0f) ? PORT_INTERP_SKIP : 0;
+        gPortInterpPush(POLY_OPA_DISP++, (u32)(uintptr_t)actor ^ ((u32)actor->id << 20), f);
+        gPortInterpPush(POLY_XLU_DISP++, (u32)(uintptr_t)actor ^ ((u32)actor->id << 20), f);
+    }
+#endif
     actor->draw(actor, play);
 
     if (actor->colorFilterTimer != 0) {
@@ -2650,6 +2664,10 @@ void Actor_Draw(PlayState* play, Actor* actor) {
     if (actor->shape.shadowDraw != NULL) {
         actor->shape.shadowDraw(actor, lights, play);
     }
+#ifdef __3DS__
+    gPortInterpPop(POLY_OPA_DISP++);
+    gPortInterpPop(POLY_XLU_DISP++);
+#endif
 
     CLOSE_DISPS(play->state.gfxCtx, "../z_actor.c", 6119);
 

@@ -2,6 +2,7 @@
 #include "gfx_setupdl.h"
 #include "sys_matrix.h"
 #include "skybox.h"
+#include "port_interp.h"
 
 Mtx* sSkyboxDrawMatrix;
 
@@ -43,7 +44,14 @@ void Skybox_Draw(SkyboxContext* skyboxCtx, GraphicsContext* gfxCtx, s16 skyboxId
     Matrix_RotateY(skyboxCtx->rot.y, MTXMODE_APPLY);
     Matrix_RotateZ(skyboxCtx->rot.z, MTXMODE_APPLY);
     MATRIX_TO_MTX(sSkyboxDrawMatrix, "../z_vr_box_draw.c", 76);
+#ifdef __3DS__
+    /* PORT: 60 fps interpolation - the sky box follows the camera eye (Zelda64Recomp sky_transform_tagging.c) */
+    gPortInterpPush(POLY_OPA_DISP++, PORT_INTERP_ID_SKYBOX, gPortInterpCameraCut ? PORT_INTERP_SKIP : 0);
+#endif
     gSPMatrix(POLY_OPA_DISP++, sSkyboxDrawMatrix, G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+#ifdef __3DS__
+    gPortInterpPop(POLY_OPA_DISP++);
+#endif
 
     // Enable magic square RGB dithering and bilinear filtering
     gDPSetColorDither(POLY_OPA_DISP++, G_CD_MAGICSQ);
