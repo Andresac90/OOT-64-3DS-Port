@@ -87,8 +87,13 @@ performance on hardware with `perf_ab=1` and `prof=1` in `settings.txt`.
   Measurement switches (the periodic performance report in `boot.log` is written only while one is on):
   `prof=1` (sampling profiler, memory use), `perf_ab=1` (New 3DS alternates full speed and Old 3DS speed every
   minute), `gpu_ab=1` (alternates the CPU and GPU vertex paths), `aa_ab=1` (alternates anti-aliasing),
-  `fps60=0` (interpolation off), `gpu_vtx=1` (GPU vertex path), `split_ratio` (x100), `split_px`, `split_depth`
-  (N64-shading split thresholds; by default fine on New 3DS and coarse while frame skip is on).
+  `cmdflush_ab=1` (alternates the frame-end cache flush), `present_ab=1` (alternates the present gate),
+  `fps60=0` (interpolation off), `gpu_vtx=1` (GPU vertex path), `present_gate=0` (frames submitted as soon as
+  drawn, as before 2026-10-02), `split_ratio` (x100), `split_px`, `split_depth` (fixed N64-shading split
+  thresholds), `split_auto=0` (New 3DS: never switch to the coarse thresholds; by default they are used while
+  frame skip is on and while the logic frame is about to miss its refresh).
+  The report's `frames displayed/s (est)` counts frames that reached the screen (a frame finished in the same
+  refresh as the next one is never shown); `frames shown/s` counts frames drawn.
 - Azahar at Old 3DS speed: set `cpu_clock_percentage=25` in Azahar's `qt-config.ini` (restore 100 after). It
   approximates the Old 3DS's CPU time, not its GPU, and multi-core timing is not representative.
 

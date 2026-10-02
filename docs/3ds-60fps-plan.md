@@ -289,3 +289,34 @@ depth copy nothing. statediff builds keep the eager per-frame copy. The asynchro
   (`gmake VERSION=ntsc-1.0`) for generated sources, conda off PATH for tools/audio; statediff runs with
   `.venv/bin/python3`. The N64 build had broken (port_interp.h outside include/, a C89 statement in qrand.c):
   fixed.
+
+### 2026-10-02: present gate, displayed-frame estimate, adaptive splits
+
+- **Where a New 3DS update goes (hardware v34, GPU path, profiler; the 3D slider was up in every gameplay report,
+  so each draw was issued for both eyes - 2D costs less, and reports now log `frames drawn in 3D`):** game logic 6 ms, display-list walk ~18.7 ms,
+  each `C3D_FrameEnd` ~2.2 ms (whole linear-heap cache flush), each replay ~2.4 ms of CPU plus a ~5 ms wait in
+  `C3D_FrameBegin` for the previous frame's GPU work (GPU wait 11-14 ms per update, 27% of the profile). citro3d
+  has one command buffer, so a frame's CPU work cannot overlap the previous frame's GPU work: the chain
+  logic → walk → frame end → GPU → replay → frame end → GPU → replay is ~48 ms of the 50 ms update.
+- **Frames were lost, not just late.** citro3d swaps a frame's buffers when its GPU work ends and the LCD takes
+  them at the next vblank: the logic frame finished ~27 ms into the update, after the first in-between frame's
+  refresh, and the replays followed back to back, so two frames often finished within one refresh. The first
+  was never shown, and the second's display transfer wrote into the buffer being scanned out. `frames shown/s`
+  counted frames drawn; the report now also estimates `frames displayed/s` and `frames replaced before shown`
+  (GPU finish time from `C3D_GetDrawingTime`, vblanks from a 59.831 Hz clock anchored at `gspWaitForVBlank`).
+- **Present gate (`present_gate`, default on):** a frame is handed to the GPU only after the vblank that shows the
+  previous one, so every frame gets its own refresh. It exposed a pacing bug: `osGetTime` has 1 ms steps, so an
+  update ending 50.4 ms after its start read as 50 < 50.14 and waited one more retrace. Pacing now uses
+  `svcGetSystemTick`, and an update that ends within 3 ms of a vblank starts on it. Gate waits are kept out of
+  the walk/replay cost averages that choose the number of in-between frames.
+- **Azahar (title demo, GPU path), gate on / off:** frames displayed 58.5-59.7 / 55.7-58.3 per second, frames
+  replaced before shown 0 / 16-52 per report, updates 19.5-19.9 / 19.7-19.9 per second. At Old 3DS speed (CPU
+  25%, frame skip): 19.9-20.2 / 18.8-18.9 updates per second.
+- **Adaptive coarse splits on New 3DS (`split_auto`, default on):** with the gate, an update's frames take three
+  consecutive refreshes, the logic frame by the second after the update starts, so logic + walk + GPU must stay
+  under ~32.9 ms (v34: ~33.5). The coarse split thresholds (Old 3DS) save ~3 ms; they are now also used while
+  the measured margin to that deadline is under 1.5 ms (back to fine above 6 ms). The report logs the logic
+  frame's finish time and the updates that used the coarse thresholds. Statediff builds never choose in-between
+  frames, so their comparisons keep the fine thresholds.
+- **Next (hardware):** `present_ab=1` session (displayed frames, replaced frames, gate wait, update rate on a New
+  3DS); then shorten the chain: frame-end flush (`cmdlist_flush`, v38 A/B), walk CPU (packing, submits).

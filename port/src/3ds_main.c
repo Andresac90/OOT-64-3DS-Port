@@ -70,6 +70,7 @@ static int sLogMute; /* the periodic perf report without a measurement switch on
 static int sGpuAB; /* settings gpu_ab=1: the vertex path alternates every 2 perf reports */
 static int sAaAB;  /* settings aa_ab=1: anti-aliasing alternates every 2 perf reports (gfx_3ds.c) */
 static int sCmdflushAB; /* settings cmdflush_ab=1: C3D_FrameEnd flush mode alternates every 2 reports */
+static int sPresentAB;  /* settings present_ab=1: the present gate (gfx_3ds.c) alternates every 2 reports */
 int gPortStereoTest; /* settings stereo_test=1: 3D toggles every 2 s (gfx_3ds.c), freeze reproduction */
 static volatile u32 sProfHist[PROF_COUNT];
 static volatile int sProfRun;
@@ -96,6 +97,17 @@ static int sInterp = 1;
  * See PortGfx_RunTask. */
 static int sFrameSkip = -1;
 static int sSplitSet; /* split_* in settings.txt: fixed thresholds, not chosen per console */
+/* PORT PERF (2026-10-02): coarse splits also on a New 3DS while the logic frame is about to miss its refresh.
+ * With the present gate an update's three frames take three consecutive vblanks, the logic frame no later
+ * than the second after the update starts: game logic + walk + GPU must stay under ~32.9 ms (hardware v34:
+ * ~33.5). The coarse thresholds save about 3 ms (split share 6.5% -> 1.6%, 101-scene error 5.92 -> 5.99).
+ * Chosen from the measured margin with hysteresis; settings split_auto=0 keeps the fine ones. */
+static int sSplitAuto = 1, sCoarseAuto;
+static double sDeadlineMarginMs = 10.0; /* running average */
+static unsigned sCoarseUpdates;         /* per report */
+static double sWalkDoneSum;             /* logic frame done (GPU included) after the update's start, per report */
+static unsigned sWalkDoneN;
+static int sChose; /* this update chose its in-between frames (gameplay; not menus, readbacks) */
 static u64 sBenchDl[2];
 static u32 sBenchFrames[2]; /* o3ds_sim as read from settings.txt (not perf_ab's run-time toggling) */
 static void Port3ds_SaveSettings(void) {
@@ -117,11 +129,14 @@ static void Port3ds_SaveSettings(void) {
             if (sAaAB) fprintf(f, "aa_ab=1\n");
             { extern int gPortCmdlistFlush; if (gPortCmdlistFlush && !sCmdflushAB) fprintf(f, "cmdlist_flush=1\n"); }
             if (sCmdflushAB) fprintf(f, "cmdflush_ab=1\n");
+            { extern int gPortPresentGate; if (!gPortPresentGate && !sPresentAB) fprintf(f, "present_gate=0\n"); }
+            if (sPresentAB) fprintf(f, "present_ab=1\n");
             { extern int gPortAA; if (!gPortAA && !sAaAB) fprintf(f, "aa=0\n"); }
             { extern int gPortGpuVtx; if (gPortGpuVtx) fprintf(f, "gpu_vtx=1\n"); }
             if (sInterp != 1) fprintf(f, "fps60=%d\n", sInterp);
             if (sFrameSkip >= 0) fprintf(f, "frameskip=%d\n", sFrameSkip);
             { extern int gPortShadeSplit; if (!gPortShadeSplit) fprintf(f, "shade_split=0\n"); }
+            if (!sSplitAuto) fprintf(f, "split_auto=0\n");
             { extern int gPortShadeLinear; if (gPortShadeLinear) fprintf(f, "shade_linear=1\n"); }
             if (sSplitSet) {
                 extern float gPortSplitRatio, gPortSplitMinPx;
@@ -165,6 +180,8 @@ static void Port3ds_LoadSettings(void) {
         }
         if (sscanf(line, "cmdlist_flush=%d", &v) == 1) { extern int gPortCmdlistFlush; gPortCmdlistFlush = v != 0; }
         if (sscanf(line, "cmdflush_ab=%d", &v) == 1) { sCmdflushAB = v != 0; }
+        if (sscanf(line, "present_gate=%d", &v) == 1) { extern int gPortPresentGate; gPortPresentGate = v != 0; }
+        if (sscanf(line, "present_ab=%d", &v) == 1) { sPresentAB = v != 0; }
         if (sscanf(line, "aa_ab=%d", &v) == 1) {
             sAaAB = v != 0;
         }
@@ -191,6 +208,7 @@ static void Port3ds_LoadSettings(void) {
         if (sscanf(line, "split_ratio=%d", &v) == 1) { extern float gPortSplitRatio; gPortSplitRatio = v / 100.0f; sSplitSet = 1; }
         if (sscanf(line, "split_px=%d", &v) == 1) { extern float gPortSplitMinPx; gPortSplitMinPx = (float)v; sSplitSet = 1; }
         if (sscanf(line, "split_depth=%d", &v) == 1) { extern int gPortSplitDepth; gPortSplitDepth = v; sSplitSet = 1; }
+        if (sscanf(line, "split_auto=%d", &v) == 1) { sSplitAuto = v != 0; }
         if (sscanf(line, "shade_split=%d", &v) == 1) {
             extern int gPortShadeSplit;
             gPortShadeSplit = v != 0;
@@ -925,7 +943,13 @@ void Port3ds_MaybePumpAudio(void) {
         if (now - sLastPumpMs > 4 * PORT_RETRACE_MS) sLastPumpMs = now; /* far behind: don't burst */
     }
 }
-static u64 sLast = 0; /* when the previous logic frame was presented (retrace-aligned) */
+/* PORT PERF (2026-10-02): pacing runs on svcGetSystemTick in milliseconds (osGetTime has whole-millisecond
+ * steps: a frame finishing 50.4 ms after the update's start read as 50 < the 50.14 ms budget and waited one
+ * more retrace - exposed by the present gate, whose last frame goes out just after the third vblank) */
+static double Port3ds_NowMs(void) {
+    return (double)svcGetSystemTick() / (SYSCLOCK_ARM11 / 1000.0);
+}
+static double sLast = 0.0; /* when the current update started (retrace-aligned with the present gate) */
 /* PORT (2026-10-01): frame skip (PortGfx_RunTask). sBehindMs = how far the game is behind the N64's
  * schedule of one update every R_UPDATE_RATE retraces; kept only while frame skip is on (sSkipOn). */
 static double sBehindMs;
@@ -939,11 +963,13 @@ static int Port3ds_UpdateRate(void) {
     if (rate > 6) rate = 6;
     return rate;
 }
+extern void Port3ds_VBlankSeen(void); /* gfx_3ds.c: vblank clock anchor for the present gate */
 /* wait whole retraces (pumping audio on each) until `targetMs` is under one retrace away */
 static void Port3ds_WaitUntil(double targetMs) {
     extern void Port3ds_PumpAudio(void);
-    while ((double)osGetTime() + 2.0 < targetMs) {
+    while (Port3ds_NowMs() + 2.0 < targetMs) {
         gspWaitForVBlank();
+        Port3ds_VBlankSeen();
         Port3ds_PumpAudio();
         sLastPumpMs = (double)osGetTime();
         sMidFramePumps++;
@@ -958,7 +984,7 @@ static void Port3ds_PaceFrame(void) {
     if (rate < 1) rate = 1;
     if (rate > 6) rate = 6;
     int pumped = sMidFramePumps; /* already done during rendering */
-    u64 now;
+    double now;
     /* with frame skip, time owed from late frames is made up by not waiting for it */
     const double budget = rate * kRetraceMs - (sSkipOn ? sBehindMs : 0.0);
     sMidFramePumps = 0;
@@ -967,20 +993,21 @@ static void Port3ds_PaceFrame(void) {
          * first, so a frame that had already used its budget (hardware: ~44 ms of work vs 50 ms)
          * still waited up to one more retrace: measured pace 14.7 ms/frame, 17.1 updates/s on a New
          * 3DS instead of 20. A late frame now goes straight on (audio catches up below). */
-        if (sLast != 0 && (double)(osGetTime() - sLast) >= budget) break;
+        if (sLast != 0.0 && Port3ds_NowMs() - sLast >= budget) break;
         gspWaitForVBlank();
+        Port3ds_VBlankSeen();
         Port3ds_PumpAudio(); /* build+dispatch one audio RSP task per retrace, as on N64 */
         sLastPumpMs = (double)osGetTime();
         pumped++;
-        if (sLast == 0 || (double)(osGetTime() - sLast) + 2.0 >= budget) break;
+        if (sLast == 0.0 || Port3ds_NowMs() - sLast + 2.0 >= budget) break;
     }
-    now = osGetTime();
-    if (sLast != 0 && (double)(now - sLast) > rate * kRetraceMs + kRetraceMs) {
+    now = Port3ds_NowMs();
+    if (sLast != 0.0 && now - sLast > rate * kRetraceMs + kRetraceMs) {
         sLateUpdates++; /* took more than one retrace longer than the N64's schedule (loads, heavy frames) */
     }
-    if (sSkipOn && sLast != 0) {
+    if (sSkipOn && sLast != 0.0) {
         /* capped: a long stall (scene load) is not made up with a burst of skipped frames */
-        sBehindMs += (double)(now - sLast) - rate * kRetraceMs;
+        sBehindMs += now - sLast - rate * kRetraceMs;
         if (sBehindMs < 0.0) sBehindMs = 0.0;
         if (sBehindMs > 2.0 * rate * kRetraceMs) sBehindMs = 2.0 * rate * kRetraceMs;
     } else {
@@ -988,14 +1015,24 @@ static void Port3ds_PaceFrame(void) {
     }
     /* Audio runs on wall-clock retraces, not on how many waits happened: if rendering ate most of
      * the budget, catch up to one audio task per retrace actually elapsed (capped). */
-    if (sLast != 0) {
-        int due = (int)((double)(now - sLast) / kRetraceMs + 0.5);
+    if (sLast != 0.0) {
+        int due = (int)((now - sLast) / kRetraceMs + 0.5);
         if (due > 8) due = 8;
         while (pumped < due) { Port3ds_PumpAudio(); pumped++; }
         sLastPumpMs = (double)osGetTime();
     }
     sPortAudioPumps += (unsigned)pumped;
-    sLast = now;
+    {
+        /* With the present gate, an update that ends just after a vblank (its last frame is released
+         * there) starts on that vblank: its frames are shown on vblanks, so the next update's budget
+         * counts from one too. Not for a long overrun (Old 3DS, loads): that would count up to a retrace
+         * of lateness that did not happen (frame skip's sBehindMs). +1 ms: the clock's anchor is taken
+         * after gspWaitForVBlank returns, slightly after the vblank itself. */
+        extern int gPortPresentGate;
+        extern double Port3ds_VBlankAtOrBefore(double tMs);
+        double vb = Port3ds_VBlankAtOrBefore(now + 1.0);
+        sLast = gPortPresentGate && now - vb < 3.0 ? vb : now;
+    }
 }
 
 /* PORT PERF (2026-09-28): per-frame CPU breakdown in 268 MHz system ticks, logged every 300 frames as
@@ -1148,6 +1185,8 @@ static u32 sInterpFrames;           /* in-between frames drawn */
 static double sInterpElapsedSum;    /* logic time before the passes, ms (summed per report) */
 void PortGfx_RunTask(OSTask* task) {
     u64 tA = svcGetSystemTick(), tB, tC, tD;
+    extern u64 gPortGateTicksTotal; /* gfx_3ds.c present gate: waiting, not cost */
+    const u64 gateA = gPortGateTicksTotal;
     PROF_SET(PROF_INPUT);
     if (sPerfLastEnd != 0) sPerfGame += tA - sPerfLastEnd;
     if (!sGfxInited) PortGfx_Init();
@@ -1177,10 +1216,12 @@ void PortGfx_RunTask(OSTask* task) {
             /* PORT PERF (2026-10-02): coarser N64-shading splits while CPU-bound (gfx_pc.c) */
             extern void gfx_split_thresholds(int coarse);
             static int sCoarse = -1;
-            if (!sSplitSet && sCoarse != sSkipOn) {
-                gfx_split_thresholds(sSkipOn);
-                sCoarse = sSkipOn;
+            int coarse = sSkipOn || (sSplitAuto && sCoarseAuto);
+            if (!sSplitSet && sCoarse != coarse) {
+                gfx_split_thresholds(coarse);
+                sCoarse = coarse;
             }
+            sCoarseUpdates += !sSplitSet && coarse;
         }
         skip = sSkipOn && !sSkippedLast && sBehindMs > 0.5 * Port3ds_UpdateRate() * (1000.0 / 59.83) &&
                !Port3ds_InterpBlocked();
@@ -1213,10 +1254,12 @@ void PortGfx_RunTask(OSTask* task) {
         gfx_interp_begin_frame();
         gfx_interp_pass(1.0f, 1);
         sReplayN = 0;
-        if (!(sLast != 0 && rate > 1 && !sBench && !Port3ds_InterpBlocked() && !afterSkip)) {
+        sChose = 0;
+        if (!(sLast != 0.0 && rate > 1 && !sBench && !Port3ds_InterpBlocked() && !afterSkip)) {
             sReplayNoChoice++;
         } else {
-            double budget = rate * kRetraceMs, elapsed = (double)(osGetTime() - sLast);
+            double budget = rate * kRetraceMs, elapsed = Port3ds_NowMs() - sLast;
+            sChose = 1;
             for (sReplayN = rate - 1; sReplayN > 0 && sInterp < 2; sReplayN--) {
                 if (elapsed + sWalkMs + sReplayN * sReplayMs <= budget) break;
             }
@@ -1255,8 +1298,21 @@ void PortGfx_RunTask(OSTask* task) {
         extern void gfx_replay_frame(int k);
         const double kRetraceMs = 1000.0 / 59.83;
         int rate = Port3ds_UpdateRate(), i;
-        double ms = (double)(tC - tA) / (SYSCLOCK_ARM11 / 1000.0);
+        double ms = (double)(tC - tA - (gPortGateTicksTotal - gateA)) / (SYSCLOCK_ARM11 / 1000.0);
         sWalkMs += (ms - sWalkMs) * 0.25;
+        if (sChose && rate == 3 && !sSkipOn) {
+            /* the logic frame's deadline: done on the GPU 0.5 ms before the second vblank of the update */
+            extern float gPortGpuDrawMsAvg;
+            double done = Port3ds_NowMs() - sLast + gPortGpuDrawMsAvg;
+            sDeadlineMarginMs += ((2.0 * kRetraceMs - 0.5 - done) - sDeadlineMarginMs) * 0.2;
+            if (sDeadlineMarginMs < 1.5) {
+                sCoarseAuto = 1;
+            } else if (sDeadlineMarginMs > 6.0) { /* coarse saves ~3 ms: no flip-flopping */
+                sCoarseAuto = 0;
+            }
+            sWalkDoneSum += done;
+            sWalkDoneN++;
+        }
         if (sReplayN > 0 && gPortReplayBroken) {
             sReplayN = 0; /* drawn directly (an off-screen render, a full buffer): no in-between frames */
             sReplayBrokenCnt++;
@@ -1264,11 +1320,12 @@ void PortGfx_RunTask(OSTask* task) {
         for (i = 0; i < sReplayN; i++) {
             u64 t0;
             PROF_SET(PROF_PACE);
-            Port3ds_WaitUntil((double)sLast + (rate * kRetraceMs) * (i + 1) / (sReplayN + 1));
+            Port3ds_WaitUntil(sLast + (rate * kRetraceMs) * (i + 1) / (sReplayN + 1));
+            u64 gateR = gPortGateTicksTotal;
             t0 = svcGetSystemTick();
             gfx_replay_frame(2 - sReplayN + 1 + i);
             gfx_end_frame();
-            ms = (double)(svcGetSystemTick() - t0) / (SYSCLOCK_ARM11 / 1000.0);
+            ms = (double)(svcGetSystemTick() - t0 - (gPortGateTicksTotal - gateR)) / (SYSCLOCK_ARM11 / 1000.0);
             sReplayMs += (ms - sReplayMs) * 0.25;
             sPerfInterp += svcGetSystemTick() - t0;
             sInterpFrames++;
@@ -1291,7 +1348,7 @@ void PortGfx_RunTask(OSTask* task) {
           extern void PortDbgX(const char*, unsigned); extern void* gRegEditor;
           /* PORT (2026-10-01): the report goes to boot.log only while a measurement switch is on (prof,
            * perf_ab, gpu_ab, aa_ab): ~50 lines every 15 s, each flushed to the SD card, otherwise */
-          { extern int gPortPerfAB; sLogMute = !(sProfOn || gPortPerfAB || sGpuAB || sAaAB || sCmdflushAB); }
+          { extern int gPortPerfAB; sLogMute = !(sProfOn || gPortPerfAB || sGpuAB || sAaAB || sCmdflushAB || sPresentAB); }
           PortDbgX("perf updates/s x10", (unsigned)(3000000ull / (t1 - t0 ? t1 - t0 : 1)));
           PortDbgX("perf frames shown/s x10 (60fps interp)",
                    (unsigned)((300ull - sSkipCount + sInterpFrames) * 10000ull / (t1 - t0 ? t1 - t0 : 1)));
@@ -1316,6 +1373,28 @@ void PortGfx_RunTask(OSTask* task) {
               gPortPerfGpuFrames = 0;
           }
           { extern int gPortCmdlistFlush; PortDbgX("perf cmdlist_flush", (unsigned)gPortCmdlistFlush); }
+          { /* gfx_3ds.c presentation model: frames that reached the screen (est.) and the gate's waiting */
+              extern int gPortPresentGate;
+              extern unsigned gPortPerfReplaced, gPortPerfPresented;
+              extern u64 gPortPerfGateWait;
+              unsigned shown = gPortPerfPresented - (gPortPerfReplaced < gPortPerfPresented ? gPortPerfReplaced : 0);
+              PortDbgX("perf present gate", (unsigned)gPortPresentGate);
+              { /* the 3D slider doubles draws and GPU work: say which mode a report measured */
+                  extern unsigned gPortPerfStereoFrames;
+                  PortDbgX("perf frames drawn in 3D (of presented)", gPortPerfStereoFrames);
+                  PortDbgX("perf frames presented", gPortPerfPresented);
+                  gPortPerfStereoFrames = 0;
+              }
+              PortDbgX("perf us logic frame done on GPU after update start", sWalkDoneN ? (unsigned)(sWalkDoneSum * 1000.0 / sWalkDoneN) : 0);
+              PortDbgX("perf updates with coarse split (of 300)", sCoarseUpdates);
+              sWalkDoneSum = 0.0;
+              sWalkDoneN = sCoarseUpdates = 0;
+              PortDbgX("perf frames displayed/s x10 (est)", (unsigned)((u64)shown * 10000ull / (t1 - t0 ? t1 - t0 : 1)));
+              PortDbgX("perf frames replaced before shown", gPortPerfReplaced);
+              PortDbgX("perf us/update present gate wait", (unsigned)(gPortPerfGateWait / 300 / (SYSCLOCK_ARM11 / 1000000)));
+              gPortPerfReplaced = gPortPerfPresented = 0;
+              gPortPerfGateWait = 0;
+          }
           PortDbgX("perf frames skipped (of 300 updates)", sSkipCount);
           PortDbgX("perf updates late >1 retrace (of 300)", sLateUpdates);
           PortDbgX("perf updates with 2 in-between frames", sReplayHist[2]);
@@ -1366,6 +1445,11 @@ void PortGfx_RunTask(OSTask* task) {
               PortDbgX(gPortO3dsSim ? "perf mode O3DS-sim (268MHz no L2)" : "perf mode N3DS (804MHz L2)", 1);
               { extern int gPortGpuVtx; PortDbgX(gPortGpuVtx ? "perf vertex path GPU" : "perf vertex path CPU", 1); }
               { extern int gPortAA; PortDbgX("perf anti-aliasing", (unsigned)gPortAA); }
+              static unsigned sPgReports;
+              if (sPresentAB && (++sPgReports % 2) == 0) { /* applied from the next frame */
+                  extern int gPortPresentGate;
+                  gPortPresentGate = !gPortPresentGate;
+              }
               static unsigned sCfReports;
               if (sCmdflushAB && (++sCfReports % 2) == 0) { /* applied from the next C3D_FrameEnd */
                   extern int gPortCmdlistFlush;

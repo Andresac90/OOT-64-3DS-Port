@@ -712,6 +712,93 @@ static void gfx_3ds_debug_dump_interp(void) {
     }
 }
 
+/* PORT PERF (2026-10-02): presentation timing. citro3d swaps a frame's screen buffers the moment the GPU
+ * finishes it (renderqueue.c onQueueFinish -> gfxScreenSwapBuffers) and the LCD takes the new buffer at the
+ * next vblank. When two frames finish within one refresh, the first is never shown and the second's display
+ * transfer writes into the buffer being scanned out. With 60 fps replays on a New 3DS (hardware v34) the
+ * logic frame finished ~27 ms into its update, past the first in-between frame's refresh, and the
+ * in-between frames followed back to back; "frames shown/s" counted frames submitted, not displayed.
+ * Present gate (settings present_gate, default on): a frame is handed to the GPU only after the vblank at
+ * which the previous one becomes visible, so every frame gets its own refresh. The previous frame's finish
+ * comes from citro3d's GPU timer (C3D_GetDrawingTime, complete once its queue is done, i.e. after the next
+ * C3D_FrameBegin) and vblank times from a 59.831 Hz clock anchored at the last gspWaitForVBlank
+ * (3ds_main.c Port3ds_VBlankSeen). The same model counts frames replaced before any vblank showed them. */
+#define VB_TICKS ((double)SYSCLOCK_ARM11 / 59.831)
+#define MS_TICKS ((double)SYSCLOCK_ARM11 / 1000.0)
+static u64 sVbAnchor;   /* tick of a recent top-screen vblank */
+static u64 sSubmitTick; /* the previous frame: when C3D_FrameEnd handed it to the GPU (0 = accounted for) */
+static u64 sShownVb;    /* the previous frame: the vblank at which it becomes visible (0 = unknown) */
+int gPortPresentGate = 1;
+unsigned gPortPerfReplaced; /* frames replaced by the next one before any vblank showed them */
+unsigned gPortPerfPresented; /* frames whose display vblank was estimated */
+u64 gPortPerfGateWait;      /* ticks spent in the gate (per report) */
+u64 gPortGateTicksTotal;    /* the same, never reset: 3ds_main.c keeps it out of its frame-cost averages */
+float gPortGpuDrawMsAvg;    /* GPU time per frame, running average (3ds_main.c: the logic frame's deadline) */
+unsigned gPortPerfStereoFrames; /* frames drawn with the 3D slider up (each draw is issued for both eyes) */
+
+void Port3ds_VBlankSeen(void) {
+    sVbAnchor = svcGetSystemTick();
+}
+
+/* 3ds_main.c pacing: the latest vblank at or before tMs (milliseconds of svcGetSystemTick); tMs itself
+ * without an anchor */
+double Port3ds_VBlankAtOrBefore(double tMs) {
+    const double a = (double)sVbAnchor / MS_TICKS, p = VB_TICKS / MS_TICKS;
+    if (sVbAnchor == 0) {
+        return tMs;
+    }
+    return a + floor((tMs - a) / p) * p;
+}
+
+/* the first vblank after tick t (0 without an anchor) */
+static u64 vblank_after(u64 t) {
+    double n;
+    if (sVbAnchor == 0) {
+        return 0;
+    }
+    n = ceil((double)(s64)(t - sVbAnchor) / VB_TICKS);
+    return sVbAnchor + (u64)(s64)(n * VB_TICKS);
+}
+
+/* right after C3D_FrameBegin: the previous frame's queue is done, its GPU time known */
+static void present_note_finished(void) {
+    u64 done, vb;
+    if (sSubmitTick == 0) {
+        return;
+    }
+    /* + 0.5 ms: the swap request has to reach the GSP before the vblank to be taken there */
+    done = sSubmitTick + (u64)(C3D_GetDrawingTime() * MS_TICKS);
+    vb = vblank_after(done + (u64)(0.5 * MS_TICKS));
+    if (vb != 0 && vb == sShownVb) {
+        gPortPerfReplaced++; /* the frame before it never reached the screen */
+    }
+    gPortPerfPresented++;
+    gPortGpuDrawMsAvg += (C3D_GetDrawingTime() - gPortGpuDrawMsAvg) * 0.1f;
+    sShownVb = vb;
+    sSubmitTick = 0;
+}
+
+/* right before C3D_FrameEnd: hold the frame until the previous one is on screen */
+static void present_gate(void) {
+    extern volatile unsigned char gPortProf;
+    extern void Port3ds_MaybePumpAudio(void);
+    u64 now, until;
+    if (!gPortPresentGate || sShownVb == 0) {
+        return;
+    }
+    until = sShownVb + (u64)(0.3 * MS_TICKS);
+    now = svcGetSystemTick();
+    if (now < until && until - now < (u64)(2.0 * VB_TICKS)) {
+        unsigned char prev = gPortProf;
+        gPortProf = 11; /* PROF_PACE (port_prof.h) */
+        svcSleepThread((s64)((double)(until - now) * (1e9 / SYSCLOCK_ARM11)));
+        gPortPerfGateWait += svcGetSystemTick() - now;
+        gPortGateTicksTotal += svcGetSystemTick() - now;
+        Port3ds_MaybePumpAudio(); /* one audio task per retrace, also across this wait */
+        gPortProf = prev;
+    }
+}
+
 u64 gPortPerfGpuWait; /* ticks in C3D_FrameBegin: waiting for the previous frame's GPU work */
 /* PORT PERF (2026-10-02): hardware v34 - anti-aliasing off (half the pixels) did not change the 11-14 ms of
  * GPU wait per update, so the GPU is not fill-bound. Measured per frame: time inside C3D_FrameEnd (it cleans
@@ -742,6 +829,7 @@ static bool gfx_3ds_start_frame(void)
         gPortProf = prev;
     }
     gPortPerfGpuWait += svcGetSystemTick() - t0;
+    present_note_finished();
     C3D_RenderTargetClear(sTarget, C3D_CLEAR_ALL, 0x000000FF, 0xFFFFFFFF);
 	C3D_FrameDrawOn(sTarget);
     return true;
@@ -766,12 +854,16 @@ static void gfx_3ds_swap_buffers_begin(void)
      * frame) reached the GPU unflushed: hardware froze/crashed (v24, v25), Azahar has no cache to show it.
      * Kept as is until every GPU-read buffer, command lists included, is flushed explicitly. */
     {
-        u64 t0 = svcGetSystemTick();
+        u64 t0;
         /* settings cmdlist_flush=1 (experiment, hardware): flush only the command list. Every other buffer the
          * GPU reads is flushed explicitly (VBO + indices above, textures at upload) and no frame is split any
          * more (all readbacks run outside frames), which is what froze v24/v25. Off by default until measured. */
+        present_gate();
+        gPortPerfStereoFrames += gGfx3DSMode == GFX_3DS_MODE_STEREO;
+        t0 = svcGetSystemTick();
         C3D_FrameEnd(gPortCmdlistFlush ? GX_CMDLIST_FLUSH : 0);
-        gPortPerfFrameEnd += svcGetSystemTick() - t0;
+        sSubmitTick = svcGetSystemTick(); /* the queue starts at the end of C3D_FrameEnd */
+        gPortPerfFrameEnd += sSubmitTick - t0;
         /* GPU timers of the frame that finished last (citro3d renderqueue.c): command processing, drawing */
         gPortPerfGpuProcMs += C3D_GetProcessingTime();
         gPortPerfGpuDrawMs += C3D_GetDrawingTime();
