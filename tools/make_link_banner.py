@@ -33,7 +33,7 @@ def sh(cmd, **kw):
 
 def build(extra):
     # make doesn't track flags: drop the objects of every game file that reacts to the tool defines
-    hooked = sh("grep -rlE 'PORT_ICONGEN|PORT_START_ENTRANCE|PORT_START_AGE' src", capture_output=True,
+    hooked = sh("grep -rlE 'PORT_ICONGEN|PORT_NAVIGEN|PORT_START_ENTRANCE|PORT_START_AGE' src", capture_output=True,
                 text=True).stdout.split()
     for src in hooked:
         o = os.path.join(REPO, "build/3ds", os.path.splitext(src)[0] + ".o")

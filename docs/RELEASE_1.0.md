@@ -1,7 +1,7 @@
 # Release 1.0: what "complete" means
 
 Version 1.0 is published when every item below is checked. Each item has a way to verify it; "hardware"
-means a real console, the rest runs in the emulator (`tools/`). Status as of 2026-10-01.
+means a real console, the rest runs in the emulator (`tools/`). Status as of 2026-10-02 (evening).
 
 ## A. The whole game plays
 
@@ -30,25 +30,26 @@ means a real console, the rest runs in the emulator (`tools/`). Status as of 202
 |---|---|---|---|
 | [x] | No bring-up hacks that change game behavior (`#ifdef __3DS__` audit) | code review of all 116 blocks | done; the rest are platform adaptations, safety guards and port features |
 | [x] | Distant geometry and fog match the N64 (Hyrule Field) | `fbdiff` at noon, 4:3 (Hyrule Field, Lake Hylia, Gerudo Valley) | match; the differences are edges and a 1 px horizon line. Widescreen shows areas the N64 never draws |
-| [ ] | No visible culling at the screen edges in 3D mode (each eye sees past the N64's frame) | hardware, camera moving with 3D on | reported on v30; widen the culling margin in 3D as for widescreen |
-| [ ] | No stray triangles in the GPU vertex path (red/cyan polygons inside Kokiri houses, hardware v30) | hardware | v31 fixes the frozen pieces in in-between frames; to recheck |
-| [ ] | Frame accuracy does not regress | `fbdiff` child tour average | 5.40 today (lower is better) |
+| [ ] | No visible culling at the screen edges in 3D mode (each eye sees past the N64's frame) | hardware, camera moving with 3D on | margin widened by the stereo separation (v37); not reported since, confirm on hardware |
+| [ ] | No stray triangles in the GPU vertex path (red/cyan polygons inside Kokiri houses, hardware v30) | hardware | split pieces in model space (v35); not reported in v39, confirm on hardware |
+| [ ] | No cracks between triangles (thin bright dots on the title screen ground, hardware v39) | `tjdump` + `tools/tjunctions.py`, then hardware | crack-free splitting: title ground 67 port-made T-junctions to 0 on screen; confirm on hardware |
+| [x] | Frame accuracy does not regress | `fbdiff` child tour average | GPU path 5.92 (crack-free splitting: 5.917 to 5.922; lower is better), 96/101 scenes identical state |
 
 ## D. Performance
 
 | | Item | How it is verified | Status |
 |---|---|---|---|
 | [x] | New 3DS: full game speed (20 updates/s, like the N64) | hardware, `prof=1` | yes |
-| [ ] | New 3DS: 60 frames shown per second in most scenes | hardware, `perf_ab=1` | 45 to 54 |
+| [ ] | New 3DS: 60 frames shown per second in most scenes | hardware | 43-48 actually displayed in 2D (v39): GPU-bound, 9.4-11.8 ms per frame; v40 tests anti-aliasing and the present gate |
 | [ ] | Old 3DS: full game speed | hardware, `perf_ab=1` | frame skip: 10.25 → 19.5 updates/s in Azahar at 25% CPU; hardware check pending |
 | [ ] | Old 3DS: 60 frames shown per second | hardware | stretch goal; the Old 3DS CPU is about 3 times slower |
-| [ ] | Default vertex path chosen (CPU or GPU) | hardware `gpu_ab=1` + `fbdiff` | GPU path: same accuracy (5.40), faster on New 3DS in the last test |
+| [x] | Default vertex path chosen (CPU or GPU) | hardware `gpu_ab=1` + `fbdiff` | GPU (2026-10-02): same accuracy, faster on both consoles (v27) |
 
 ## E. User experience
 
 | | Item | Status |
 |---|---|---|
-| [x] | HOME Menu icon and banner (original artwork, no Nintendo images) | `port/icon.png`, `port/banner.bnr` (tools/make_icon.py, tools/make_banner.sh); optional local Link banner/icon, `tools/make_link_banner.py` |
+| [x] | HOME Menu icon and banner (original artwork, no Nintendo images) | `port/icon.png`, `port/banner.bnr` (tools/make_icon.py, tools/make_banner.sh); optional local art from the player's game data: Navi icon (`tools/make_navi_icon.py`), Link banner (`tools/make_link_banner.py`) |
 | [x] | Own title ID (was `0xF8000`, the homebrew template's default) | `0xF0C64`; uninstall the old title once |
 | [x] | Version in `boot.log` (first line, also on the bottom screen during boot) | `git describe`, or `port/VERSION` |
 | [ ] | Saving is safe and quick | atomic (save.tmp, save.bak) and one write per save (v33, emulator-tested); time it on hardware |

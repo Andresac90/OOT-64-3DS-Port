@@ -211,8 +211,9 @@ $(BUILD)/port_version.c: FORCE
 	@cmp -s $@.tmp $@ || mv $@.tmp $@; rm -f $@.tmp
 $(VERSION_OBJ): $(BUILD)/port_version.c ; @$(CC) $(PORT_CFLAGS) -c -o $@ $<
 
-# HOME Menu icon: port/icon_local.png when present (Link's model rendered from your own game data by
-# tools/make_link_banner.py --icon, never committed), else the original artwork port/icon.png (tools/make_icon.py)
+# HOME Menu icon: port/icon_local.png when present (Navi or Link rendered from your own game data by
+# tools/make_navi_icon.py / make_link_banner.py --icon, never committed), else the original artwork port/icon.png
+# (tools/make_icon.py)
 ICON_PNG := $(if $(wildcard port/icon_local.png),port/icon_local.png,port/icon.png)
 $(BUILD)/$(TARGET).smdh: $(ICON_PNG)
 	@mkdir -p $(dir $@)

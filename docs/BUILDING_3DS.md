@@ -88,7 +88,7 @@ performance on hardware with `perf_ab=1` and `prof=1` in `settings.txt`.
   `prof=1` (sampling profiler, memory use), `perf_ab=1` (New 3DS alternates full speed and Old 3DS speed every
   minute), `gpu_ab=1` (alternates the CPU and GPU vertex paths), `aa_ab=1` (alternates anti-aliasing),
   `cmdflush_ab=1` (alternates the frame-end cache flush), `present_ab=1` (alternates the present gate every 4 reports),
-  `fps60=0` (interpolation off), `gpu_vtx=1` (GPU vertex path), `present_gate=0` (frames submitted as soon as
+  `fps60=0` (interpolation off), `gpu_vtx=0` (CPU vertex path; the GPU one is the default), `present_gate=0` (frames submitted as soon as
   drawn, as before 2026-10-02), `split_ratio` (x100), `split_px`, `split_depth` (fixed N64-shading split
   thresholds), `split_auto=0` (New 3DS: never switch to the coarse thresholds; by default they are used while
   frame skip is on and while the logic frame is about to miss its refresh).

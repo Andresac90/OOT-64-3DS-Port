@@ -74,6 +74,13 @@ void KaleidoSetup_Update(PlayState* play) {
     s32 pad;
 #endif
 
+#ifdef PORT_NAVIGEN
+    // tools/make_navi_icon.py: A while standing still calls Navi out of Link's hat (Player_ActionHandler_Roll),
+    // as a player does; z_play.c draws her once she flies around
+    if (play->gameplayFrames == 40) {
+        input->press.button |= BTN_A;
+    }
+#endif
 #ifdef PORT_ICONGEN
     // tools/make_link_banner.py: open the pause menu on the Equipment page once the scene has settled; the
     // pause code renders Link's preview, which z_kaleido_scope.c then writes to the SD card

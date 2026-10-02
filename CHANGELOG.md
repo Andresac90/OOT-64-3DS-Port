@@ -13,7 +13,9 @@ Plan and criteria: [docs/RELEASE_1.0.md](docs/RELEASE_1.0.md).
   two in a row), so the game keeps its full speed. `frameskip=0/1` in `settings.txt` overrides.
 - HOME Menu icon and banner (original artwork), version in `boot.log`.
 - `tools/make_link_banner.py`: optional HOME Menu banner (and icon with `--icon`) with Link's 3D model, rendered locally from your own game data (`port/banner_local.bnr`, `port/icon_local.png`, never committed).
-- HOME Menu icon: a glowing fairy (original artwork, tools/make_icon.py).
+- HOME Menu icon: a glowing fairy (original artwork, tools/make_icon.py); `tools/make_navi_icon.py` renders Navi
+  from your own game data instead (`port/icon_local.png`, never committed).
+- The GPU vertex path is the default (`gpu_vtx=0` returns to the CPU one): as accurate, faster on both consoles.
 - `aa=0/1` in `settings.txt`: anti-aliasing on/off (measurement: `aa_ab=1` alternates it).
 - Frame interpolation toward 60 fps: the game keeps the N64's 20 updates per second, and the renderer
   draws in-between frames from transforms the game tags (models, skeletons, skinned meshes, camera, sky).
@@ -25,6 +27,11 @@ Plan and criteria: [docs/RELEASE_1.0.md](docs/RELEASE_1.0.md).
 - Touch screen: top-screen HUD on/off, Navi on the VIEW button.
 
 ### Fixed
+- Thin bright cracks along some triangle edges on hardware (title screen ground, more visible in 3D): the
+  N64-shading split and the near-plane/guard-band clipping added vertices on edges that the neighbouring
+  triangle did not have (T-junctions). Edges are now split by a rule that depends on the edge alone, so both
+  triangles always agree (`tools/tjunctions.py` counts them per frame; title ground: 67 to 0 on screen), at the
+  same cost and accuracy.
 - File select: the name entry keyboard, file names and the death counter were blank. The US version loads
   these glyphs from the Japanese kanji font through `Kanji_OffsetFromShiftJIS`, which the decompilation has only
   as MIPS assembly; the port's stub returned the space glyph for every character. Now implemented in C

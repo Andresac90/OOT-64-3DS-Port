@@ -2056,16 +2056,18 @@ static inline float stereo_offset(float w) {
  * trade-off). PORT PERF (2026-10-02): swept against the N64 (tools/statediff, the 7 most shading-sensitive
  * scenes + perfbench, GPU path): 1.15/10/6 -> 1.5/24/3 cut the split share 6.5% -> 1.6% of the frame and
  * triangles/frame 5285 -> 3969, at +0.5 average error in Jabu-Jabu and +0.1 in the Grottos, the rest equal.
- * 2.0/32/2 (Jabu-Jabu +2.8, all scenes worse) is past the knee. */
+ * 2.0/32/2 (Jabu-Jabu +2.8, all scenes worse) is past the knee. Since the crack-free splitting (gfx_subdiv_tri)
+ * the depth is per edge: 3 gave the same 7-scene errors as 6 and the old cost (perfbench title demo: display list
+ * 18.8 ms, 5055 triangles; 6 per edge was 20.2 ms, 5930). */
 float gPortSplitRatio = 1.15f;
 float gPortSplitMinPx = 10.0f;
-int gPortSplitDepth = 6;
+int gPortSplitDepth = 3; /* per edge (crack-free splitting, gfx_subdiv_tri): 3 matched 6 on the 7-scene comparison */
 /* full tour (101 scenes): 1.5/24/3 raised the average error 5.917 -> 5.986 (Castle Courtyard +1.8): the
  * coarse thresholds are used only while frame skip is on (an Old 3DS: CPU-bound), 3ds_main.c */
 void gfx_split_thresholds(int coarse) {
     gPortSplitRatio = coarse ? 1.5f : 1.15f;
     gPortSplitMinPx = coarse ? 24.0f : 10.0f;
-    gPortSplitDepth = coarse ? 3 : 6;
+    gPortSplitDepth = 3; /* halvings per edge; the old per-triangle limit was 6 (fine) / 3 (coarse) */
 }
 #define SUBDIV_MAX_RATIO gPortSplitRatio
 #define SUBDIV_MIN_PIXELS gPortSplitMinPx
@@ -2140,11 +2142,36 @@ static int pack_vertex(const PVtx* p, bool z_is_from_0_to_1, int slot) {
 
 #ifdef __3DS__
 static void gpu_pack_clip_tri(const PVtx* t[3]);
+/* PORT DEBUG (2026-10-02): settings tjdump=<frame>: every triangle drawn to the screen in that display-list
+ * walk, in screen space (x/w, y/w), to sdmc:/3ds/oot/tjdump.bin for tools/tjunctions.py, which counts
+ * T-junctions - a vertex inside another triangle's edge, where the PICA's rasterizer can leave pixel cracks
+ * (the shading split adds vertices on edges). Off unless the setting is present. */
+static void* sDrawTarget; /* NULL = screen (gfx_select_target) */
+int gPortTjDumpFrame = -1;
+static float (*sTj)[8];
+static int sTjN, sTjOn;
+#define TJ_MAX 60000
+static void tj_add(float x0, float y0, float x1, float y1, float x2, float y2, int kind) {
+    if (sTj == NULL || sTjN >= TJ_MAX || sDrawTarget != NULL) {
+        return;
+    }
+    sTj[sTjN][0] = x0, sTj[sTjN][1] = y0, sTj[sTjN][2] = x1, sTj[sTjN][3] = y1;
+    sTj[sTjN][4] = x2, sTj[sTjN][5] = y2;
+    sTj[sTjN][6] = (float)gfx_port_tri_count; /* the source triangle (its pieces share it) */
+    sTj[sTjN][7] = (float)kind;               /* 0 drawn whole, 1 piece of a split/clipped triangle */
+    sTjN++;
+}
 #endif
 static void gfx_pack_tri(const PVtx* t[3], bool z_is_from_0_to_1) {
     if (buf_vbo_num_tris == MAX_BUFFERED) {
         gfx_flush();
     }
+#ifdef __3DS__
+    if (sTjOn) {
+        tj_add(t[0]->x / t[0]->w, t[0]->y / t[0]->w, t[1]->x / t[1]->w, t[1]->y / t[1]->w, t[2]->x / t[2]->w,
+               t[2]->y / t[2]->w, sCurVidx == NULL);
+    }
+#endif
 #ifdef __3DS__
     if (gPortGpuVtx) { /* GPU path: a piece of a triangle split/clipped on the CPU, in clip space */
         gpu_pack_clip_tri(t);
@@ -2221,16 +2248,31 @@ static float pvtx_edge_score(const PVtx* a, const PVtx* b) {
     return len < SUBDIV_MIN_PIXELS ? 0.0f : len * (r - 1.0f);
 }
 
-static void gfx_subdiv_tri(const PVtx* a, const PVtx* b, const PVtx* c, int depth, bool zf) {
+/* PORT (2026-10-02): crack-free splitting. The N64 draws whole triangles; the port cuts big near ones (the RDP's
+ * screen-linear shade/fog, near plane, guard band). A cut edge gains vertices that the neighbouring triangle
+ * sharing that edge must also have, or the edge becomes a T-junction and the 3DS rasterizer leaves pixel cracks
+ * along it (hardware v39: thin white dots on the title screen's ground, worse in 3D without anti-aliasing;
+ * tools/tjunctions.py counted ~80 such junctions in one title frame). So an edge is split only by a rule that
+ * depends on that edge alone - its two end vertices (bit-identical in both triangles: the midpoint formula is
+ * symmetric) and its level, the number of halvings that made it - never on the triangle around it: no shared
+ * recursion depth, no triangle-wide flatness test. Recursion goes on until no edge qualifies, so each edge ends
+ * up with exactly the points its own recursion gives, whatever order a triangle splits its edges in. */
+static bool sub_edge_splits(const PVtx* a, const PVtx* b, int level) {
+    return level < SUBDIV_MAX_DEPTH && gPortShadeSplit && pvtx_edge_score(a, b) > 0.0f;
+}
+
+static void gfx_subdiv_tri(const PVtx* a, const PVtx* b, const PVtx* c, const uint8_t lv[3], int guard, bool zf) {
     const PVtx* t[3] = { a, b, c };
     int best = -1;
     float bestScore = 0.0f;
-    if (depth < SUBDIV_MAX_DEPTH) {
+    if (guard < 4 * 8) { /* never reached in practice (edge levels bound the recursion) */
         for (int e = 0; e < 3; e++) {
-            float sc = pvtx_edge_score(t[e], t[(e + 1) % 3]);
-            if (sc > bestScore) {
-                bestScore = sc;
-                best = e;
+            if (lv[e] < SUBDIV_MAX_DEPTH && gPortShadeSplit) {
+                float sc = pvtx_edge_score(t[e], t[(e + 1) % 3]);
+                if (sc > bestScore) {
+                    bestScore = sc;
+                    best = e;
+                }
             }
         }
     }
@@ -2239,10 +2281,66 @@ static void gfx_subdiv_tri(const PVtx* a, const PVtx* b, const PVtx* c, int dept
         return;
     }
     const PVtx *e0 = t[best], *e1 = t[(best + 1) % 3], *opp = t[(best + 2) % 3];
+    const uint8_t half = (uint8_t)(lv[best] + 1);
+    /* children (e0, m, opp) and (m, e1, opp): the two halves, their shared new edge m-opp (same level in
+     * both), and the parent's other two edges unchanged */
+    const uint8_t la[3] = { half, half, lv[(best + 2) % 3] }, lb[3] = { half, lv[(best + 1) % 3], half };
     PVtx m;
     pvtx_mid_screen(e0, e1, &m);
-    gfx_subdiv_tri(e0, &m, opp, depth + 1, zf); /* same winding as (e0, e1, opp) */
-    gfx_subdiv_tri(&m, e1, opp, depth + 1, zf);
+    gfx_subdiv_tri(e0, &m, opp, la, guard + 1, zf); /* same winding as (e0, e1, opp) */
+    gfx_subdiv_tri(&m, e1, opp, lb, guard + 1, zf);
+}
+
+/* the points the edge a-b gains (in order from a), by the same rule as gfx_subdiv_tri */
+static int sub_edge_points(const PVtx* a, const PVtx* b, int level, PVtx* out, int n, int cap) {
+    PVtx m;
+    if (n >= cap || !sub_edge_splits(a, b, level)) {
+        return n;
+    }
+    pvtx_mid_screen(a, b, &m);
+    n = sub_edge_points(a, &m, level + 1, out, n, cap);
+    if (n < cap) {
+        out[n++] = m;
+    }
+    return sub_edge_points(&m, b, level + 1, out, n, cap);
+}
+
+/* a triangle whose shade and fog are flat needs no inner splits, but its edges must still gain the points its
+ * neighbours give them: its outline with those points, as a fan around its centroid */
+static void gfx_subdiv_outline(const PVtx* a, const PVtx* b, const PVtx* c, bool zf) {
+    static PVtx poly[3 * 64 + 3];
+    const PVtx* t[3] = { a, b, c };
+    const int cap = (int)(sizeof(poly) / sizeof(poly[0]));
+    PVtx g;
+    int n = 0, i;
+    for (int e = 0; e < 3; e++) {
+        poly[n++] = *t[e];
+        n = sub_edge_points(t[e], t[(e + 1) % 3], 0, poly, n, cap);
+    }
+    if (n == 3) {
+        gfx_pack_tri(t, zf);
+        return;
+    }
+    /* the centroid in clip space: a point of the triangle, attributes as the GPU interpolates them */
+    g.x = (a->x + b->x + c->x) * (1.0f / 3.0f), g.y = (a->y + b->y + c->y) * (1.0f / 3.0f);
+    g.z = (a->z + b->z + c->z) * (1.0f / 3.0f), g.w = (a->w + b->w + c->w) * (1.0f / 3.0f);
+    for (i = 0; i < 4; i++) {
+        g.uv[i >> 1][i & 1] = (a->uv[i >> 1][i & 1] + b->uv[i >> 1][i & 1] + c->uv[i >> 1][i & 1]) * (1.0f / 3.0f);
+        g.c[i] = (a->c[i] + b->c[i] + c->c[i]) * (1.0f / 3.0f);
+    }
+    g.s = (a->s + b->s + c->s) * (1.0f / 3.0f);
+    for (i = 0; i < n; i++) {
+        const PVtx* f[3] = { &g, &poly[i], &poly[(i + 1) % n] };
+        gfx_pack_tri(f, zf);
+    }
+}
+
+/* the two ends of an edge in a fixed order (both triangles sharing it compute its cut points identically) */
+static bool pvtx_before(const PVtx* p, const PVtx* q) {
+    if (p->x != q->x) return p->x < q->x;
+    if (p->y != q->y) return p->y < q->y;
+    if (p->z != q->z) return p->z < q->z;
+    return p->w < q->w;
 }
 
 static void pvtx_lerp_clip(const PVtx* a, const PVtx* b, float t, PVtx* o) {
@@ -2294,7 +2392,11 @@ static void gfx_emit_tri(const PVtx* a, const PVtx* b, const PVtx* c, bool zf) {
         side[sp][n[sp]++] = *p;
         if (sp != sq) {
             PVtx m;
-            pvtx_lerp_clip(p, q, (cv - p->w) / (q->w - p->w), &m);
+            if (pvtx_before(q, p)) { /* the same cut point as the neighbour sharing this edge */
+                pvtx_lerp_clip(q, p, (cv - q->w) / (p->w - q->w), &m);
+            } else {
+                pvtx_lerp_clip(p, q, (cv - p->w) / (q->w - p->w), &m);
+            }
             m.w = cv; /* exactly on the plane: s = 0 from both sides */
             m.s = 0.0f;
             side[0][n[0]++] = m;
@@ -2335,7 +2437,7 @@ static void gfx_emit_tri_one(const PVtx* a, const PVtx* b, const PVtx* c, bool z
             crange = hi - lo > crange ? hi - lo : crange;
         }
         for (int e = 0; e < 3; e++) {
-            big |= gPortShadeSplit && crange > SUBDIV_FLAT_RANGE && pvtx_edge_score(t[e], t[(e + 1) % 3]) > 0.0f;
+            big |= sub_edge_splits(t[e], t[(e + 1) % 3], 0); /* per edge: see gfx_subdiv_tri */
             near |= t[e]->z < -t[e]->w;
         }
         if (!big && !near) {
@@ -2353,7 +2455,12 @@ static void gfx_emit_tri_one(const PVtx* a, const PVtx* b, const PVtx* c, bool z
 #ifdef __3DS__
         sBatchSub++;
 #endif
-        gfx_subdiv_tri(&poly[0], &poly[1], &poly[2], 0, zf);
+        if (crange <= SUBDIV_FLAT_RANGE) {
+            gfx_subdiv_outline(&poly[0], &poly[1], &poly[2], zf); /* flat: the inside needs no splits */
+        } else {
+            static const uint8_t lv0[3] = { 0, 0, 0 };
+            gfx_subdiv_tri(&poly[0], &poly[1], &poly[2], lv0, 0, zf);
+        }
         return;
     }
     PROF_SET(PROF_SPLIT);
@@ -2380,7 +2487,11 @@ static void gfx_emit_tri_one(const PVtx* a, const PVtx* b, const PVtx* c, bool z
                 tmp[m++] = *p;
             }
             if ((dp >= 0.0f) != (dq >= 0.0f) && m < 9) {
-                pvtx_lerp_clip(p, q, dp / (dp - dq), &tmp[m++]);
+                if (pvtx_before(q, p)) { /* the neighbour sharing this edge cuts it at the same point */
+                    pvtx_lerp_clip(q, p, dq / (dq - dp), &tmp[m++]);
+                } else {
+                    pvtx_lerp_clip(p, q, dp / (dp - dq), &tmp[m++]);
+                }
             }
         }
         memcpy(poly, tmp, sizeof(PVtx) * m);
@@ -2390,7 +2501,8 @@ static void gfx_emit_tri_one(const PVtx* a, const PVtx* b, const PVtx* c, bool z
         pvtx_clamp_near(&poly[i]);
     }
     for (int i = 1; i + 1 < n; i++) {
-        gfx_subdiv_tri(&poly[0], &poly[i], &poly[i + 1], 0, zf);
+        static const uint8_t lv0[3] = { 0, 0, 0 };
+        gfx_subdiv_tri(&poly[0], &poly[i], &poly[i + 1], lv0, 0, zf);
     }
 }
 
@@ -2656,14 +2768,9 @@ static void gpu_emit_cpu(const uint8_t vidx[3], const uint16_t sl[3]) {
     int i;
     for (i = 0; i < 3; i++) {
         const struct LoadedVertex* lv = &rsp.loaded_vertices[vidx[i]];
-        const float(*rows)[4] = gpu_rows2(sl[i]);
-        float o[4];
-        int r;
+        const float* zw = gpu_vtx_zw(vidx[i], sl[i]); /* the routing test's numbers, bit for bit */
         PVtx* p = &pv[i];
-        for (r = 0; r < 4; r++) {
-            o[r] = rows[r][0] * lv->x + rows[r][1] * lv->y + rows[r][2] * lv->z + rows[r][3];
-        }
-        p->x = -o[1], p->y = o[0], p->w = o[3], p->z = -2.0f * o[2] - o[3];
+        p->x = -zw[3], p->y = zw[2], p->w = zw[1], p->z = zw[0];
         gpu_uv(lv, p->uv);
         p->c[0] = lv->color.r * (1.0f / 255.0f);
         p->c[1] = lv->color.g * (1.0f / 255.0f);
@@ -2772,52 +2879,18 @@ static void gpu_emit_tri(const uint8_t vidx[3]) {
             }
         }
         if (!cpu && gPortShadeSplit && !sGpuLin && hi >= SUBDIV_MAX_RATIO * lo) {
-            /* shade/fog (almost) equal at the three vertices: interpolation-independent, no split needed */
-            int kk, flat = 1;
-            int fog = (rsp.geometry_mode & G_FOG) != 0;
-            float al[3];
-            for (kk = 0; kk < 3; kk++) {
-                const struct LoadedVertex* lv = &rsp.loaded_vertices[vidx[kk]];
-                if (fog) {
-                    const float* zw = kk == 0 ? a : kk == 1 ? b : c;
-                    float w = zw[1] < 0.001f ? 0.001f : zw[1];
-                    float fz = zw[0] / w * rsp.fog_mul + rsp.fog_offset;
-                    al[kk] = fz < 0.0f ? 0.0f : fz > 255.0f ? 255.0f : fz;
-                } else {
-                    al[kk] = lv->color.a;
-                }
-            }
-            {
-                const struct LoadedVertex* v0 = &rsp.loaded_vertices[vidx[0]];
-                const struct LoadedVertex* v1 = &rsp.loaded_vertices[vidx[1]];
-                const struct LoadedVertex* v2 = &rsp.loaded_vertices[vidx[2]];
-                int d;
-#define CH_RANGE(x0, x1, x2) ((x0 > x1 ? (x0 > x2 ? x0 : x2) : (x1 > x2 ? x1 : x2)) - (x0 < x1 ? (x0 < x2 ? x0 : x2) : (x1 < x2 ? x1 : x2)))
-                d = CH_RANGE(v0->color.r, v1->color.r, v2->color.r);
-                flat &= d <= 2;
-                d = CH_RANGE(v0->color.g, v1->color.g, v2->color.g);
-                flat &= d <= 2;
-                d = CH_RANGE(v0->color.b, v1->color.b, v2->color.b);
-                flat &= d <= 2;
-                flat &= CH_RANGE(al[0], al[1], al[2]) <= 2.5f;
-#undef CH_RANGE
-            }
-            if (flat) {
-                goto gpu_no_split;
-            }
-            /* depth range alone is not enough: like pvtx_edge_score, only edges at least SUBDIV_MIN_PIXELS
-             * long on screen get split (most such triangles are small: walls, distant ground) */
+            /* PORT (2026-10-02): any edge the CPU splitter would cut sends the triangle there - even when its
+             * shade and fog are flat (it then gets its outline only, gfx_subdiv_outline): a neighbour that cuts
+             * the shared edge would otherwise leave a T-junction, a crack on hardware. Same clip positions as
+             * gpu_emit_cpu (sZW), so both triangles of an edge decide alike. */
             PVtx q[3];
             int e, k;
             for (k = 0; k < 3; k++) {
-                const struct LoadedVertex* lv = &rsp.loaded_vertices[vidx[k]];
-                const float(*rows)[4] = gpu_rows2(sl[k]);
-                q[k].y = rows[0][0] * lv->x + rows[0][1] * lv->y + rows[0][2] * lv->z + rows[0][3];
-                q[k].x = -(rows[1][0] * lv->x + rows[1][1] * lv->y + rows[1][2] * lv->z + rows[1][3]);
-                q[k].w = (k == 0 ? a : k == 1 ? b : c)[1];
+                const float* zw = k == 0 ? a : k == 1 ? b : c;
+                q[k].x = -zw[3], q[k].y = zw[2], q[k].z = zw[0], q[k].w = zw[1];
             }
             for (e = 0; e < 3 && !cpu; e++) {
-                cpu = pvtx_edge_score(&q[e], &q[(e + 1) % 3]) > 0.0f;
+                cpu = sub_edge_splits(&q[e], &q[(e + 1) % 3], 0);
             }
         }
     gpu_no_split:
@@ -2826,6 +2899,9 @@ static void gpu_emit_tri(const uint8_t vidx[3]) {
             PROF_SET(PROF_SPLIT);
             gpu_emit_cpu(vidx, sl);
             return;
+        }
+        if (sTjOn) {
+            tj_add(-a[3] / a[1], a[2] / a[1], -b[3] / b[1], b[2] / b[1], -c[3] / c[1], c[2] / c[1], 0);
         }
     }
     PROF_SET(PROF_GPU_PAL);
@@ -4422,6 +4498,13 @@ int gPortInterpExtra; /* 1 while an in-between (interpolated) pass re-runs the d
 
 void gfx_run(Gfx *commands) {
     if (!gPortInterpExtra) gfx_port_frame_index++;
+#ifdef __3DS__
+    sTjOn = gPortTjDumpFrame >= 0 && (int)gfx_port_frame_index == gPortTjDumpFrame;
+    if (sTjOn && sTj == NULL) {
+        sTj = malloc(sizeof(*sTj) * TJ_MAX);
+    }
+    sTjN = 0;
+#endif
 #ifdef PORT_GBIAUDIT
     if (gfx_port_frame_index == 600 || gfx_port_frame_index == 1500) gbi_audit_dump(gfx_port_frame_index);
 #endif
@@ -4457,6 +4540,19 @@ void gfx_run(Gfx *commands) {
     PROF_SET(PROF_DL);
     gfx_run_dl(commands);
     gfx_flush();
+#ifdef __3DS__
+    if (sTjOn) {
+        FILE* f = fopen("sdmc:/3ds/oot/tjdump.bin", "wb");
+        sTjOn = 0;
+        if (f != NULL && sTj != NULL) {
+            fwrite(&sTjN, 4, 1, f);
+            fwrite(sTj, sizeof(*sTj), sTjN, f);
+        }
+        if (f != NULL) {
+            fclose(f);
+        }
+    }
+#endif
     { extern void PortGfx_FrameReady(void); PortGfx_FrameReady(); }
     double t1 = gfx_wapi->get_time();
     //printf("Process %f %f\n", t1, t1 - t0);

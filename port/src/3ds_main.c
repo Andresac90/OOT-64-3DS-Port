@@ -132,7 +132,7 @@ static void Port3ds_SaveSettings(void) {
             { extern int gPortPresentGate; if (!gPortPresentGate && !sPresentAB) fprintf(f, "present_gate=0\n"); }
             if (sPresentAB) fprintf(f, "present_ab=1\n");
             { extern int gPortAA; if (!gPortAA && !sAaAB) fprintf(f, "aa=0\n"); }
-            { extern int gPortGpuVtx; if (gPortGpuVtx) fprintf(f, "gpu_vtx=1\n"); }
+            { extern int gPortGpuVtx; if (!gPortGpuVtx && !sGpuAB) fprintf(f, "gpu_vtx=0\n"); }
             if (sInterp != 1) fprintf(f, "fps60=%d\n", sInterp);
             if (sFrameSkip >= 0) fprintf(f, "frameskip=%d\n", sFrameSkip);
             { extern int gPortShadeSplit; if (!gPortShadeSplit) fprintf(f, "shade_split=0\n"); }
@@ -182,6 +182,7 @@ static void Port3ds_LoadSettings(void) {
         if (sscanf(line, "cmdflush_ab=%d", &v) == 1) { sCmdflushAB = v != 0; }
         if (sscanf(line, "present_gate=%d", &v) == 1) { extern int gPortPresentGate; gPortPresentGate = v != 0; }
         if (sscanf(line, "present_ab=%d", &v) == 1) { sPresentAB = v != 0; }
+        if (sscanf(line, "tjdump=%d", &v) == 1) { extern int gPortTjDumpFrame; gPortTjDumpFrame = v; }
         if (sscanf(line, "aa_ab=%d", &v) == 1) {
             sAaAB = v != 0;
         }

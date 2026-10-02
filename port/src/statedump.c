@@ -21,6 +21,24 @@ static void write_file(const char* path, const void* data, unsigned size) {
     }
 }
 
+/* tools/make_navi_icon.py (GAME_EXTRA=-DPORT_NAVIGEN): the last finished frame's color, read back in RGBA8
+ * (header width, height; the render target's portrait layout, as the statediff color dumps) */
+void PortStateDump_WriteColor(const char* path) {
+    extern const uint32_t* Port3ds_GetColor(int back, int* width, int* height);
+    int w, h;
+    const uint32_t* color = Port3ds_GetColor(0, &w, &h);
+    FILE* f;
+    if (color == NULL || (f = fopen(path, "wb")) == NULL) {
+        return;
+    }
+    {
+        uint32_t hdr[2] = { (uint32_t)w, (uint32_t)h };
+        fwrite(hdr, 1, sizeof(hdr), f);
+        fwrite(color, 4, (size_t)w * h, f);
+    }
+    fclose(f);
+}
+
 /* tools/make_link_banner.py (GAME_EXTRA=-DPORT_ICONGEN): Link's pause preview texture */
 void PortStateDump_WriteFile(const char* path, const void* data, unsigned size) {
     write_file(path, data, size);

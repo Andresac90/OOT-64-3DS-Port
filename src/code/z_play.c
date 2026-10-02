@@ -1235,6 +1235,126 @@ void Play_DrawOverlayElements(PlayState* this) {
     }
 }
 
+#ifdef PORT_NAVIGEN
+#include "overlays/actors/ovl_En_Elf/z_en_elf.h"
+#include "assets/objects/gameplay_keep/fairy_skel.h"
+#include "z_lib.h"
+// tools/make_navi_icon.py: Navi alone, drawn from the game's own model (gameplay_keep's fairy skeleton and glow) the
+// way her draw function draws her, close up, over a black and then a white screen (the two give the glow's
+// transparency). Both frames are read back in full color and written to the SD card.
+#define NAVIGEN_DIST 70.0f
+// EnElf_OverrideLimbDraw's glow sizing (limb 8: a camera-facing glow scaled from the limb's position)
+static s32 PortNaviGen_Limb(PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* pos, Vec3s* rot, void* thisx,
+                            Gfx** gfx) {
+    static Vec3f zeroVec = { 0.0f, 0.0f, 0.0f };
+    EnElf* this = (EnElf*)thisx;
+    if (limbIndex == 8) {
+        f32 scale = ((Math_SinS(this->timer * 4096) * 0.1f) + 1.0f) * 0.012f; // at her normal size (scale 0.008)
+        Vec3f mtxMult;
+        Matrix_MultVec3f(&zeroVec, &mtxMult);
+        Matrix_Translate(mtxMult.x, mtxMult.y, mtxMult.z, MTXMODE_NEW);
+        Matrix_Scale(scale, scale, scale, MTXMODE_APPLY);
+    }
+    return false;
+}
+
+static void PortNaviGen(PlayState* this) {
+    extern void Port3ds_RequestColor(void);
+    extern void PortStateDump_WriteColor(const char* path);
+    GraphicsContext* gfxCtx = this->state.gfxCtx;
+    Actor* navi = GET_PLAYER(this)->naviActor;
+    s32 f = (s32)this->gameplayFrames;
+
+    // four turns of her (0, 45, 90, 135 degrees), each over black then white, 10 frames apart: frames 100..170
+    s32 k = (f - 100) / 10, white = ((f - 100) / 10) & 1, turn = k >> 1;
+
+    if (f == 95) {
+        Port3ds_RequestColor(); // eager per-frame readback from here on
+    } else if (f > 100 && f <= 171 && (f - 101) % 10 == 0) {
+        static const char* sPaths[8] = {
+            "sdmc:/3ds/oot/navi_0_black.bin", "sdmc:/3ds/oot/navi_0_white.bin", "sdmc:/3ds/oot/navi_1_black.bin",
+            "sdmc:/3ds/oot/navi_1_white.bin", "sdmc:/3ds/oot/navi_2_black.bin", "sdmc:/3ds/oot/navi_2_white.bin",
+            "sdmc:/3ds/oot/navi_3_black.bin", "sdmc:/3ds/oot/navi_3_white.bin",
+        };
+        PortStateDump_WriteColor(sPaths[(f - 101) / 10]); // the previous frame's
+    }
+    if (f < 100 || f > 170 || (f - 100) % 10 != 0 || navi == NULL) {
+        return;
+    }
+    {
+        Mtx* persp = GRAPH_ALLOC(gfxCtx, sizeof(Mtx));
+        Mtx* lookAt = GRAPH_ALLOC(gfxCtx, sizeof(Mtx));
+        u16 norm;
+        u8 shade = white ? 255 : 0;
+        Vec3f at = navi->world.pos;
+        Vec3s rot = { 0, 0, 0 };
+        Gfx* xlu;
+
+        OPEN_DISPS(gfxCtx, "../z_play.c", 0);
+
+        // the whole screen in one flat color, over everything the frame drew
+        gDPPipeSync(OVERLAY_DISP++);
+        gDPSetScissor(OVERLAY_DISP++, G_SC_NON_INTERLACE, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
+        gDPSetCycleType(OVERLAY_DISP++, G_CYC_FILL);
+        gDPSetRenderMode(OVERLAY_DISP++, G_RM_NOOP, G_RM_NOOP2);
+        gDPSetFillColor(OVERLAY_DISP++,
+                        (GPACK_RGBA5551(shade, shade, shade, 1) << 16) | GPACK_RGBA5551(shade, shade, shade, 1));
+        gDPFillRectangle(OVERLAY_DISP++, 0, 0, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1);
+        gDPPipeSync(OVERLAY_DISP++);
+
+        // a camera looking at her the way the game's camera looks at the scene: the frame's own billboard
+        // matrix (segment 1, the glow's) then faces this camera too
+        {
+            Vec3f fwd, eye;
+            f32 len;
+            fwd.x = this->view.at.x - this->view.eye.x;
+            fwd.y = this->view.at.y - this->view.eye.y;
+            fwd.z = this->view.at.z - this->view.eye.z;
+            len = sqrtf(SQ(fwd.x) + SQ(fwd.y) + SQ(fwd.z));
+            eye.x = at.x - fwd.x / len * NAVIGEN_DIST;
+            eye.y = at.y - fwd.y / len * NAVIGEN_DIST;
+            eye.z = at.z - fwd.z / len * NAVIGEN_DIST;
+            guPerspective(persp, &norm, 30.0f, (f32)SCREEN_WIDTH / (f32)SCREEN_HEIGHT, 1.0f, 1000.0f, 1.0f);
+            guLookAt(lookAt, eye.x, eye.y, eye.z, at.x, at.y, at.z, this->view.up.x, this->view.up.y, this->view.up.z);
+            rot.y = Math_Vec3f_Yaw(&at, &eye) + turn * 0x2000; // her front toward the camera, then turned
+        }
+        gSPPerspNormalize(OVERLAY_DISP++, norm);
+        gSPMatrix(OVERLAY_DISP++, persp, G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_PROJECTION);
+        gSPMatrix(OVERLAY_DISP++, lookAt, G_MTX_NOPUSH | G_MTX_MUL | G_MTX_PROJECTION);
+
+        // EnElf_Draw's drawing, without its conditions (it skips Navi in some states): her colors, a cloud-like
+        // translucent render mode without depth test (the scene's depth is still in the buffer), the fairy
+        // skeleton. Drawn through the translucent-list setup, pointed at the overlay list for this call.
+        {
+            EnElf* elf = (EnElf*)navi;
+            Gfx* dListHead = GRAPH_ALLOC(gfxCtx, sizeof(Gfx) * 4);
+            xlu = POLY_XLU_DISP;
+            POLY_XLU_DISP = OVERLAY_DISP;
+            Gfx_SetupDL_27Xlu(gfxCtx);
+            gSPClearGeometryMode(POLY_XLU_DISP++, G_ZBUFFER); // the port depth-tests by geometry mode
+            gSPSegment(POLY_XLU_DISP++, 0x08, dListHead);
+            gDPPipeSync(dListHead++);
+            // full opacity (her glow's pulse at its brightest)
+            gDPSetPrimColor(dListHead++, 0, 0x01, (u8)elf->innerColor.r, (u8)elf->innerColor.g, (u8)elf->innerColor.b,
+                            255);
+            gDPSetRenderMode(dListHead++, G_RM_PASS, G_RM_CLD_SURF2);
+            gSPEndDisplayList(dListHead);
+            gDPSetEnvColor(POLY_XLU_DISP++, (u8)elf->outerColor.r, (u8)elf->outerColor.g, (u8)elf->outerColor.b, 255);
+            Matrix_Push();
+            Matrix_SetTranslateRotateYXZ(at.x, at.y, at.z, &rot);
+            Matrix_Scale(0.008f, 0.008f, 0.008f, MTXMODE_APPLY); // her full size (ICHAIN: 8 / 1000)
+            POLY_XLU_DISP = SkelAnime_Draw(this, elf->skelAnime.skeleton, elf->skelAnime.jointTable, PortNaviGen_Limb,
+                                           NULL, elf, POLY_XLU_DISP);
+            Matrix_Pop();
+            OVERLAY_DISP = POLY_XLU_DISP;
+            POLY_XLU_DISP = xlu;
+        }
+
+        CLOSE_DISPS(gfxCtx, "../z_play.c", 0);
+    }
+}
+#endif
+
 void Play_Draw(PlayState* this) {
     GraphicsContext* gfxCtx = this->state.gfxCtx;
     Lights* sp228;
@@ -1560,6 +1680,10 @@ Play_Draw_skip:
     }
 
     Camera_Finish(GET_ACTIVE_CAM(this));
+
+#ifdef PORT_NAVIGEN
+    PortNaviGen(this);
+#endif
 
     CLOSE_DISPS(gfxCtx, "../z_play.c", 4508);
 }

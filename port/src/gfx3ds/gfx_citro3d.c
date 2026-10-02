@@ -1035,7 +1035,10 @@ static void submitDraw_impl(u32 count, u32 first, const u16* idx) {
 /* ---- PORT (2026-10-01): GPU vertex path (gpu_vtx=1, shader_gpu.v.pica) ----
  * Vertices in model space (struct GpuVtx, gfx_pc.c writes them), transformed by a palette of up to
  * GPU_PAL matrices in vertex-shader uniforms. Fog/stereo parameters and the cull mode are per draw. */
-int gPortGpuVtx;                  /* settings gpu_vtx=1, fixed at init */
+int gPortGpuVtx = 1;              /* settings gpu_vtx=0/1, fixed at init. PORT PERF (2026-10-02): the GPU path is the
+                                   * default - as accurate as the CPU path (fbdiff) and faster on both consoles
+                                   * (hardware v27: New 3DS walk 9-16 vs 15-22 ms, Old 3DS speed 9.9-10.4 vs 9.6
+                                   * updates/s before frame skip) */
 #define GPU_PAL 20
 #define GPU_STRIDE 56             /* sizeof(GpuVtx) in gfx_pc.c */
 #define GPU_VERTS (VBO_BYTES / GPU_STRIDE)

@@ -79,10 +79,11 @@ make -f Makefile.3ds cci             # -> build/3ds/oot.3ds (for the Azahar emul
 
 Step 3 also creates `baseroms/ntsc-1.0/baserom-decompressed.z64`, which the game reads at run time.
 
-**Optional, HOME Menu banner with Link:** `python3 tools/make_link_banner.py` (needs Azahar, Pillow and
-[bannertool](https://github.com/diasurgical/bannertool)) renders Link's 3D model from your game data into
-`port/banner_local.bnr` (`--icon` also makes a Link icon, `port/icon_local.png`), which later builds use. These
-files are ignored by git and must never be shared; without them the build uses the original artwork.
+**Optional, HOME Menu art from your game data** (needs Azahar and Pillow): `python3 tools/make_navi_icon.py`
+renders Navi from the game's own model into `port/icon_local.png` (the icon), and `python3 tools/make_link_banner.py`
+(also needs [bannertool](https://github.com/diasurgical/bannertool)) renders Link into `port/banner_local.bnr`
+(the banner). Later builds use them. These files are ignored by git and must never be shared; without them the
+build uses the original artwork (a drawn fairy and an ocarina).
 
 **Troubleshooting (macOS):** if Anaconda or Miniconda is on your `PATH`, the audio tools can link against
 its libxml2 and then fail with `Library not loaded: @rpath/libxml2.2.dylib`. Run steps 3 and 4 with conda
@@ -131,7 +132,7 @@ set by editing that file (one `name=value` per line):
 | `fps60` | 1 | frame interpolation: 0 = off (20 fps, like the N64) |
 | `frameskip` | automatic | 1 = skip drawing an update when the game falls behind (default on Old 3DS), 0 = never |
 | `aa` | 1 | anti-aliasing (smoother edges, more GPU work); 0 = off |
-| `gpu_vtx` | 0 | 1 = vertex processing on the GPU (faster on New 3DS; may become the default) |
+| `gpu_vtx` | 1 | vertex processing on the GPU (faster on both consoles); 0 = on the CPU |
 | `prof` | 0 | 1 = per-stage CPU profile in `boot.log` (for bug reports about speed) |
 
 ## Bug reports
