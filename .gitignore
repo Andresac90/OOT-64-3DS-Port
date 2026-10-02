@@ -31,7 +31,7 @@ graphs/
 # - use `git config core.excludesFile path/to/my_gitignore_file`
 # - or edit `.git/info/exclude`
 *.cia
-# HOME Menu icon and banner rendered from the user's game data (tools/make_link_icon.py)
+# HOME Menu icon and banner rendered from the user's game data (tools/make_link_banner.py)
 port/icon_local*.png
 port/banner_local*
 *.3dsx

@@ -2118,7 +2118,7 @@ void Player_DrawPause(PlayState* play, u8* segment, SkelAnime* skelAnime, Vec3f*
     }
 
 #ifdef PORT_ICONGEN
-    // tools/make_link_icon.py: the same preview at twice the size, for a sharp HOME Menu icon. Only this one is
+    // tools/make_link_banner.py: the same preview at twice the size, for a sharp HOME Menu banner. Only this one is
     // drawn: Player_DrawPauseImpl's viewport is static, a second call in the same frame would overwrite it.
     Player_DrawPauseImpl(play, PAUSE_PLAYER_SEGMENT_GAMEPLAY_KEEP_START(segment),
                          PAUSE_PLAYER_SEGMENT_LINK_OBJECT(segment), skelAnime, pos, rot, scale, sword, tunic, shield,

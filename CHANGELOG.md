@@ -12,7 +12,8 @@ Plan and criteria: [docs/RELEASE_1.0.md](docs/RELEASE_1.0.md).
 - Frame skip on Old 3DS: when the game falls behind the N64's schedule, an update is not drawn (never
   two in a row), so the game keeps its full speed. `frameskip=0/1` in `settings.txt` overrides.
 - HOME Menu icon and banner (original artwork), version in `boot.log`.
-- `tools/make_link_icon.py`: optional HOME Menu icon and banner with Link's 3D model, rendered locally from your own game data (`port/icon_local.png`, `port/banner_local.bnr`, never committed).
+- `tools/make_link_banner.py`: optional HOME Menu banner (and icon with `--icon`) with Link's 3D model, rendered locally from your own game data (`port/banner_local.bnr`, `port/icon_local.png`, never committed).
+- HOME Menu icon: a glowing fairy (original artwork, tools/make_icon.py).
 - `aa=0/1` in `settings.txt`: anti-aliasing on/off (measurement: `aa_ab=1` alternates it).
 - Frame interpolation toward 60 fps: the game keeps the N64's 20 updates per second, and the renderer
   draws in-between frames from transforms the game tags (models, skeletons, skinned meshes, camera, sky).

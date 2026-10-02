@@ -79,10 +79,10 @@ make -f Makefile.3ds cci             # -> build/3ds/oot.3ds (for the Azahar emul
 
 Step 3 also creates `baseroms/ntsc-1.0/baserom-decompressed.z64`, which the game reads at run time.
 
-**Optional, HOME Menu icon and banner with Link:** `python3 tools/make_link_icon.py` (needs Azahar and
-Pillow; the banner also needs [bannertool](https://github.com/diasurgical/bannertool)) renders Link's 3D model
-from your game data into `port/icon_local.png` and `port/banner_local.bnr`, which later builds use. These files
-are ignored by git and must never be shared; without them the build uses the original artwork.
+**Optional, HOME Menu banner with Link:** `python3 tools/make_link_banner.py` (needs Azahar, Pillow and
+[bannertool](https://github.com/diasurgical/bannertool)) renders Link's 3D model from your game data into
+`port/banner_local.bnr` (`--icon` also makes a Link icon, `port/icon_local.png`), which later builds use. These
+files are ignored by git and must never be shared; without them the build uses the original artwork.
 
 **Troubleshooting (macOS):** if Anaconda or Miniconda is on your `PATH`, the audio tools can link against
 its libxml2 and then fail with `Library not loaded: @rpath/libxml2.2.dylib`. Run steps 3 and 4 with conda

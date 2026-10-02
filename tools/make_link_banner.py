@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-"""make_link_icon.py - HOME Menu icon and banner with Link's 3D model, rendered by the port from YOUR game data.
+"""make_link_banner.py - HOME Menu banner (and optionally icon) with Link's 3D model, rendered by the port from
+YOUR game data.
 
 Link's model is Nintendo's, so the images cannot be committed: this tool renders them locally and writes
-port/icon_local.png and port/banner_local.bnr (both ignored by git). Makefile.3ds uses them when they exist,
-else the original artwork port/icon.png and port/banner.bnr (tools/make_icon.py, tools/make_banner.sh).
+port/banner_local.bnr (and with --icon port/icon_local.png), both ignored by git. Makefile.3ds uses them when
+they exist, else the original artwork port/banner.bnr and port/icon.png (tools/make_banner.sh, tools/make_icon.py).
 The banner needs bannertool (https://github.com/diasurgical/bannertool) on PATH, in $BANNERTOOL or in
-$DEVKITPRO/tools/bin; without it only the icon is made.
+$DEVKITPRO/tools/bin.
 
 How: builds the port with GAME_EXTRA=-DPORT_ICONGEN (boots straight into Link's house, opens the pause
 menu, writes the Equipment page's Link preview, drawn at 2x = 128x224, to sdmc:/3ds/oot/link_icon.bin),
-runs it in Azahar, then rebuilds the normal ROM. The preview is cut out of its black background and placed on the same
-night-sky background as the original icon; the banner is tools/make_banner.py's with Link in place of the
-ocarina.
+runs it in Azahar, then rebuilds the normal ROM. The preview is cut out of its black background; the banner is
+tools/make_banner.py's with Link in place of the ocarina, the icon Link's head and shoulders on the original
+icon's night sky.
 
-usage: make_link_icon.py [--age adult|child] [--raw link_icon.bin]   (--raw: only redo the image step)
+usage: make_link_banner.py [--age adult|child] [--icon] [--raw link_icon.bin]   (--raw: only redo the images)
 Needs: an extracted ROM (as for any build), Azahar, Python 3 + Pillow.
 """
 import argparse, os, shutil, subprocess, sys, tempfile, time
@@ -139,22 +140,26 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--age", choices=("adult", "child"), default="adult")
     ap.add_argument("--raw", help="reuse a link_icon.bin instead of running the game")
-    ap.add_argument("--out", default=os.path.join(REPO, "port/icon_local.png"))
+    ap.add_argument("--icon", action="store_true", help="also make the HOME Menu icon (default: the original one)")
+    ap.add_argument("--icon-out", default=os.path.join(REPO, "port/icon_local.png"))
     ap.add_argument("--banner-out", default=os.path.join(REPO, "port/banner_local.bnr"))
     args = ap.parse_args()
+    if bannertool() is None and not args.icon:
+        sys.exit("bannertool not found (PATH, $BANNERTOOL or $DEVKITPRO/tools/bin): nothing to make")
     raw = open(args.raw, "rb").read() if args.raw else render(args.age)
     link = decode(raw)
     if link.getbbox() is None:
         sys.exit("the preview is empty")
-    icon = compose(link)
-    icon.save(args.out)
-    icon.resize((192, 192), Image.NEAREST).save(os.path.splitext(args.out)[0] + "_preview.png")
-    link.save(os.path.splitext(args.out)[0] + "_source.png")
-    print("wrote %s" % args.out)
+    link.save(os.path.splitext(args.banner_out)[0] + "_source.png")
     if make_banner(link, args.banner_out):
         print("wrote %s" % args.banner_out)
     else:
         print("no bannertool found: banner not made (the build keeps port/banner.bnr)")
+    if args.icon:
+        icon = compose(link)
+        icon.save(args.icon_out)
+        icon.resize((192, 192), Image.NEAREST).save(os.path.splitext(args.icon_out)[0] + "_preview.png")
+        print("wrote %s" % args.icon_out)
     print("local only: Link's model is the game's, never commit these files")
     if not args.raw:
         sh("make -f Makefile.3ds cci >/dev/null")  # the new files are newer than the icon and ROM: repacks only

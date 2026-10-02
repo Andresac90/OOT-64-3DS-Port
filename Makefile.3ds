@@ -212,13 +212,13 @@ $(BUILD)/port_version.c: FORCE
 $(VERSION_OBJ): $(BUILD)/port_version.c ; @$(CC) $(PORT_CFLAGS) -c -o $@ $<
 
 # HOME Menu icon: port/icon_local.png when present (Link's model rendered from your own game data by
-# tools/make_link_icon.py, never committed), else the original artwork port/icon.png (tools/make_icon.py)
+# tools/make_link_banner.py --icon, never committed), else the original artwork port/icon.png (tools/make_icon.py)
 ICON_PNG := $(if $(wildcard port/icon_local.png),port/icon_local.png,port/icon.png)
 $(BUILD)/$(TARGET).smdh: $(ICON_PNG)
 	@mkdir -p $(dir $@)
 	$(SMDHTOOL) --create "Ocarina of Time 64" "Unofficial native port of the N64 game" "Fan project" $< $@
 
-# HOME Menu banner: port/banner_local.bnr when present (Link, tools/make_link_icon.py, never committed), else the
+# HOME Menu banner: port/banner_local.bnr when present (Link, tools/make_link_banner.py, never committed), else the
 # committed original artwork port/banner.bnr (tools/make_banner.sh; bannertool not needed to build)
 BANNER := $(if $(wildcard port/banner_local.bnr),port/banner_local.bnr,port/banner.bnr)
 

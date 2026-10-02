@@ -4130,7 +4130,7 @@ void KaleidoScope_Update(PlayState* play) {
         case PAUSE_STATE_MAIN:
 #ifdef PORT_ICONGEN
             {
-                // tools/make_link_icon.py: Link's 2x preview (z_player_lib.c, drawn when the menu opened and read
+                // tools/make_link_banner.py: Link's 2x preview (z_player_lib.c, drawn when the menu opened and read
                 // back by the renderer) is complete by now
                 static s32 sIconGenFrames = 0;
                 extern u16 gPortIconGenBuf[];

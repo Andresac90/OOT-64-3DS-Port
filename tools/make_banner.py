@@ -4,7 +4,7 @@ and a short generic chime (two sine notes, not a melody from the game). Writes b
 tools/make_banner.sh turns them into port/banner.bnr with bannertool.
 
 usage: make_banner.py OUT_DIR [FIGURE.png]   FIGURE (transparent background) replaces the ocarina:
-tools/make_link_icon.py passes Link's render for the local-only port/banner_local.bnr."""
+tools/make_link_banner.py passes Link's render for the local-only port/banner_local.bnr."""
 import math, struct, sys, wave
 from PIL import Image, ImageDraw, ImageFont
 

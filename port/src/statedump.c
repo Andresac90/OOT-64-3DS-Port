@@ -21,7 +21,7 @@ static void write_file(const char* path, const void* data, unsigned size) {
     }
 }
 
-/* tools/make_link_icon.py (GAME_EXTRA=-DPORT_ICONGEN): Link's pause preview texture */
+/* tools/make_link_banner.py (GAME_EXTRA=-DPORT_ICONGEN): Link's pause preview texture */
 void PortStateDump_WriteFile(const char* path, const void* data, unsigned size) {
     write_file(path, data, size);
 }

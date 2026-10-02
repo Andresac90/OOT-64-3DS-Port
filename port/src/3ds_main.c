@@ -70,7 +70,7 @@ static int sLogMute; /* the periodic perf report without a measurement switch on
 static int sGpuAB; /* settings gpu_ab=1: the vertex path alternates every 2 perf reports */
 static int sAaAB;  /* settings aa_ab=1: anti-aliasing alternates every 2 perf reports (gfx_3ds.c) */
 static int sCmdflushAB; /* settings cmdflush_ab=1: C3D_FrameEnd flush mode alternates every 2 reports */
-static int sPresentAB;  /* settings present_ab=1: the present gate (gfx_3ds.c) alternates every 2 reports */
+static int sPresentAB;  /* settings present_ab=1: the present gate (gfx_3ds.c) alternates every 4 reports */
 int gPortStereoTest; /* settings stereo_test=1: 3D toggles every 2 s (gfx_3ds.c), freeze reproduction */
 static volatile u32 sProfHist[PROF_COUNT];
 static volatile int sProfRun;
@@ -1042,13 +1042,15 @@ static void Port3ds_PaceFrame(void) {
 u32 gPortPerfTris, gPortPerfDraws, gPortPerfTrisIn;
 u64 gPortPerfAudioMain;
 static u64 sPerfGame, sPerfDl, sPerfSwap, sPerfPace, sPerfLastEnd;
+static u64 sPerfDlWait; /* the part of sPerfDl spent waiting: the walk's C3D_FrameBegin (gPortPerfGpuWait also
+                         * counts the in-between frames' waits, which fall in "swap") and its present gate */
 static void Port3ds_PerfReport(unsigned frames) {
     extern void PortDbgX(const char*, unsigned);
     const u64 div = (u64)frames * (SYSCLOCK_ARM11 / 1000000); /* ticks -> us per frame */
     PortDbgX("perf us/frame game", (unsigned)(sPerfGame / div));
     {
         extern u64 gPortPerfGpuWait;
-        PortDbgX("perf us/frame dl (cpu)", (unsigned)((sPerfDl - gPortPerfGpuWait) / div));
+        PortDbgX("perf us/frame dl (cpu)", (unsigned)((sPerfDl - sPerfDlWait) / div));
         PortDbgX("perf us/frame gpu wait", (unsigned)(gPortPerfGpuWait / div));
         gPortPerfGpuWait = 0;
     }
@@ -1168,7 +1170,7 @@ static void Port3ds_PerfReport(unsigned frames) {
             sProfHist[i] = 0;
         }
     }
-    sPerfGame = sPerfDl = sPerfSwap = sPerfPace = 0;
+    sPerfGame = sPerfDl = sPerfSwap = sPerfPace = sPerfDlWait = 0;
     gPortPerfTris = gPortPerfDraws = 0;
 }
 
@@ -1186,7 +1188,8 @@ static double sInterpElapsedSum;    /* logic time before the passes, ms (summed 
 void PortGfx_RunTask(OSTask* task) {
     u64 tA = svcGetSystemTick(), tB, tC, tD;
     extern u64 gPortGateTicksTotal; /* gfx_3ds.c present gate: waiting, not cost */
-    const u64 gateA = gPortGateTicksTotal;
+    extern u64 gPortPerfGpuWait;
+    const u64 gateA = gPortGateTicksTotal, waitA = gPortPerfGpuWait;
     PROF_SET(PROF_INPUT);
     if (sPerfLastEnd != 0) sPerfGame += tA - sPerfLastEnd;
     if (!sGfxInited) PortGfx_Init();
@@ -1284,6 +1287,8 @@ void PortGfx_RunTask(OSTask* task) {
         gfx_run((Gfx*)task->t.data_ptr);
     }
     tB = svcGetSystemTick();
+    /* the walk's waits (its C3D_FrameBegin, its present gate): not display-list cost */
+    const u64 dlWait = (gPortPerfGpuWait >= waitA ? gPortPerfGpuWait - waitA : 0) + (gPortGateTicksTotal - gateA);
     if (sBench && !skip) {
         extern int gPortLegacyVbo;
         sBenchDl[gPortLegacyVbo] += tB - tA;
@@ -1337,6 +1342,7 @@ void PortGfx_RunTask(OSTask* task) {
     PROF_SET(PROF_GAME);
     tD = svcGetSystemTick();
     sPerfDl += tB - tA;
+    sPerfDlWait += dlWait < tB - tA ? dlWait : tB - tA;
     sPerfSwap += tC - tB;
     sPerfPace += tD - tC;
     sPerfLastEnd = tD;
@@ -1446,7 +1452,8 @@ void PortGfx_RunTask(OSTask* task) {
               { extern int gPortGpuVtx; PortDbgX(gPortGpuVtx ? "perf vertex path GPU" : "perf vertex path CPU", 1); }
               { extern int gPortAA; PortDbgX("perf anti-aliasing", (unsigned)gPortAA); }
               static unsigned sPgReports;
-              if (sPresentAB && (++sPgReports % 2) == 0) { /* applied from the next frame */
+              /* every 4 reports: with cmdflush_ab (every 2) one session covers all four combinations */
+              if (sPresentAB && (++sPgReports % 4) == 0) { /* applied from the next frame */
                   extern int gPortPresentGate;
                   gPortPresentGate = !gPortPresentGate;
               }

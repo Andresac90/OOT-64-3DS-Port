@@ -331,12 +331,23 @@ static bool sInFrame;         /* between C3D_FrameBegin and C3D_FrameEnd */
 static unsigned sFramesDone;  /* frames ended so far */
 static unsigned sDepthOfFrame = ~0u; /* sFramesDone when the current copy was taken */
 static void gfx_3ds_depth_lazy(void);
+/* PORT PERF (2026-10-02): EARLY depth copy with 60 fps replays. The lazy copy below waits for the GPU to
+ * finish the logic frame's last shown frame; with the present gate that frame is handed to the GPU right at
+ * the update boundary, so the game's first depth read (Navi's glow test, almost every update) waited for most
+ * of its GPU time: game logic 8.9 -> 14.4 ms per update (hardware v39). Instead, when the game read depth in
+ * the previous update, the logic frame's FIRST shown frame (the walk's in-between frame) is copied before the
+ * next frame starts, where C3D_FrameBegin would wait for it anyway: only the copy itself costs. That depth is
+ * up to 2/3 of an update older than the logic frame's own (the N64 reads the previous frame's). */
+static unsigned sDepthReadAt = ~0u; /* sFramesDone at the game's latest depth read */
+static bool sLogicStarted = true;   /* the next in-between frame is a logic frame's first */
+static bool sDepthEarlyPending;     /* that frame was just submitted: copy its depth before the next one */
 
 void Port3ds_RequestDepth(void) {
     sDepthWantFrames = 60;
 }
 
 const u32* Port3ds_GetDepth(int* width, int* height) {
+    sDepthReadAt = sFramesDone;
     gfx_3ds_depth_lazy();
     *width = ViewW();
     *height = ViewH();
@@ -812,6 +823,14 @@ unsigned gPortPerfGpuFrames;
 static bool gfx_3ds_start_frame(void)
 {
     u64 t0;
+    if (sDepthEarlyPending) {
+        sDepthEarlyPending = false;
+        if (sFramesDone - sDepthReadAt <= 1 && sColorWantFrames == 0 && sTarget != NULL) {
+            sDepthWantFrames = 1;
+            gfx_3ds_read_back_depth(); /* waits for that frame (as C3D_FrameBegin would), then copies */
+            sDepthOfFrame = sFramesDone + 1; /* stands for the logic frame ending in this update */
+        }
+    }
     gfx_3ds_update_stereo(); /* outside a frame: citro3d refuses to delete targets inside one */
     gfx_3ds_update_aa();
     t0 = svcGetSystemTick();
@@ -872,6 +891,10 @@ static void gfx_3ds_swap_buffers_begin(void)
     sInFrame = false;
     {
         extern int gPortInterpExtra;
+        if (gPortInterpExtra && sLogicStarted) {
+            sDepthEarlyPending = true; /* the walk's in-between frame: see sDepthReadAt */
+        }
+        sLogicStarted = !gPortInterpExtra;
         if (!gPortInterpExtra) {
             sFramesDone++; /* a frame the game may read depth from (gfx_3ds_depth_lazy) */
             if (sColorWantFrames > 0) {

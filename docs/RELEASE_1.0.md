@@ -48,7 +48,7 @@ means a real console, the rest runs in the emulator (`tools/`). Status as of 202
 
 | | Item | Status |
 |---|---|---|
-| [x] | HOME Menu icon and banner (original artwork, no Nintendo images) | `port/icon.png`, `port/banner.bnr` (tools/make_icon.py, tools/make_banner.sh); optional local Link icon and banner, `tools/make_link_icon.py` |
+| [x] | HOME Menu icon and banner (original artwork, no Nintendo images) | `port/icon.png`, `port/banner.bnr` (tools/make_icon.py, tools/make_banner.sh); optional local Link banner/icon, `tools/make_link_banner.py` |
 | [x] | Own title ID (was `0xF8000`, the homebrew template's default) | `0xF0C64`; uninstall the old title once |
 | [x] | Version in `boot.log` (first line, also on the bottom screen during boot) | `git describe`, or `port/VERSION` |
 | [ ] | Saving is safe and quick | atomic (save.tmp, save.bak) and one write per save (v33, emulator-tested); time it on hardware |

@@ -320,3 +320,23 @@ depth copy nothing. statediff builds keep the eager per-frame copy. The asynchro
   frames, so their comparisons keep the fine thresholds.
 - **Next (hardware):** `present_ab=1` session (displayed frames, replaced frames, gate wait, update rate on a New
   3DS); then shorten the chain: frame-end flush (`cmdlist_flush`, v38 A/B), walk CPU (packing, submits).
+
+### 2026-10-02 (evening): hardware v39 - the GPU is the bottleneck
+
+- **GPU time per frame (C3D_GetDrawingTime, New 3DS, 2D, AA on, widescreen): 9.4-11.8 ms in gameplay, 8.8 ms on
+  the file select.** In 3D (no AA: two 240x400 eyes) 8.9 ms. 2D gameplay profile: GPU wait 34-37% of the time,
+  game logic 17%, the whole display-list walk and replays ~27%. Three frames per update need ~33 ms of GPU,
+  serialized with the CPU work by citro3d's single command buffer.
+- **The frame-end cache flush is cheap:** `C3D_FrameEnd` 123-162 us with the whole-heap flush, 23-26 us with
+  `GX_CMDLIST_FLUSH` (no freeze in either). Not worth a default change for now.
+- **The present gate hurt in this regime:** frames displayed 37.6/s with it vs 43-48 without (69-74 frames
+  replaced per report). With frames spaced one per refresh, the last one reaches the GPU at the update boundary,
+  and the game's depth read (Navi's glow, every update) waited for it: game logic 8.9 -> 14.4 ms; the logic
+  frame then finished 40-43 ms after the update's start (deadline ~33), so one in-between frame was chosen.
+- **The v34 AA test was invalid:** that session ran in 3D, where AA is not used.
+- **v40:** early depth copy (the logic frame's first shown frame is copied before the next frame starts, where
+  C3D_FrameBegin waits anyway); `aa_ab=1` + `present_ab=1` in 2D (all four combinations every 8 reports);
+  report fix (`dl (cpu)` no longer subtracts the in-between frames' waits).
+- **Next:** if AA off brings the GPU near 6 ms per frame, the gate's schedule fits (logic frame ~28 ms) and 60 fps
+  is within reach; else smaller texture formats (RGBA8 everywhere today), textures in VRAM, and overlapping CPU
+  work with the GPU.
