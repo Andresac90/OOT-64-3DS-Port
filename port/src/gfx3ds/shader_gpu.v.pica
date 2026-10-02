@@ -17,7 +17,8 @@
 ;       z = fog on (0/1), w = 1/255
 .fvec fogp
 ; stp: x = stereo convergence c (0 = 3D off), y = (1 - t): skinned vertices move back toward the previous
-;      frame's position in 60 fps in-between frames, z = 1, w = 0.0005 (|w - 1| below = a flat 2D layer)
+;      frame's position in 60 fps in-between frames, z = screen-linear mode (0/1, see the end),
+;      w = 0.0005 (|w - 1| below = a flat 2D layer)
 .fvec stp
 
 .entry gpu_main
@@ -25,7 +26,8 @@
 .constf cst2(0.001, 0.0, 0.0, 0.0)
 
 .out outpos position
-.out outtc0 texcoord0
+.out outtc0 texcoord0.xy
+.out -      texcoord0w outtc0.p
 .out outtc1 texcoord1
 .out outclr color
 
@@ -51,6 +53,10 @@
 	dp4 r2.y, pal[a0.x+1], r0
 	dp4 r2.z, pal[a0.x+2], r0
 	dp4 r2.w, pal[a0.x+3], r0
+	; PORT (2026-10-01): the N64 (NoN microcode) does not clip at the near plane; the PICA would. A vertex in
+	; front of it gets z on the plane (out.z = -(z + w) / 2 <= 0), as pvtx_clamp_near does on the CPU. Pieces of
+	; triangles cut on the CPU are drawn in model space too (gfx_pc.c gpu_pack_clip_tri) and need this.
+	min r2.z, cst.z, r2.z
 
 	; shade (0..255 bytes)
 	mov r6, fogp
@@ -94,8 +100,31 @@
 	mul r11.y, r10.y, r2.w
 	add r2.y, r11.x, r11.y
 
+	; PORT (2026-10-01): screen-linear mode (stp.z = 1). The RDP interpolates shade and fog linearly on
+	; the screen and only the texture coordinates with perspective; the PICA interpolates everything with
+	; perspective. Dividing the position by w here (w = 1 out) makes every attribute screen-linear; the
+	; texture coordinates of unit 0 stay perspective-correct through projective texturing (unit 0 in
+	; GPU_TEX_PROJECTION mode divides s/q, t/q per pixel). Unit 1 has no projective mode: draws using it
+	; keep stp.z = 0 (and the CPU split). With stp.z = 0: q = 1, the same as plain 2D texturing.
+	; q = 1 + lin * (1 / w - 1); pos.xyz *= q; pos.w += lin * (1 - w)
+	rcp r12.x, r2.w
+	; one Newton step: rcp is approximate and z' = z / w is the depth (r = r * (2 - w * r))
+	mul r12.w, r2.w, r12.x
+	add r12.w, -cst.y, r12.w
+	mul r12.w, r12.w, r12.x
+	add r12.x, r12.x, -r12.w
+	add r12.y, -cst.y, r12.x
+	mul r12.y, r12.y, r5.z
+	add r12.y, cst.y, r12.y
+	mul r2.xyz, r2.xyz, r12.yyy
+	add r12.z, cst.y, -r2.w
+	mul r12.z, r12.z, r5.z
+	add r2.w, r2.w, r12.z
+	mul r13.xy, intex.xy, r12.yy
+	mov r13.z, r12.y
+
 	mov outpos, r2
-	mov outtc0, intex
+	mov outtc0, r13
 	mov outtc1, intex1
 	mov outclr, r3
 	end

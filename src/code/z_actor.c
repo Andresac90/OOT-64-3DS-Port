@@ -2895,13 +2895,16 @@ s32 Actor_CullingVolumeTest(PlayState* play, Actor* actor, Vec3f* projPos, f32 p
 #ifdef __3DS__
         {
             /* PORT: widescreen draws 400/320 = 1.25x the N64's horizontal view; actors culled at the
-             * 4:3 edge vanished in the side bars */
+             * 4:3 edge vanished in the side bars. PORT (2026-10-01): in 3D each eye is shifted by up to
+             * sep * |w - c| / w <= sep * (1 + c / w) (gfx_pc.c stereo_offset, shader_gpu.v.pica): actors
+             * just outside the edge appeared in one eye only and popped while the camera moved (hardware v30). */
             extern int gPortWidescreen;
-            if (gPortWidescreen) {
-                invW *= 0.8f;
-                if ((((fabsf(projPos->x) - actor->cullingVolumeScale) * invW) < 1.0f) &&
-                    (((projPos->y + actor->cullingVolumeDownward) * invW * 1.25f) > -1.0f) &&
-                    (((projPos->y - actor->cullingVolumeScale) * invW * 1.25f) < 1.0f)) {
+            extern float gPortStereoSep, gPortStereoConv;
+            if (gPortWidescreen || gPortStereoSep != 0.0f) {
+                f32 limitX = (gPortWidescreen ? 1.25f : 1.0f) + gPortStereoSep * (1.0f + gPortStereoConv * invW);
+                if ((((fabsf(projPos->x) - actor->cullingVolumeScale) * invW) < limitX) &&
+                    (((projPos->y + actor->cullingVolumeDownward) * invW) > -1.0f) &&
+                    (((projPos->y - actor->cullingVolumeScale) * invW) < 1.0f)) {
                     return true;
                 }
                 return false;

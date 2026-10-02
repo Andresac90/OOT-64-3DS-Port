@@ -1,0 +1,18 @@
+# Pause menu song playback: open, R twice to Quest Status (cursor on the left page arrow), stick right
+# (Stone of Agony), down (Skulltula token), down (Zelda's Lullaby), A = the song demo. Frames from the
+# entry's start (incl. the transition).
+0   0      0 0
+80  START  0 0
+83  0      0 0
+110  R      0 0
+113  0      0 0
+140  R      0 0
+143  0      0 0
+185  0     80 0
+188  0      0 0
+200  0      0 -80
+203  0      0 0
+215  0      0 -80
+218  0      0 0
+235  A      0 0
+238  0      0 0

@@ -11,7 +11,7 @@ BasicInfo:
 
 TitleInfo:
   Category                : Application
-  UniqueId                : 0xF8000
+  UniqueId                : 0xF0C64 # own id (0xF8000 is the homebrew template default, shared by other titles)
 
 Option:
   UseOnSD                 : true # true if App is to be installed to SD

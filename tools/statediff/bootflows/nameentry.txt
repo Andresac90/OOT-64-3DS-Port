@@ -1,0 +1,15 @@
+# Title -> file select -> File 1 (empty) -> name entry; type three letters (A on the first key), capture.
+# Frames = GameState_Update calls since boot (same on both sides).
+0    0      0 0
+700  START  0 0
+703  0      0 0
+790  A      0 0
+793  0      0 0
+capture 880
+900  A      0 0
+903  0      0 0
+915  A      0 0
+918  0      0 0
+930  A      0 0
+933  0      0 0
+capture 980

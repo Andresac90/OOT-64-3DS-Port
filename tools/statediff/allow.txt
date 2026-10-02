@@ -19,3 +19,4 @@
 ^play\.msgCtx\.font\.anon[01] \[UNION views agree: force_structure_alignment_(charTex|icon)  # glyph/icon textures DMA'd as native u64 (port texture layout); only passed to the renderer, never read by the CPU
 ^play\.msgCtx\.anon0 \[UNION views agree: msgBufDecoded \|  # decoded text is bytes for English (msgBufDecoded); the wide view is the JP path
 ^save\.info\.checksum\.value$          # the game sums the save as native u16 words: another value on LE, but computed and verified the same way on the port
+^save\.save\.info\.checksum\.value$   # z_sram.c sums the save as u16 words of native memory: the sum differs by byte order (3DS saves are native-endian and verified the same way on load)

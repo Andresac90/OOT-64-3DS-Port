@@ -541,14 +541,7 @@ void AudioThread_ProcessCmds(u32 msg) {
         }
 
         cmd = &gAudioCtx.threadCmdBuf[sCurCmdRdPos++ & 0xFF];
-#ifdef __3DS__
-        { extern void PortDbgX(const char*, unsigned); static unsigned pcc = 0;
-          if (pcc < 48) { PortDbgX("PCmds op", (unsigned)cmd->op); pcc++; } }
-#endif
         if (cmd->op == AUDIOCMD_OP_GLOBAL_STOP_AUDIOCMDS) {
-#ifdef __3DS__
-            { extern void PortDbgX(const char*, unsigned); PortDbgX("PCmds hit STOP at", (unsigned)sCurCmdRdPos); }
-#endif
             gAudioCtx.threadCmdQueueFinished = true;
             return;
         }

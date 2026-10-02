@@ -1,0 +1,6 @@
+# SCENE capture_frame end_frame script   (frames counted from the entry's start, including its transition)
+# Pause menu song playback (Quest Status -> Zelda's Lullaby -> A): during the demo, then after it.
+SCENE_KOKIRI_FOREST 225 300 pause_song
+SCENE_KOKIRI_FOREST 262 340 pause_song
+SCENE_KOKIRI_FOREST 400 460 pause_song
+SCENE_KOKIRI_FOREST 650 700 pause_song

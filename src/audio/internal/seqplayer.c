@@ -1655,7 +1655,17 @@ void AudioSeq_SequenceChannelProcessScript(SequenceChannel* channel) {
 
                 case ASEQ_OP_CHAN_LDSEQTOPTR:
                     cmdArgU16 = (u16)cmdArgs[0];
+#ifdef __3DS__
+                    {
+                        // PORT (2026-10-01): sequence data is big-endian; a native u16 read gave a byte-swapped
+                        // pointer (found while tracing the silent voices, whose cause was
+                        // AUDIO_RELOCATED_ADDRESS_START in audio.h)
+                        u8* ptr = seqPlayer->seqData + (u32)(cmdArgU16 + scriptState->value * 2);
+                        channel->unk_22 = (u16)((ptr[0] << 8) | ptr[1]);
+                    }
+#else
                     channel->unk_22 = *(u16*)(seqPlayer->seqData + (u32)(cmdArgU16 + scriptState->value * 2));
+#endif
                     break;
 
                 case ASEQ_OP_CHAN_PTRTODYNTBL:
@@ -1663,7 +1673,15 @@ void AudioSeq_SequenceChannelProcessScript(SequenceChannel* channel) {
                     break;
 
                 case ASEQ_OP_CHAN_DYNTBLTOPTR:
+#ifdef __3DS__
+                    {
+                        // PORT (2026-10-01): big-endian table entry (see ASEQ_OP_CHAN_LDSEQTOPTR)
+                        u8* ptr = (u8*)channel->dynTable + scriptState->value * 2;
+                        channel->unk_22 = (u16)((ptr[0] << 8) | ptr[1]);
+                    }
+#else
                     channel->unk_22 = ((u16*)(channel->dynTable))[scriptState->value];
+#endif
                     break;
 
                 case ASEQ_OP_CHAN_DYNTBLV:

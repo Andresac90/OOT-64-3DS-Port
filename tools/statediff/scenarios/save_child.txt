@@ -1,0 +1,3 @@
+# SCENE capture_frame end_frame script   (frames counted from the entry's start, including its transition)
+# Save from the pause menu (B -> save prompt -> A): captured after the save, then the scene is left.
+SCENE_KOKIRI_FOREST 260 300 pause_save

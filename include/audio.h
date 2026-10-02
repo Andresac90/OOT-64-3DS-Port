@@ -64,7 +64,16 @@ typedef void (*AudioCustomUpdateFunction)(void);
 // Must be the same amount of samples as copied by aDuplicate() (audio microcode)
 #define WAVE_SAMPLE_COUNT 64
 
+#ifdef __3DS__
+// PORT (2026-10-01): "is this pointer relocated?" - on the N64 relocated pointers are KSEG0 (>= 0x80000000) and
+// unrelocated ones are offsets into the loaded data. Every 3DS address is below 0x80000000, so the stock test
+// rejected every relocated pointer: Audio_GetSoundEffect / Audio_GetDrum always returned NULL (every voice -
+// Navi, Link - and every drum silent: the note was muted and ended in its first tick). Offsets are well under
+// 1 MB; every 3DS data address (the loaded image starts at 0x00100000) is at or above it.
+#define AUDIO_RELOCATED_ADDRESS_START 0x00100000
+#else
 #define AUDIO_RELOCATED_ADDRESS_START K0BASE
+#endif
 
 typedef enum SoundSetting {
     /* 0 */ SOUND_SETTING_STEREO,

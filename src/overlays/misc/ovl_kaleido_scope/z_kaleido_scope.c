@@ -4128,6 +4128,20 @@ void KaleidoScope_Update(PlayState* play) {
             break;
 
         case PAUSE_STATE_MAIN:
+#ifdef PORT_ICONGEN
+            {
+                // tools/make_link_icon.py: Link's 2x preview (z_player_lib.c, drawn when the menu opened and read
+                // back by the renderer) is complete by now
+                static s32 sIconGenFrames = 0;
+                extern u16 gPortIconGenBuf[];
+                extern void PortStateDump_WriteFile(const char* path, const void* data, unsigned size);
+
+                if (++sIconGenFrames == 20) {
+                    PortStateDump_WriteFile("sdmc:/3ds/oot/link_icon.bin", gPortIconGenBuf,
+                                            PAUSE_EQUIP_PLAYER_WIDTH * 2 * PAUSE_EQUIP_PLAYER_HEIGHT * 2 * 2);
+                }
+            }
+#endif
             switch (pauseCtx->mainState) {
                 case PAUSE_MAIN_STATE_IDLE:
                     if (CHECK_BTN_ALL(input->press.button, BTN_START)) {
@@ -4158,14 +4172,6 @@ void KaleidoScope_Update(PlayState* play) {
 
                 case PAUSE_MAIN_STATE_SONG_PLAYBACK:
                     pauseCtx->ocarinaStaff = AudioOcarina_GetPlaybackStaff();
-#ifdef __3DS__
-                    /* Audio engine is stubbed: AudioOcarina_Update never runs, so the
-                     * playback staff stays frozen at state 0xFE and this state has no
-                     * manual exit -> hard lock (Quest Status -> song -> A). Treat the
-                     * demo as finished immediately; SONG_PROMPT_INIT->SONG_PROMPT is
-                     * B/START-escapable. REMOVE when real audio lands (M3e). */
-                    pauseCtx->ocarinaStaff->state = 0;
-#endif
                     if (pauseCtx->ocarinaStaff->state == 0) {
                         // Song playback is finished
                         pauseCtx->mainState = PAUSE_MAIN_STATE_SONG_PROMPT_INIT;

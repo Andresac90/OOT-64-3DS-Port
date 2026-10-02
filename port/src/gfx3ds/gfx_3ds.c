@@ -54,6 +54,9 @@ float gPortStereoFocusW;
 int gPortStereoFlatScene; /* set by menu gamestates (file select) each frame; cleared after the frame */
 float gPortStereoConv = 150.0f;
 static Gfx3DSMode sMonoMode;
+static bool sMonoAA;
+static void gfx_3ds_mono_config(bool aa);
+int gPortAA = 1; /* settings aa=0/1 (hardware only: AA is part of N3DS_USE_ANTIALIASING builds) */
 static u32 sMonoFlags;
 static int sMonoW, sMonoH;
 static bool sMonoWide;
@@ -94,7 +97,7 @@ static void gfx_3ds_init(void)
 
     bool useAA = false;
 #ifdef N3DS_USE_ANTIALIASING
-    useAA = true;
+    useAA = gPortAA != 0;
 #endif
     bool useWide = false;
 #ifdef N3DS_USE_WIDE_800PX
@@ -113,42 +116,53 @@ static void gfx_3ds_init(void)
     }
 #endif
 
-    u32 transferFlags = 
-        GX_TRANSFER_FLIP_VERT(0) | 
-        GX_TRANSFER_OUT_TILED(0) | 
-        GX_TRANSFER_RAW_COPY(0) |
-	    GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | 
-        GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8);
-
-    if (useAA && !useWide)
-        transferFlags |= GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_XY);
-    else if (useAA && useWide)
-        transferFlags |= GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_X);
-    else
-        transferFlags |= GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
-
-    int width = useAA || useWide ? 800 : 400;
-    int height = useAA ? 480 : 240;
-
-    sTarget = C3D_RenderTargetCreate(height, width, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
-	C3D_RenderTargetSetOutput(sTarget, GFX_TOP, GFX_LEFT, transferFlags);
-    sMonoFlags = transferFlags;
-    sMonoW = height;
-    sMonoH = width;
     sMonoWide = useWide;
-
-    if (!useAA && !useWide)
-        gGfx3DSMode = GFX_3DS_MODE_NORMAL;
-    else if (useAA && !useWide)
-        gGfx3DSMode = GFX_3DS_MODE_AA_22;
-    else if (!useAA && useWide)
-        gGfx3DSMode = GFX_3DS_MODE_WIDE;
-    else
-        gGfx3DSMode = GFX_3DS_MODE_WIDE_AA_12;
+    gfx_3ds_mono_config(useAA);
+    sTarget = C3D_RenderTargetCreate(sMonoW, sMonoH, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+	C3D_RenderTargetSetOutput(sTarget, GFX_TOP, GFX_LEFT, sMonoFlags);
+    gGfx3DSMode = sMonoMode;
 
     if (useWide)
         gfxSetWide(true);
-    sMonoMode = gGfx3DSMode;
+}
+
+/* the mono target's size, output transfer and mode for anti-aliasing on/off (2x2 supersampling, or 1x2 in the
+ * 800px wide mode) */
+static void gfx_3ds_mono_config(bool aa) {
+    u32 flags = GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
+                GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8);
+    if (aa && !sMonoWide)
+        flags |= GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_XY);
+    else if (aa && sMonoWide)
+        flags |= GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_X);
+    else
+        flags |= GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
+    sMonoFlags = flags;
+    sMonoW = aa ? 480 : 240;                /* target height (the screen's short axis) */
+    sMonoH = aa || sMonoWide ? 800 : 400;   /* target width */
+    sMonoMode = !aa ? (sMonoWide ? GFX_3DS_MODE_WIDE : GFX_3DS_MODE_NORMAL)
+                    : (sMonoWide ? GFX_3DS_MODE_WIDE_AA_12 : GFX_3DS_MODE_AA_22);
+    sMonoAA = aa;
+}
+
+/* PORT (2026-10-01): anti-aliasing at run time (settings aa=0/1; aa_ab=1 alternates it every 2 perf reports
+ * for a hardware A/B). The AA target is 4x the pixels of the screen and the 60 fps mode draws three frames per
+ * update: hardware v30 spent 7.5 ms per update in C3D_FrameBegin waiting for the GPU. Rebuilt between frames
+ * like the stereo switch (citro3d cannot delete a target inside a frame); no change while 3D is on. */
+static void gfx_3ds_update_aa(void) {
+    if (gGfx3DSMode == GFX_3DS_MODE_STEREO || (gPortAA != 0) == sMonoAA) {
+        return;
+    }
+    { extern void PortDbg(const char*); PortDbg(gPortAA ? "[gfx] anti-aliasing on" : "[gfx] anti-aliasing off"); }
+    C3D_RenderTargetDelete(sTarget);
+    gfx_3ds_mono_config(gPortAA != 0);
+    sTarget = C3D_RenderTargetCreate(sMonoW, sMonoH, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+    C3D_RenderTargetSetOutput(sTarget, GFX_TOP, GFX_LEFT, sMonoFlags);
+    gGfx3DSMode = sMonoMode;
+    {
+        extern void gfx_3ds_drop_readbacks(void);
+        gfx_3ds_drop_readbacks();
+    }
 }
 
 /* Called before C3D_FrameBegin: citro3d breaks (svcBreak) on C3D_RenderTargetDelete inside a frame, and
@@ -293,6 +307,7 @@ static void gfx_3ds_get_dimensions(uint32_t *width, uint32_t *height)
 static void gfx_3ds_handle_events(void)
 {
     if (!aptMainLoop()) {
+        { extern void PortSram_FlushNow(void); PortSram_FlushNow(); } /* a save the game just made */
         /* PORT (2026-09-30): shut graphics down before exit(). exit() unmaps the app heap, and libctru's
          * GSP event thread (stack on that heap) was still running: HOME -> Close crashed with a data
          * abort in gspEventThreadMain (hardware, v17). gfxExit stops that thread. */
@@ -470,6 +485,7 @@ void gfx_3ds_drop_readbacks(void) {
 static void gfx_3ds_capture_frame(void) {
     extern void gfx_texture_cache_invalidate_range(const void* start, uint32_t size);
     static u32* sLin;
+    static size_t sLinSize;
     int W = ViewW(), H = ViewH(), sx = H / 400, sy = W / 240, x, y, ox, oy;
     size_t size = (size_t)W * H * 4;
     uint16_t* dst = (uint16_t*)sCaptureDst;
@@ -478,9 +494,12 @@ static void gfx_3ds_capture_frame(void) {
         return;
     }
     sCaptureDst = NULL;
-    /* sized for the mono target, the larger of the two (stereo reads one 240x400 eye) */
-    if (sLin == NULL && (sLin = linearAlloc((size_t)sMonoW * sMonoH * 4)) == NULL) {
-        return;
+    /* sized for the current target; regrown when anti-aliasing is switched on at run time (gfx_3ds_update_aa) */
+    if (sLin == NULL || sLinSize < size) {
+        if (sLin != NULL) linearFree(sLin);
+        sLin = linearAlloc(size);
+        sLinSize = sLin != NULL ? size : 0;
+        if (sLin == NULL) return;
     }
     C3D_SyncDisplayTransfer((u32*)sTarget->frameBuf.colorBuf, GX_BUFFER_DIM(W, H), sLin, GX_BUFFER_DIM(W, H),
                             GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
@@ -620,6 +639,10 @@ static void gfx_3ds_debug_dump_stereo(void) {
     }
     fclose(f);
     W = sTarget->frameBuf.width, H = sTarget->frameBuf.height;
+    if (sLin != NULL && linearGetSize(sLin) < (u32)W * H * 4) { /* the target grew (3D off, AA on) */
+        linearFree(sLin);
+        sLin = NULL;
+    }
     if (sLin == NULL && (sLin = linearAlloc((size_t)W * H * 4)) == NULL) {
         return;
     }
@@ -659,6 +682,10 @@ static void gfx_3ds_debug_dump_interp(void) {
     }
     if ((sLogic % 200) >= 198) {
         W = sTarget->frameBuf.width, H = sTarget->frameBuf.height;
+        if (sLin != NULL && linearGetSize(sLin) < (u32)W * H * 4 * 2) { /* the target grew */
+            linearFree(sLin);
+            sLin = NULL;
+        }
         if (sLin == NULL) sLin = linearAlloc((size_t)W * H * 4 * 2);
         if (sLin != NULL) {
             char path[64];
@@ -686,11 +713,20 @@ static void gfx_3ds_debug_dump_interp(void) {
 }
 
 u64 gPortPerfGpuWait; /* ticks in C3D_FrameBegin: waiting for the previous frame's GPU work */
+/* PORT PERF (2026-10-02): hardware v34 - anti-aliasing off (half the pixels) did not change the 11-14 ms of
+ * GPU wait per update, so the GPU is not fill-bound. Measured per frame: time inside C3D_FrameEnd (it cleans
+ * the CPU data cache over the whole linear heap when GX_CMDLIST_FLUSH is not passed), and citro3d's timers
+ * processing / drawing timers. */
+u64 gPortPerfFrameEnd;
+int gPortCmdlistFlush;
+float gPortPerfGpuProcMs, gPortPerfGpuDrawMs;
+unsigned gPortPerfGpuFrames;
 
 static bool gfx_3ds_start_frame(void)
 {
     u64 t0;
     gfx_3ds_update_stereo(); /* outside a frame: citro3d refuses to delete targets inside one */
+    gfx_3ds_update_aa();
     t0 = svcGetSystemTick();
     {
         extern volatile unsigned char gPortProf;
@@ -729,7 +765,18 @@ static void gfx_3ds_swap_buffers_begin(void)
      * to skip that, but then the first part of a split command list (the in-frame depth copy splits the
      * frame) reached the GPU unflushed: hardware froze/crashed (v24, v25), Azahar has no cache to show it.
      * Kept as is until every GPU-read buffer, command lists included, is flushed explicitly. */
-    C3D_FrameEnd(0);
+    {
+        u64 t0 = svcGetSystemTick();
+        /* settings cmdlist_flush=1 (experiment, hardware): flush only the command list. Every other buffer the
+         * GPU reads is flushed explicitly (VBO + indices above, textures at upload) and no frame is split any
+         * more (all readbacks run outside frames), which is what froze v24/v25. Off by default until measured. */
+        C3D_FrameEnd(gPortCmdlistFlush ? GX_CMDLIST_FLUSH : 0);
+        gPortPerfFrameEnd += svcGetSystemTick() - t0;
+        /* GPU timers of the frame that finished last (citro3d renderqueue.c): command processing, drawing */
+        gPortPerfGpuProcMs += C3D_GetProcessingTime();
+        gPortPerfGpuDrawMs += C3D_GetDrawingTime();
+        gPortPerfGpuFrames++;
+    }
     sInFrame = false;
     {
         extern int gPortInterpExtra;

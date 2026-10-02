@@ -96,12 +96,13 @@ def capture_n64(tag, hdr, ncap, layout):
     return caps
 
 
-def capture_3ds(ncap):
+def capture_3ds(ncap, keep_save=False):
     SD.build_3ds("-DSTATEDIFF_BOOTFLOW -DPORT_NORMAL_BOOT -Itools/statediff -Ibuild/statediff")
     tour = [("boot", 0, "")] * ncap
-    sav = os.path.join(SD.SD, "save.bin")  # fresh cartridge on the 3DS too
-    if os.path.exists(sav):
-        os.remove(sav)
+    for name in ("save.bin", "save.bak", "save.tmp"):  # fresh cartridge on the 3DS too (save.bak is a fallback)
+        sav = os.path.join(SD.SD, name)
+        if os.path.exists(sav) and not (keep_save and name == "save.bin"):
+            os.remove(sav)
     caps = T.capture_3ds_built(tour)
     sym = RT.Symbolizer(ARM_NM, os.path.join(SD.OUT, "3ds_tour.elf"))
     for i, c in caps.items():
@@ -114,6 +115,8 @@ def main():
     ap.add_argument("name")
     ap.add_argument("--skip-n64", action="store_true")
     ap.add_argument("--skip-3ds", action="store_true")
+    ap.add_argument("--keep-save", action="store_true",
+                    help="3DS: boot with the save.bin already on the emulated SD card (the N64 side stays blank)")
     a = ap.parse_args()
     steps, caps = parse(a.name)
     hdr = write_header(steps, caps)
@@ -123,7 +126,7 @@ def main():
     n64 = T.load_caps(pn) if a.skip_n64 else capture_n64(tag, hdr, len(caps), layout)
     if not a.skip_n64:
         T.save_caps(pn, n64)
-    ds = T.load_caps(p3) if a.skip_3ds else capture_3ds(len(caps))
+    ds = T.load_caps(p3) if a.skip_3ds else capture_3ds(len(caps), a.keep_save)
     if not a.skip_3ds:
         T.save_caps(p3, ds)
     allow = [re.compile(l.split("#")[0].strip()) for l in open(os.path.join(HERE, "allow.txt"))

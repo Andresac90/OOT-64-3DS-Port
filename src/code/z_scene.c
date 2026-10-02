@@ -465,21 +465,6 @@ BAD_RETURN(s32) Scene_CommandEchoSettings(PlayState* play, SceneCmd* cmd) {
 }
 
 BAD_RETURN(s32) Scene_CommandAlternateHeaderList(PlayState* play, SceneCmd* cmd) {
-#ifdef __3DS__
-    {
-        extern void PortDbgX(const char* label, unsigned val);
-        uintptr_t base = (uintptr_t)SEGMENTED_TO_VIRTUAL(cmd->altHeaders.data);
-        PortDbgX("ALT raw altHeaders.data", (unsigned)(uintptr_t)cmd->altHeaders.data);
-        PortDbgX("ALT gSegments2", (unsigned)gSegments[2]);
-        PortDbgX("ALT sceneLayer", (unsigned)gSaveContext.sceneLayer);
-        PortDbgX("ALT list base", (unsigned)base);
-        if ((base >= 0x00100000u && base < 0x0F000000u) || (base >= 0x14000000u && base < 0x40000000u)) {
-            unsigned* L = (unsigned*)base;
-            int i;
-            for (i = 0; i < 8; i++) PortDbgX("ALT list[i]", L[i]);
-        }
-    }
-#endif
     PRINTF("\n[ZU]sceneset age    =[%X]", ((void)0, gSaveContext.save.linkAge));
     PRINTF("\n[ZU]sceneset time   =[%X]", ((void)0, gSaveContext.save.cutsceneIndex));
     PRINTF("\n[ZU]sceneset counter=[%X]", ((void)0, gSaveContext.sceneLayer));

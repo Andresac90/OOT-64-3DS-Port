@@ -1996,7 +1996,12 @@ void Cutscene_NormalizePackedFields(void* scriptPtr) {
                 MemCpy(&cmdEntries, script, sizeof(cmdEntries));
                 script += sizeof(cmdEntries);
                 for (j = 0; j < cmdEntries; j++) {
-                    Cutscene_SwapWords((u32*)script, 2);
+                    u32* p = (u32*)script;
+                    /* PORT (2026-10-01): (unused u8, seqIdPlusOne u8, startFrame u16) like the light setting,
+                     * not two u16: the halfword swap left seqIdPlusOne = 0, so no cutscene ever started or
+                     * stopped its music (the Great Deku Tree's talk was silent on hardware) */
+                    p[0] = CS_BBH(p[0]);                 /* (0, seqId+1, startFrame) */
+                    p[1] = CS_HH(p[1]);                  /* (endFrame, unused) */
                     script += sizeof(CsCmdStartSeq);     /* == CsCmdStopSeq, 0x30 */
                 }
                 break;

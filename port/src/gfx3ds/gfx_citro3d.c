@@ -105,6 +105,22 @@ static int sCurShader = 0;
 static struct GfxCombineConsts sConsts;
 
 static C3D_Tex sTexturePool[4096];
+/* PORT (2026-10-01): in the GPU vertex path texture unit 0 samples in projective mode (s/q, t/q per pixel)
+ * for the screen-linear shading mode (shader_gpu.v.pica); the shader sends q = 1 otherwise, which samples
+ * exactly like 2D. Only unit 0's binding gets the projective type, through a copy of the texture: the pool
+ * keeps 2D (a pool texture with the projective type bound to unit 1 - the two-texture sky blend - sampled
+ * wrong in Azahar: grey title-screen sky, tools/statediff bootflow.py title). */
+extern int gPortGpuVtx, gPortShadeLinear;
+static C3D_Tex sTex0Proj;
+static void texBindUnit(int unit, C3D_Tex* t) {
+    if (unit == 0 && gPortGpuVtx && gPortShadeLinear) {
+        sTex0Proj = *t;
+        sTex0Proj.param = (t->param & ~GPU_TEXTURE_MODE(7)) | GPU_TEXTURE_MODE(GPU_TEX_PROJECTION);
+        C3D_TexBind(0, &sTex0Proj);
+    } else {
+        C3D_TexBind(unit, t);
+    }
+}
 static float sTexturePoolScaleS[4096];
 static float sTexturePoolScaleT[4096];
 static int sTextureIndex;
@@ -634,7 +650,7 @@ static void gfx_citro3d_select_texture(int tile, u32 texture_id) {
     gPortC3dCalls[sTexUnits[tile] == (int)texture_id ? 2 : 3]++;
     if (sRec) recOp(OP_TEX, tile, (int)texture_id, 0, 0);
     if (!(sTexBoundOk[tile] && sTexUnits[tile] == (int)texture_id)) {
-        C3D_TexBind(tile, &sTexturePool[texture_id]);
+        texBindUnit(tile, &sTexturePool[texture_id]);
         sTexBoundOk[tile] = true;
     }
     sCurTex = texture_id;
@@ -736,7 +752,7 @@ static void gfx_citro3d_upload_texture(uint8_t *rgba32_buf, int width, int heigh
         int u;
         for (u = 0; u < 2; u++) { /* bound here: its registers (address, size) must be re-sent */
             if (sTexUnits[u] == sCurTex) {
-                C3D_TexBind(u, &sTexturePool[sCurTex]);
+                texBindUnit(u, &sTexturePool[sCurTex]);
                 sTexBoundOk[u] = true;
             }
         }
@@ -754,7 +770,7 @@ static void gfx_citro3d_set_sampler_parameters(int tile, bool linear_filter, uin
     if (sRec) recOp(OP_SAMPLER, tile, linear_filter, (int)cms, (int)cmt);
     C3D_TexSetFilter(&sTexturePool[sTexUnits[tile]], linear_filter ? GPU_LINEAR : GPU_NEAREST, linear_filter ? GPU_LINEAR : GPU_NEAREST);
     C3D_TexSetWrap(&sTexturePool[sTexUnits[tile]], gfx_cm_to_opengl(cms), gfx_cm_to_opengl(cmt));
-    C3D_TexBind(tile, &sTexturePool[sTexUnits[tile]]); /* the parameters are sent with the binding */
+    texBindUnit(tile, &sTexturePool[sTexUnits[tile]]); /* the parameters are sent with the binding */
     sTexBoundOk[tile] = true;
 }
 
@@ -1029,7 +1045,7 @@ static float sGpuConv, sGpuFog[3];
 #define REC_PALS 4096
 static uint16_t (*sOpPal)[GPU_PAL]; /* recorded palettes (slot ids), OP_GPUPAL v[0] = index, v[1] = count */
 static int sOpPalN;
-static float (*sOpParam)[4];        /* recorded fog/stereo parameters, OP_GPUPARAM v[0] = index */
+static float (*sOpParam)[5];        /* recorded fog/stereo/screen-linear parameters, OP_GPUPARAM v[0] = index */
 static int sOpParamN;
 
 
@@ -1179,15 +1195,15 @@ static void gpuUploadPalette(const uint16_t* slots, int start, int n) {
     }
 }
 
-static void gpuUploadParams(const float p[4]) {
-    /* p: fog mul, fog offset, fog on, stereo convergence */
+static void gpuUploadParams(const float p[5]) {
+    /* p: fog mul, fog offset, fog on, stereo convergence, screen-linear mode */
     if (sFogpLoc >= 0) {
         C3D_FVUnifSet(GPU_VERTEX_SHADER, sFogpLoc, p[0], p[1], p[2], 1.0f / 255.0f);
     }
     if (sStpLoc >= 0) {
         /* y = 1 - t of the replay being drawn (skinned vertices' delta toward the previous frame) */
         float back = sReplayK == 0 ? (2.0f / 3.0f) : sReplayK == 1 ? (1.0f / 3.0f) : 0.0f;
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, sStpLoc, p[3], back, 1.0f, 0.0005f);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sStpLoc, p[3], back, p[4], 0.0005f);
     }
 }
 
@@ -1204,9 +1220,10 @@ void gfx_citro3d_gpu_palette(const uint16_t* slots, int start, int n) {
     gpuUploadPalette(slots, start, n);
 }
 
-/* fog multiplier/offset (already folded for z' = -(z + w) / 2), fog on, stereo convergence */
-void gfx_citro3d_gpu_params(float fogMul, float fogOff, float fogOn, float conv) {
-    float p[4] = { fogMul, fogOff, fogOn, conv };
+/* fog multiplier/offset (already folded for z' = -(z + w) / 2), fog on, stereo convergence, screen-linear
+ * shading (shader_gpu.v.pica) */
+void gfx_citro3d_gpu_params(float fogMul, float fogOff, float fogOn, float conv, float lin) {
+    float p[5] = { fogMul, fogOff, fogOn, conv, lin };
     if (sRec) {
         if (sOpParamN < REC_PALS) {
             memcpy(sOpParam[sOpParamN], p, sizeof(p));
@@ -1300,6 +1317,7 @@ void gfx_citro3d_set_gpu_mode(int gpu) {
     if (gpu != gPortGpuVtx) {
         gPortGpuVtx = gpu;
         gfx_citro3d_setup_mode(gpu);
+        sTexBoundOk[0] = sTexBoundOk[1] = false; /* unit 0's projective type follows the vertex path */
     }
 }
 

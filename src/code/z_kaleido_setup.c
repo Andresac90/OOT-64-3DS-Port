@@ -74,6 +74,15 @@ void KaleidoSetup_Update(PlayState* play) {
     s32 pad;
 #endif
 
+#ifdef PORT_ICONGEN
+    // tools/make_link_icon.py: open the pause menu on the Equipment page once the scene has settled; the
+    // pause code renders Link's preview, which z_kaleido_scope.c then writes to the SD card
+    if (play->gameplayFrames == 60) {
+        input->press.button |= BTN_START;
+        gPortTouchPage = PAUSE_EQUIP;
+    }
+#endif
+
     if (!IS_PAUSED(pauseCtx) && play->gameOverCtx.state == GAMEOVER_INACTIVE &&
         play->transitionTrigger == TRANS_TRIGGER_OFF && play->transitionMode == TRANS_MODE_OFF &&
         gSaveContext.save.cutsceneIndex < CS_INDEX_0 && gSaveContext.nextCutsceneIndex < CS_INDEX_0 &&

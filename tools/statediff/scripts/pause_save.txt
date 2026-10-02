@@ -1,0 +1,8 @@
+# Save from the pause menu: open, B (save prompt), A (yes), then close. Frames from the entry's start.
+0   0      0 0
+80  START  0 0
+83  0      0 0
+120 B      0 0
+123 0      0 0
+150 A      0 0
+153 0      0 0

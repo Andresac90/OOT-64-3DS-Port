@@ -45,12 +45,6 @@ void Audio_StartSequence(u8 seqPlayerIndex, u8 seqId, u8 seqArgs, u16 fadeInDura
     u16 skipTicks;
     s32 pad;
 
-#ifdef __3DS__
-    { extern void PortDbgX(const char*, unsigned);
-      PortDbgX("StartSeq player", (unsigned)seqPlayerIndex);
-      PortDbgX("StartSeq seqId", (unsigned)seqId);
-      PortDbgX("StartSeq disabled", (unsigned)gStartSeqDisabled); }
-#endif
     if (!gStartSeqDisabled || (seqPlayerIndex == SEQ_PLAYER_SFX)) {
         seqArgs &= 0x7F;
         if (DEBUG_FEATURES && (seqArgs == 0x7F)) {

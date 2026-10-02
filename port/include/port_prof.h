@@ -25,6 +25,8 @@ enum {
     PROF_VTX_LIGHT,  /* G_VTX: lighting + texgen part */
     PROF_SUBMIT,     /* citro3d draw call (state upload + command emission) */
     PROF_SPLIT,      /* N64-exact triangle splitting/clipping (gfx_emit_tri_one's slow path) */
+    PROF_GPU_PAL,    /* GPU path: matrix palette lookup/insert per triangle */
+    PROF_GPU_PACK,   /* GPU path: packing vertices new to the batch (uv, colour, palette index) */
     PROF_COUNT
 };
 extern volatile unsigned char gPortProf;

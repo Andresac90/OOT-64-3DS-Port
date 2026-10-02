@@ -2337,15 +2337,7 @@ void Audio_Update(void) {
     /* __3DS__ bring-up stub removed: the audio pipeline (heap, synthesis, C
      * microcode) is now wired, so Audio_Update must run to process sequence
      * commands and activate notes. */
-#ifdef __3DS__
-    { extern void PortDbgX(const char*, unsigned); static unsigned au = 0;
-      if ((++au & 255) == 1) PortDbgX("AU gate func_800FAD34", (unsigned)func_800FAD34()); }
-#endif
     if (func_800FAD34() == 0) {
-#ifdef __3DS__
-        { extern void PortDbgX(const char*, unsigned); static unsigned ab = 0;
-          if ((++ab & 255) == 1) PortDbgX("AU body RUNS seqCmdWr", (unsigned)gAudioCtx.audioBufferParameters.specUnk4); }
-#endif
 #if DEBUG_FEATURES
         sAudioUpdateTaskStart = gAudioCtx.totalTaskCount;
         sAudioUpdateStartTime = osGetTime();

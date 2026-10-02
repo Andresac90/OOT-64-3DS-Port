@@ -1492,7 +1492,7 @@ static uint16_t sLoadSlot[MAX_VERTICES + 4];
 static float sLoadDpos[MAX_VERTICES + 4][3];
 static uint8_t sProbeStale[MAX_VERTICES + 4]; /* 3D border probes: clip position not computed since load */
 static uint8_t sZWStale[MAX_VERTICES + 4];    /* the clip z/w below not computed since load */
-static float sZW[MAX_VERTICES + 4][2];
+static float sZW[MAX_VERTICES + 4][4]; /* out z, w, and (screen-linear mode) out0 = y, out1 = -x */
 static uint32_t* sSlotPalBatch;
 static uint8_t* sSlotPalIdx;
 static uint32_t sIdentPalBatch;
@@ -2052,10 +2052,28 @@ static inline float stereo_offset(float w) {
     return w >= c ? w - c : STEREO_NEAR_SLOPE * (w - c);
 }
 
-#define SUBDIV_MAX_RATIO 1.15f /* w ratio along an edge below which interpolation differences are < ~3.5% */
-#define SUBDIV_MIN_PIXELS 10.0f
-#define SUBDIV_MAX_DEPTH 6
+/* split thresholds (settings split_ratio x100, split_px, split_depth: measurement knobs for the cost/accuracy
+ * trade-off). PORT PERF (2026-10-02): swept against the N64 (tools/statediff, the 7 most shading-sensitive
+ * scenes + perfbench, GPU path): 1.15/10/6 -> 1.5/24/3 cut the split share 6.5% -> 1.6% of the frame and
+ * triangles/frame 5285 -> 3969, at +0.5 average error in Jabu-Jabu and +0.1 in the Grottos, the rest equal.
+ * 2.0/32/2 (Jabu-Jabu +2.8, all scenes worse) is past the knee. */
+float gPortSplitRatio = 1.15f;
+float gPortSplitMinPx = 10.0f;
+int gPortSplitDepth = 6;
+/* full tour (101 scenes): 1.5/24/3 raised the average error 5.917 -> 5.986 (Castle Courtyard +1.8): the
+ * coarse thresholds are used only while frame skip is on (an Old 3DS: CPU-bound), 3ds_main.c */
+void gfx_split_thresholds(int coarse) {
+    gPortSplitRatio = coarse ? 1.5f : 1.15f;
+    gPortSplitMinPx = coarse ? 24.0f : 10.0f;
+    gPortSplitDepth = coarse ? 3 : 6;
+}
+#define SUBDIV_MAX_RATIO gPortSplitRatio
+#define SUBDIV_MIN_PIXELS gPortSplitMinPx
+#define SUBDIV_MAX_DEPTH gPortSplitDepth
 #define SUBDIV_FLAT_RANGE (2.5f / 255.0f) /* shade/fog spread below which splitting changes nothing visible */
+/* settings.txt shade_split=0: no splitting for the N64's screen-linear shade/fog interpolation (the GPU
+ * interpolates perspective-correctly, like PC ports). Near-plane and guard-band handling stay. */
+int gPortShadeSplit = 1;
 
 #ifdef __3DS__
 /* PORT PERF (2026-09-30): indexed batches (gfx_citro3d.c). Each vertex is written once per batch straight
@@ -2317,7 +2335,7 @@ static void gfx_emit_tri_one(const PVtx* a, const PVtx* b, const PVtx* c, bool z
             crange = hi - lo > crange ? hi - lo : crange;
         }
         for (int e = 0; e < 3; e++) {
-            big |= crange > SUBDIV_FLAT_RANGE && pvtx_edge_score(t[e], t[(e + 1) % 3]) > 0.0f;
+            big |= gPortShadeSplit && crange > SUBDIV_FLAT_RANGE && pvtx_edge_score(t[e], t[(e + 1) % 3]) > 0.0f;
             near |= t[e]->z < -t[e]->w;
         }
         if (!big && !near) {
@@ -2440,7 +2458,7 @@ typedef struct {
     uint8_t pad[3];
 } GpuVtx;          /* 56 bytes = GPU_STRIDE in gfx_citro3d.c */
 extern void* gfx_citro3d_gpu_vbo(int** pos, u32* cap, float scale[4]);
-extern void gfx_citro3d_gpu_params(float fogMul, float fogOff, float fogOn, float conv);
+extern void gfx_citro3d_gpu_params(float fogMul, float fogOff, float fogOn, float conv, float lin);
 extern void gfx_citro3d_gpu_cull(int mode);
 static GpuVtx* sGpuVbo;
 static int* sGpuVboPos;
@@ -2450,6 +2468,18 @@ static uint32_t sGpuVboBatch;
 static int sGpuCull = -1, sGpuFogOn = -1;
 static int16_t sGpuFogMul, sGpuFogOff;
 static float sGpuConvSet = -1.0f;
+/* PORT (2026-10-01): screen-linear shading (shader_gpu.v.pica stp.z): the GPU interpolates shade and fog
+ * linearly on the screen like the RDP, so the CPU split is only needed for draws that use texture unit 1
+ * (no projective mode there). Matches the split in Azahar (101-scene tour 5.92 vs 5.92), but OFF by default:
+ * on a New 3DS (hardware v29) textures smeared and streaked with it - the projective texture coordinates
+ * (s = u / w, q = 1 / w) lose precision in the real PICA's interpolators. settings.txt shade_linear=1. */
+int gPortShadeLinear = 0;
+static int sGpuLin = -1;
+static void gpu_send_params(void) {
+    /* N64 fog = z / w * mul + off; the shader sees z' = -(z + w) / 2: z / w = -2 z'/w - 1 */
+    gfx_citro3d_gpu_params(-2.0f * rsp.fog_mul, (float)rsp.fog_offset - rsp.fog_mul, (float)sGpuFogOn, sGpuConvSet,
+                           sGpuLin > 0 ? 1.0f : 0.0f);
+}
 
 /* per-triangle draw state the GPU path owns: cull mode, fog, stereo convergence (rectangles change the
  * geometry mode directly, so this is checked per triangle, not only after state commands) */
@@ -2467,9 +2497,8 @@ static int gpu_tri_state(void) {
     }
     if (fogOn != sGpuFogOn || conv != sGpuConvSet || (fogOn && (rsp.fog_mul != sGpuFogMul || rsp.fog_offset != sGpuFogOff))) {
         gfx_flush();
-        /* N64 fog = z / w * mul + off; the shader sees z' = -(z + w) / 2: z / w = -2 z'/w - 1 */
-        gfx_citro3d_gpu_params(-2.0f * rsp.fog_mul, (float)rsp.fog_offset - rsp.fog_mul, (float)fogOn, conv);
         sGpuFogOn = fogOn, sGpuConvSet = conv, sGpuFogMul = rsp.fog_mul, sGpuFogOff = rsp.fog_offset;
+        gpu_send_params();
     }
     return 1;
 }
@@ -2519,10 +2548,45 @@ static inline void gpu_uv(const struct LoadedVertex* lv, float uv[2][2]) {
 
 /* a piece of a triangle split/clipped on the CPU (gfx_emit_tri), drawn in clip space via the identity
  * palette entry with its shade/fog precomputed (dpos.w = 1) */
+/* PORT (2026-10-01): the source triangle of the pieces gpu_emit_cpu is cutting (set while it runs). Every
+ * piece vertex (split midpoints, guard-band and stereo-plane intersections) is an affine combination of the
+ * three source vertices in clip space, hence the same combination in model space: written in model space with
+ * the source's palette entry, a piece moves with the camera in the 60 fps in-between frames like the rest of
+ * the triangle. (In clip space with the identity entry, pieces stayed where the logic frame put them while
+ * their neighbours moved: floor edges showed whenever Link walked - hardware v29/v30.) */
+static int sPieceSrcOk;
+static uint16_t sPieceSlot;
+static float sPieceClip[3][3];  /* x, y, w of the source vertices (the PVtx space) */
+static float sPieceModel[3][3]; /* their model-space positions */
+static float sPieceDpos[3][3];  /* their skinned deltas toward the previous frame */
+
 static void gpu_pack_clip_tri(const PVtx* t[3]) {
-    int i, ix[3], pal = gpu_pal_index(GPU_SLOT_IDENTITY);
+    int i, ix[3], pal = gpu_pal_index(GPU_SLOT_IDENTITY), spal = -1;
+    float wgt[3][3];
     if (pal < 0) {
         pal = gpu_pal_add(GPU_SLOT_IDENTITY); /* the caller made room */
+    }
+    if (sPieceSrcOk) {
+        /* weights of each piece vertex: solve p = a A + b B + c C in (x, y, w) (Cramer's rule) */
+        const float(*m)[3] = sPieceClip;
+        float det = m[0][0] * (m[1][1] * m[2][2] - m[2][1] * m[1][2]) - m[1][0] * (m[0][1] * m[2][2] - m[2][1] * m[0][2]) +
+                    m[2][0] * (m[0][1] * m[1][2] - m[1][1] * m[0][2]);
+        spal = gpu_pal_index(sPieceSlot);
+        if (fabsf(det) < 1e-9f || spal < 0) {
+            spal = -1;
+        } else {
+            float inv = 1.0f / det;
+            for (i = 0; i < 3; i++) {
+                float px = t[i]->x, py = t[i]->y, pw = t[i]->w;
+                /* columns: A = m[0], B = m[1], C = m[2] (each x, y, w) */
+                wgt[i][0] = (px * (m[1][1] * m[2][2] - m[2][1] * m[1][2]) - m[1][0] * (py * m[2][2] - m[2][1] * pw) +
+                             m[2][0] * (py * m[1][2] - m[1][1] * pw)) * inv;
+                wgt[i][1] = (m[0][0] * (py * m[2][2] - m[2][1] * pw) - px * (m[0][1] * m[2][2] - m[2][1] * m[0][2]) +
+                             m[2][0] * (m[0][1] * pw - py * m[0][2])) * inv;
+                wgt[i][2] = (m[0][0] * (m[1][1] * pw - py * m[1][2]) - m[1][0] * (m[0][1] * pw - py * m[0][2]) +
+                             px * (m[0][1] * m[1][2] - m[1][1] * m[0][2])) * inv;
+            }
+        }
     }
     if (sGpuVboBatch != sBatchId) {
         sGpuVbo = (GpuVtx*)gfx_citro3d_gpu_vbo(&sGpuVboPos, &sGpuVboCap, sGpuScale);
@@ -2537,18 +2601,28 @@ static void gpu_pack_clip_tri(const PVtx* t[3]) {
         }
         ix[i] = (*sGpuVboPos)++;
         d = &sGpuVbo[ix[i]];
-        d->pos[0] = p->x, d->pos[1] = p->y, d->pos[2] = p->z, d->pos[3] = p->w;
+        if (spal >= 0) { /* model space with the source's palette entry (z clamps at the near plane in the shader) */
+            for (k = 0; k < 3; k++) {
+                d->pos[k] = wgt[i][0] * sPieceModel[0][k] + wgt[i][1] * sPieceModel[1][k] + wgt[i][2] * sPieceModel[2][k];
+                d->dpos[k] = wgt[i][0] * sPieceDpos[0][k] + wgt[i][1] * sPieceDpos[1][k] + wgt[i][2] * sPieceDpos[2][k];
+            }
+            d->pos[3] = 1.0f;
+            d->dpos[3] = 1.0f; /* shade alpha already holds the N64 fog factor */
+            d->idx = (uint8_t)spal;
+        } else {
+            d->pos[0] = p->x, d->pos[1] = p->y, d->pos[2] = p->z, d->pos[3] = p->w;
+            d->dpos[0] = d->dpos[1] = d->dpos[2] = 0.0f;
+            d->dpos[3] = 1.0f;
+            d->idx = (uint8_t)pal;
+        }
         d->uv0[0] = p->uv[0][0] * sGpuScale[0];
         d->uv0[1] = 1 - p->uv[0][1] * sGpuScale[1];
         d->uv1[0] = p->uv[1][0] * sGpuScale[2];
         d->uv1[1] = 1 - p->uv[1][1] * sGpuScale[3];
-        d->dpos[0] = d->dpos[1] = d->dpos[2] = 0.0f;
-        d->dpos[3] = 1.0f;
         for (k = 0; k < 4; k++) {
             float c = p->c[k] * 255.0f + 0.5f;
             d->c[k] = (uint8_t)(c < 0.0f ? 0.0f : c > 255.0f ? 255.0f : c);
         }
-        d->idx = (uint8_t)pal;
     }
     if (!gfx_citro3d_idx_push(ix[0], ix[1], ix[2])) {
         return;
@@ -2568,6 +2642,8 @@ static inline const float* gpu_vtx_zw(int slot, uint16_t sl) {
         float w = rows[3][0] * lv->x + rows[3][1] * lv->y + rows[3][2] * lv->z + rows[3][3];
         sZW[slot][0] = -2.0f * o2 - w; /* out.z = -(z + w) / 2 */
         sZW[slot][1] = w;
+        sZW[slot][2] = rows[0][0] * lv->x + rows[0][1] * lv->y + rows[0][2] * lv->z + rows[0][3];
+        sZW[slot][3] = rows[1][0] * lv->x + rows[1][1] * lv->y + rows[1][2] * lv->z + rows[1][3];
         sZWStale[slot] = 0;
     }
     return sZW[slot];
@@ -2630,20 +2706,46 @@ static void gpu_emit_cpu(const uint8_t vidx[3], const uint16_t sl[3]) {
             }
         }
     }
-    if (gpu_pal_index(GPU_SLOT_IDENTITY) < 0 && sGpuPalN >= GPU_PAL) {
-        gfx_flush();
-        sGpuPalEpoch++;
-        sGpuPalN = sGpuPalSent = 0;
+    sPieceSrcOk = sl[0] == sl[1] && sl[1] == sl[2] && sl[0] != GPU_SLOT_IDENTITY;
+    if (sPieceSrcOk) {
+        for (i = 0; i < 3; i++) {
+            const struct LoadedVertex* lv = &rsp.loaded_vertices[vidx[i]];
+            sPieceClip[i][0] = pv[i].x, sPieceClip[i][1] = pv[i].y, sPieceClip[i][2] = pv[i].w;
+            sPieceModel[i][0] = lv->x, sPieceModel[i][1] = lv->y, sPieceModel[i][2] = lv->z;
+            sPieceDpos[i][0] = sLoadDpos[vidx[i]][0], sPieceDpos[i][1] = sLoadDpos[vidx[i]][1];
+            sPieceDpos[i][2] = sLoadDpos[vidx[i]][2];
+        }
+        sPieceSlot = sl[0];
+    }
+    {
+        int need = (gpu_pal_index(GPU_SLOT_IDENTITY) < 0) + (sPieceSrcOk && gpu_pal_index(sl[0]) < 0);
+        if (sGpuPalN + need > GPU_PAL) {
+            gfx_flush();
+            sGpuPalEpoch++;
+            sGpuPalN = sGpuPalSent = 0;
+        }
     }
     gpu_pal_add(GPU_SLOT_IDENTITY);
+    if (sPieceSrcOk) {
+        gpu_pal_add(sl[0]);
+    }
     sCurVidx = NULL;
     gfx_emit_tri(&pv[0], &pv[1], &pv[2], sTC.z_is_from_0_to_1);
+    sPieceSrcOk = 0;
 }
 
 u32 gPortGpuRoute[4]; /* perf report: GPU-path triangles tested / behind the eye / near plane / split on the CPU */
 static void gpu_emit_tri(const uint8_t vidx[3]) {
     uint16_t sl[3];
     int i, j, need = 0, ix[3];
+    {
+        int lin = gPortShadeLinear && gPortShadeSplit && !sTC.used_textures[1];
+        if (lin != sGpuLin) {
+            gfx_flush();
+            sGpuLin = lin;
+            gpu_send_params();
+        }
+    }
     for (i = 0; i < 3; i++) {
         sl[i] = vidx[i] >= MAX_VERTICES ? GPU_SLOT_IDENTITY : sLoadSlot[vidx[i]];
     }
@@ -2659,7 +2761,17 @@ static void gpu_emit_tri(const uint8_t vidx[3]) {
         lo = c[1] < lo ? c[1] : lo;
         int cpu = lo <= 0.0f || a[0] < -a[1] || b[0] < -b[1] || c[0] < -c[1];
         { extern u32 gPortGpuRoute[4]; gPortGpuRoute[0]++; if (lo <= 0.0f) gPortGpuRoute[1]++; else if (cpu) gPortGpuRoute[2]++; }
-        if (!cpu && hi >= SUBDIV_MAX_RATIO * lo) {
+        if (!cpu && sGpuLin > 0) {
+            /* screen-linear mode: the RSP clips triangles that leave the guard band (x, y beyond +-ratio * w)
+             * and interpolates the new edge vertices in clip space - the CPU clipper does exactly that */
+            float r = rsp.clip_ratio ? (float)rsp.clip_ratio : 2.0f;
+            const float* q[3] = { a, b, c };
+            for (j = 0; j < 3 && !cpu; j++) {
+                float rw = r * q[j][1];
+                cpu = q[j][2] > rw || q[j][2] < -rw || q[j][3] > rw || q[j][3] < -rw;
+            }
+        }
+        if (!cpu && gPortShadeSplit && !sGpuLin && hi >= SUBDIV_MAX_RATIO * lo) {
             /* shade/fog (almost) equal at the three vertices: interpolation-independent, no split needed */
             int kk, flat = 1;
             int fog = (rsp.geometry_mode & G_FOG) != 0;
@@ -2716,6 +2828,7 @@ static void gpu_emit_tri(const uint8_t vidx[3]) {
             return;
         }
     }
+    PROF_SET(PROF_GPU_PAL);
     for (i = 0; i < 3; i++) {
         int dup = 0;
         for (j = 0; j < i; j++) dup |= sl[j] == sl[i];
@@ -2728,6 +2841,7 @@ static void gpu_emit_tri(const uint8_t vidx[3]) {
     } else if (buf_vbo_num_tris == MAX_BUFFERED) {
         gfx_flush();
     }
+    PROF_SET(PROF_GPU_PACK);
     if (sGpuVboBatch != sBatchId) { /* textures are bound per batch: fetch once */
         sGpuVbo = (GpuVtx*)gfx_citro3d_gpu_vbo(&sGpuVboPos, &sGpuVboCap, sGpuScale);
         sGpuVboBatch = sBatchId;
@@ -4274,7 +4388,7 @@ void gfx_start_frame(void) {
     sPVState++; /* the stereo convergence changes per frame */
 #ifdef __3DS__
     sGpuSlotN = 0, sGpuSlotCur = -1; /* GPU path: slots are per frame; draw state re-sent on first use */
-    sGpuCull = -1, sGpuFogOn = -1, sGpuConvSet = -1.0f;
+    sGpuCull = -1, sGpuFogOn = -1, sGpuConvSet = -1.0f, sGpuLin = -1;
     sGpuPalN = sGpuPalSent = 0, sGpuPalEpoch++;
 #endif
 #ifdef __3DS__

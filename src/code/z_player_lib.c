@@ -2080,6 +2080,10 @@ void Player_DrawPauseImpl(PlayState* play, void* gameplayKeep, void* linkObject,
     CLOSE_DISPS(play->state.gfxCtx, "../z_player_lib.c", 3288);
 }
 
+#ifdef PORT_ICONGEN
+u16 gPortIconGenBuf[PAUSE_EQUIP_PLAYER_WIDTH * 2 * PAUSE_EQUIP_PLAYER_HEIGHT * 2] __attribute__((aligned(8)));
+#endif
+
 void Player_DrawPause(PlayState* play, u8* segment, SkelAnime* skelAnime, Vec3f* pos, Vec3s* rot, f32 scale, s32 sword,
                       s32 tunic, s32 shield, s32 boots) {
     static Vec3f eye = { 0.0f, 0.0f, -400.0f };
@@ -2112,6 +2116,16 @@ void Player_DrawPause(PlayState* play, u8* segment, SkelAnime* skelAnime, Vec3f*
     for (i = 0; i < skelAnime->limbCount; i++) {
         *destTable++ = *srcTable++;
     }
+
+#ifdef PORT_ICONGEN
+    // tools/make_link_icon.py: the same preview at twice the size, for a sharp HOME Menu icon. Only this one is
+    // drawn: Player_DrawPauseImpl's viewport is static, a second call in the same frame would overwrite it.
+    Player_DrawPauseImpl(play, PAUSE_PLAYER_SEGMENT_GAMEPLAY_KEEP_START(segment),
+                         PAUSE_PLAYER_SEGMENT_LINK_OBJECT(segment), skelAnime, pos, rot, scale, sword, tunic, shield,
+                         boots, PAUSE_EQUIP_PLAYER_WIDTH * 2, PAUSE_EQUIP_PLAYER_HEIGHT * 2, &eye, &at, 60.0f,
+                         gPortIconGenBuf, play->state.gfxCtx->curFrameBuffer);
+    return;
+#endif
 
     Player_DrawPauseImpl(play, PAUSE_PLAYER_SEGMENT_GAMEPLAY_KEEP_START(segment),
                          PAUSE_PLAYER_SEGMENT_LINK_OBJECT(segment), skelAnime, pos, rot, scale, sword, tunic, shield,

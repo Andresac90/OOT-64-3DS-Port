@@ -617,11 +617,6 @@ s32 AudioLoad_SyncInitSeqPlayerInternal(s32 playerIdx, s32 seqId, s32 arg2) {
     s32 numFonts;
     s32 fontId;
 
-#ifdef __3DS__
-    { extern void PortDbgX(const char*, unsigned);
-      PortDbgX("SISPI enter seqId", (unsigned)seqId);
-      PortDbgX("SISPI numSequences", (unsigned)gAudioCtx.numSequences); }
-#endif
     if (seqId >= gAudioCtx.numSequences) {
         return 0;
     }
@@ -639,12 +634,6 @@ s32 AudioLoad_SyncInitSeqPlayerInternal(s32 playerIdx, s32 seqId, s32 arg2) {
     }
 
     seqData = AudioLoad_SyncLoadSeq(seqId);
-#ifdef __3DS__
-    { extern void PortDbgX(const char*, unsigned);
-      PortDbgX("SeqInit seqId", (unsigned)seqId);
-      PortDbgX("SeqInit fontId", (unsigned)fontId);
-      PortDbgX("SeqInit seqData", (unsigned)(uintptr_t)seqData); }
-#endif
     if (seqData == NULL) {
         return 0;
     }
