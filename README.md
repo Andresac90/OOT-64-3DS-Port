@@ -131,7 +131,7 @@ set by editing that file (one `name=value` per line):
 | `hud` | 1 | top-screen HUD on/off |
 | `fps60` | 1 | frame interpolation: 0 = off (20 fps, like the N64) |
 | `frameskip` | automatic | 1 = skip drawing an update when the game falls behind (default on Old 3DS), 0 = never |
-| `aa` | 1 | anti-aliasing (smoother edges, more GPU work); 0 = off |
+| `aa` | 0 | 1 = anti-aliasing (smoother edges, but more than twice the GPU work: about 38 instead of 53 frames per second on New 3DS) |
 | `gpu_vtx` | 1 | vertex processing on the GPU (faster on both consoles); 0 = on the CPU |
 | `prof` | 0 | 1 = per-stage CPU profile in `boot.log` (for bug reports about speed) |
 

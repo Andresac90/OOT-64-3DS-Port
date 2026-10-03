@@ -131,7 +131,8 @@ static void Port3ds_SaveSettings(void) {
             if (sCmdflushAB) fprintf(f, "cmdflush_ab=1\n");
             { extern int gPortPresentGate; if (!gPortPresentGate && !sPresentAB) fprintf(f, "present_gate=0\n"); }
             if (sPresentAB) fprintf(f, "present_ab=1\n");
-            { extern int gPortAA; if (!gPortAA && !sAaAB) fprintf(f, "aa=0\n"); }
+            { extern int gPortFlip; if (!gPortFlip) fprintf(f, "flip=0\n"); }
+            { extern int gPortAA; if (gPortAA && !sAaAB) fprintf(f, "aa=1\n"); }
             { extern int gPortGpuVtx; if (!gPortGpuVtx && !sGpuAB) fprintf(f, "gpu_vtx=0\n"); }
             if (sInterp != 1) fprintf(f, "fps60=%d\n", sInterp);
             if (sFrameSkip >= 0) fprintf(f, "frameskip=%d\n", sFrameSkip);
@@ -182,6 +183,8 @@ static void Port3ds_LoadSettings(void) {
         if (sscanf(line, "cmdflush_ab=%d", &v) == 1) { sCmdflushAB = v != 0; }
         if (sscanf(line, "present_gate=%d", &v) == 1) { extern int gPortPresentGate; gPortPresentGate = v != 0; }
         if (sscanf(line, "present_ab=%d", &v) == 1) { sPresentAB = v != 0; }
+        if (sscanf(line, "flip=%d", &v) == 1) { extern int gPortFlip; gPortFlip = v != 0; }
+        if (sscanf(line, "flipdump=%d", &v) == 1) { extern int gPortFlipDump; gPortFlipDump = v != 0; }
         if (sscanf(line, "tjdump=%d", &v) == 1) { extern int gPortTjDumpFrame; gPortTjDumpFrame = v; }
         if (sscanf(line, "aa_ab=%d", &v) == 1) {
             sAaAB = v != 0;
@@ -359,8 +362,38 @@ static void DrawTextS(int x, int y, const char* s, u16 c, int scale) {
 static void DrawText(int x, int y, const char* s, u16 c) {
     DrawTextS(x, y, s, c, 1);
 }
+/* the columns a console-font glyph actually draws (first, last; -1 for a blank) */
+static void GlyphInk(unsigned char ch, int* first, int* last) {
+    PrintConsole* con = consoleGetDefault();
+    int r, col, bits = 0;
+    *first = *last = -1;
+    if (ch < con->font.asciiOffset || ch >= con->font.asciiOffset + con->font.numChars) return;
+    for (r = 0; r < 8; r++) bits |= con->font.gfx[(ch - con->font.asciiOffset) * 8 + r];
+    for (col = 0; col < 8; col++) {
+        if (bits & (0x80 >> col)) {
+            if (*first < 0) *first = col;
+            *last = col;
+        }
+    }
+}
+/* centered on the pixels drawn, not on 8-pixel cells; a label wider than a 56-pixel pad's inside ("OCARINA":
+ * 7 x 8 = 56 px spilled over the stone border, hardware v41) closes up to 7 pixels per letter (the console font
+ * leaves one column blank) */
 static void DrawTextC(int cx, int y, const char* s, u16 c) {
-    DrawText(cx - (int)strlen(s) * 4, y, s, c);
+    int n = (int)strlen(s), adv = n * 8 > 48 ? 7 : 8, i, lo = 1 << 20, hi = -1, f, l;
+    char one[2] = { 0, 0 };
+    for (i = 0; i < n; i++) {
+        GlyphInk((unsigned char)s[i], &f, &l);
+        if (f >= 0) {
+            lo = i * adv + f < lo ? i * adv + f : lo;
+            hi = i * adv + l > hi ? i * adv + l : hi;
+        }
+    }
+    if (hi < 0) return;
+    for (i = 0; i < n; i++) {
+        one[0] = s[i];
+        DrawText(cx - (hi - lo + 1) / 2 - lo + i * adv, y, one, c);
+    }
 }
 /* 32x32 RGBA32 item icon at size px (nearest), alpha-blended; dim = disabled button */
 static void DrawIcon(int x, int y, const u8* rgba, int size, int dim) {
@@ -451,7 +484,7 @@ static void DrawPad(int i) {
         DrawTextC(cx, p->y + 6, "SCREEN", COL_TEXT);
         DrawTextC(cx, p->y + 19, gPortWidescreen ? "WIDE" : "4:3", PRGB(255, 230, 120));
     } else if (i == P_HUD) {
-        DrawTextC(cx, p->y + 5, "TOP HUD", COL_TEXT);
+        DrawTextC(cx, p->y + 5, "HUD", COL_TEXT); /* the HUD on the top screen ("TOP HUD" did not fit) */
         DrawTextC(cx, p->y + 18, gPortHudTop ? "ON" : "OFF", PRGB(255, 230, 120));
     } else {
         /* tab: bold label */
@@ -951,6 +984,7 @@ static double Port3ds_NowMs(void) {
     return (double)svcGetSystemTick() / (SYSCLOCK_ARM11 / 1000.0);
 }
 static double sLast = 0.0; /* when the current update started (retrace-aligned with the present gate) */
+int gPortInterpOn; /* this update shows in-between frames (z_actor.c draws actors a margin past the edges) */
 /* PORT (2026-10-01): frame skip (PortGfx_RunTask). sBehindMs = how far the game is behind the N64's
  * schedule of one update every R_UPDATE_RATE retraces; kept only while frame skip is on (sSkipOn). */
 static double sBehindMs;
@@ -965,6 +999,16 @@ static int Port3ds_UpdateRate(void) {
     return rate;
 }
 extern void Port3ds_VBlankSeen(void); /* gfx_3ds.c: vblank clock anchor for the present gate */
+/* PORT PERF (2026-10-03): with the flip presenter (gfx_3ds.c) every frame carries the vblank it is due at: the
+ * update's frames are spread over its R_UPDATE_RATE vblanks starting R_UPDATE_RATE vblanks after the update's
+ * start (one update of latency: the first frame has a whole update period to be drawn) */
+static void Port3ds_SetSlot(int j, int frames, int rate) {
+    extern double Port3ds_VBlankAtOrBefore(double tMs);
+    extern void Port3ds_SetFrameSlot(double slotMs);
+    const double kRetraceMs = 1000.0 / 59.831;
+    double base = Port3ds_VBlankAtOrBefore(sLast + 1.0);
+    Port3ds_SetFrameSlot(sLast == 0.0 ? 0.0 : base + (rate + (rate * j + frames / 2) / frames) * kRetraceMs);
+}
 /* wait whole retraces (pumping audio on each) until `targetMs` is under one retrace away */
 static void Port3ds_WaitUntil(double targetMs) {
     extern void Port3ds_PumpAudio(void);
@@ -1183,6 +1227,7 @@ static unsigned sReplayBrokenCnt;
  * a capture or readback pending, right after a skipped frame) - the averages alone mix scene loads with
  * steady play */
 static unsigned sReplayHist[3], sReplayNoChoice;
+static unsigned sReplayDropped; /* in-between frames dropped because the update's first frame was late */
 static u64 sPerfInterp;             /* ticks in in-between passes */
 static u32 sInterpFrames;           /* in-between frames drawn */
 static double sInterpElapsedSum;    /* logic time before the passes, ms (summed per report) */
@@ -1284,6 +1329,7 @@ void PortGfx_RunTask(OSTask* task) {
         }
     }
     if (!skip) {
+        Port3ds_SetSlot(0, (sInterp && sReplayN > 0) ? sReplayN + 1 : 1, Port3ds_UpdateRate());
         gfx_start_frame();
         gfx_run((Gfx*)task->t.data_ptr);
     }
@@ -1323,10 +1369,33 @@ void PortGfx_RunTask(OSTask* task) {
             sReplayN = 0; /* drawn directly (an off-screen render, a full buffer): no in-between frames */
             sReplayBrokenCnt++;
         }
+        {
+            /* PORT PERF (2026-10-03): the update's frames must end on its third vblank, or the next update starts
+             * a retrace late and the game slows (hardware v41: 18.5-19.2 updates/s, the logic frame ~30-33 ms
+             * after the update's start against a ~33 ms deadline). The frame just submitted is the update's
+             * first; each retrace it reaches the screen past the second vblank costs an in-between frame - the
+             * t = 2/3 one first (the logic frame, t = 1, always shows) - instead of a retrace of game time. */
+            extern int gPortPresentGate;
+            extern double Port3ds_PredictShownMs(void);
+            double shown = Port3ds_PredictShownMs();
+            extern int Port3ds_FlipActive(void);
+            if (gPortPresentGate && !Port3ds_FlipActive() && sReplayN > 0 && shown > 0.0 && rate == 3) {
+                int late = (int)((shown - (sLast + 2.0 * kRetraceMs) + 1.5) / kRetraceMs);
+                if (late > 0) {
+                    sReplayDropped += late < sReplayN ? late : sReplayN;
+                    sReplayN = late < sReplayN ? sReplayN - late : 0;
+                }
+            }
+        }
         for (i = 0; i < sReplayN; i++) {
             u64 t0;
+            extern int Port3ds_FlipActive(void);
             PROF_SET(PROF_PACE);
-            Port3ds_WaitUntil(sLast + (rate * kRetraceMs) * (i + 1) / (sReplayN + 1));
+            if (Port3ds_FlipActive()) {
+                Port3ds_SetSlot(i + 1, sReplayN + 1, rate); /* drawn now, shown at its vblank */
+            } else {
+                Port3ds_WaitUntil(sLast + (rate * kRetraceMs) * (i + 1) / (sReplayN + 1));
+            }
             u64 gateR = gPortGateTicksTotal;
             t0 = svcGetSystemTick();
             gfx_replay_frame(2 - sReplayN + 1 + i);
@@ -1338,6 +1407,7 @@ void PortGfx_RunTask(OSTask* task) {
         }
         tC = svcGetSystemTick();
     }
+    gPortInterpOn = sInterp && !skip && sReplayN > 0; /* for the NEXT update's actor drawing (z_actor.c) */
     PROF_SET(PROF_PACE);
     Port3ds_PaceFrame();
     PROF_SET(PROF_GAME);
@@ -1408,6 +1478,18 @@ void PortGfx_RunTask(OSTask* task) {
           PortDbgX("perf updates with 1 in-between frame", sReplayHist[1]);
           PortDbgX("perf updates with 0 in-between (budget)", sReplayHist[0]);
           PortDbgX("perf updates without interp choice", sReplayNoChoice);
+          PortDbgX("perf in-between frames dropped (first frame late)", sReplayDropped);
+          { /* gfx_3ds.c flip presenter: exact counts */
+              extern unsigned gPortPerfFlipShown, gPortPerfFlipSkipped, gPortPerfFlipRepeats;
+              extern int Port3ds_FlipActive(void);
+              PortDbgX("perf flip presenter", (unsigned)Port3ds_FlipActive());
+              { extern void Port3ds_FlipDump(void); Port3ds_FlipDump(); }
+              PortDbgX("perf flip frames shown/s x10", (unsigned)((u64)gPortPerfFlipShown * 10000ull / (t1 - t0 ? t1 - t0 : 1)));
+              PortDbgX("perf flip frames skipped (late)", gPortPerfFlipSkipped);
+              PortDbgX("perf flip refreshes repeating a frame", gPortPerfFlipRepeats);
+              gPortPerfFlipShown = gPortPerfFlipSkipped = gPortPerfFlipRepeats = 0;
+          }
+          sReplayDropped = 0;
           sLateUpdates = sReplayNoChoice = 0;
           sReplayHist[0] = sReplayHist[1] = sReplayHist[2] = 0;
           PortDbgX("perf frame skip on", (unsigned)sSkipOn);

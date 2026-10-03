@@ -2921,6 +2921,31 @@ s32 Actor_CullingVolumeTest(PlayState* play, Actor* actor, Vec3f* projPos, f32 p
     return false;
 }
 
+#ifdef __3DS__
+/* PORT (2026-10-03): with 60 fps interpolation the frames shown trail the camera the culling test used by up to
+ * one update (they blend from the previous update's camera), so while the camera turns fast an actor near the edge
+ * is culled for the new view but still in the frames on screen, and popped (hardware v41, widescreen and 3D). Such
+ * actors are still DRAWN when they are within a margin past the edge; ACTOR_FLAG_INSIDE_CULLING_VOLUME, which game
+ * logic reads, keeps its own test. */
+static s32 Actor_PortDrawMargin(PlayState* play, Actor* actor) {
+    extern int gPortWidescreen, gPortInterpOn;
+    extern float gPortStereoSep, gPortStereoConv;
+    Vec3f* projPos = &actor->projectedPos;
+    f32 invW, limitX;
+    const f32 margin = 0.35f;
+
+    if (!gPortInterpOn || (projPos->z <= -actor->cullingVolumeScale) ||
+        (projPos->z >= (actor->cullingVolumeDistance + actor->cullingVolumeScale))) {
+        return false;
+    }
+    invW = (actor->projectedW < 1.0f) ? 1.0f : 1.0f / actor->projectedW;
+    limitX = (gPortWidescreen ? 1.25f : 1.0f) + gPortStereoSep * (1.0f + gPortStereoConv * invW) + margin;
+    return (((fabsf(projPos->x) - actor->cullingVolumeScale) * invW) < limitX) &&
+           (((projPos->y + actor->cullingVolumeDownward) * invW) > -1.0f - margin) &&
+           (((projPos->y - actor->cullingVolumeScale) * invW) < 1.0f + margin);
+}
+#endif
+
 /**
  * Iterates through all category lists to draw every actor.
  *
@@ -2990,7 +3015,11 @@ void Actor_DrawAll(PlayState* play, ActorContext* actorCtx) {
 
             if (!DEBUG_FEATURES || (HREG(64) != 1) || ((HREG(65) != -1) && (HREG(65) != HREG(66))) || (HREG(71) == 0)) {
                 if ((actor->init == NULL) && (actor->draw != NULL) &&
-                    (actor->flags & (ACTOR_FLAG_DRAW_CULLING_DISABLED | ACTOR_FLAG_INSIDE_CULLING_VOLUME))) {
+                    ((actor->flags & (ACTOR_FLAG_DRAW_CULLING_DISABLED | ACTOR_FLAG_INSIDE_CULLING_VOLUME))
+#ifdef __3DS__
+                     || Actor_PortDrawMargin(play, actor)
+#endif
+                         )) {
                     if ((actor->flags & ACTOR_FLAG_REACT_TO_LENS) &&
                         ((play->roomCtx.curRoom.lensMode == LENS_MODE_SHOW_ACTORS) || play->actorCtx.lensActive ||
                          (actor->room != play->roomCtx.curRoom.num))) {

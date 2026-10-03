@@ -1,0 +1,3 @@
+# SCENE capture_frame end_frame script   (frames counted from the entry's start, including its transition)
+# Pause menu over Kokiri Forest (widescreen check: the pause background and its sides).
+SCENE_KOKIRI_FOREST 130 170 pause_page0

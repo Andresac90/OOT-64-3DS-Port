@@ -1,0 +1,4 @@
+# Walk left so the pivot camera turns (widescreen side-bar check)
+0   0   0    0
+20  0   -80  0
+200 0   0    0

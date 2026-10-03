@@ -3511,7 +3511,12 @@ int gPortWidescreen = 0;
 static int sBgThisFrame, sBgLastFrame;
 int gPortPrerenderedFrame; /* stereo (gfx_3ds.c): the previous frame had a pre-rendered background */
 static int sStereoRoomThisFrame; /* a pre-rendered skybox room (shops, houses: G_NOOP stereo mode 2) */
-#define WIDE_ACTIVE() (gPortWidescreen && !sBgThisFrame && !sBgLastFrame && sDrawTarget == NULL)
+/* PORT (2026-10-03): ...and for about a second after the last such frame. When the camera switches angle in a
+ * pre-rendered room, the new picture can take a frame or two to arrive; those frames went wide and the room's 3D
+ * geometry flashed in the side bars (hardware v41: "the drawing of triangles when moving the camera"). */
+static int sPrerenderedRecent; /* logic frames to stay 4:3 */
+#define WIDE_ACTIVE() (gPortWidescreen && !sBgThisFrame && !sBgLastFrame && !sStereoRoomThisFrame && \
+                       sPrerenderedRecent == 0 && sDrawTarget == NULL)
 static int sRectFullWidth; /* gfx_dp_fill_rectangle -> gfx_draw_rectangle: stretch to the whole target */
 
 static void gfx_apply_scissor(void) {
@@ -3535,10 +3540,24 @@ static void gfx_apply_scissor(void) {
     rdp.viewport_or_scissor_changed = true;
 }
 
+#ifdef __3DS__
+/* PORT (2026-10-03): widescreen pause background (gfx_3ds.c Port3ds_WideCapFor): the game copies its 320-pixel
+ * capture to the screen in full-row strips in COPY mode (PreRender_CopyImage); those strips load from the 400-pixel
+ * capture instead and their rectangles span the whole target */
+static const void* sWideCapImg;     /* the wide capture standing for the current texture image, if any */
+static uint8_t sWideLoaded[2];      /* per TMEM slot: the last load came from the wide capture */
+int gPortFrameWide;                 /* gfx_3ds.c: this frame's 3D filled the whole width (set at the frame's end) */
+#endif
 static void gfx_dp_set_texture_image(uint32_t format, uint32_t size, uint32_t width, const void* addr) {
     rdp.texture_to_load.addr = addr;
     rdp.texture_to_load.siz = size;
     rdp.texture_to_load.width = width + 1;
+#ifdef __3DS__
+    {
+        extern const void* Port3ds_WideCapFor(const void* gameBuf);
+        sWideCapImg = (width + 1 == 320 && size == G_IM_SIZ_16b) ? Port3ds_WideCapFor(addr) : NULL;
+    }
+#endif
 }
 
 static void gfx_dp_set_tile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_t tmem, uint8_t tile, uint32_t palette, uint32_t cmt, uint32_t maskt, uint32_t shiftt, uint32_t cms, uint32_t masks, uint32_t shifts) {
@@ -3664,6 +3683,17 @@ static void gfx_dp_load_tile(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t 
         case G_IM_SIZ_32b: word_size_shift = 2; break;
         default: word_size_shift = 0; break; /* 4b/8b as in libultraship */
     }
+#ifdef __3DS__
+    slot = rdp.tiles[tile & 7].tmem != 0;
+    sWideLoaded[slot] = 0;
+    if (sWideCapImg != NULL && WIDE_ACTIVE() && uls == 0 && (lrs >> G_TEXTURE_IMAGE_FRAC) == 319 &&
+        (rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_COPY) {
+        rdp.texture_to_load.addr = sWideCapImg; /* the same rows, 400 pixels wide */
+        rdp.texture_to_load.width = 400;
+        lrs = 399 << G_TEXTURE_IMAGE_FRAC;
+        sWideLoaded[slot] = 1;
+    }
+#endif
     offset_x = uls >> G_TEXTURE_IMAGE_FRAC;
     offset_y = ult >> G_TEXTURE_IMAGE_FRAC;
     tile_width = ((lrs - uls) >> G_TEXTURE_IMAGE_FRAC) + 1;
@@ -3813,6 +3843,19 @@ static void gfx_dp_texture_rectangle_impl(int32_t ulx, int32_t uly, int32_t lrx,
         rdp.first_tile = tile & 7;
     }
     rdp.drawing_rect = true;
+#ifdef __3DS__
+    if (sWideLoaded[rdp.tiles[tile & 7].tmem != 0] && (rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_COPY &&
+        ulx == 0 && WIDE_ACTIVE()) {
+        /* the wide capture's strip: 400 texels, from the target's left edge (N64 x = -40) to its right (360) */
+        struct TileDesc* t = &rdp.tiles[tile & 7];
+        t->line_size_bytes = 400 * 2;
+        t->lrs = t->uls + (399 << G_TEXTURE_IMAGE_FRAC);
+        ulx -= 40 << 2;
+        lrx += 40 << 2;
+        rdp.textures_changed[0] = true;
+        rdp.textures_changed[1] = true;
+    }
+#endif
     if ((rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_COPY) {
         // Per RDP Command Summary Set Tile's shift s and this dsdx should be set to 4 texels
         // Divide by 4 to get 1 instead
@@ -4179,7 +4222,10 @@ static void gfx_run_dl(Gfx* cmd) {
                     gfx_flush();
                     gfx_citro3d_set_stereo_mode((int)(cmd->words.w1 & 0xFF));
                     sStereoDrawMode = (int)(cmd->words.w1 & 0xFF);
-                    if ((cmd->words.w1 & 0xFF) == 2) sStereoRoomThisFrame = 1;
+                    if ((cmd->words.w1 & 0xFF) == 2 && !sStereoRoomThisFrame) {
+                        sStereoRoomThisFrame = 1; /* a pre-rendered room's picture: this frame stays 4:3 */
+                        gfx_apply_scissor();
+                    }
                 }
                 break;
 #endif
@@ -4470,6 +4516,8 @@ void gfx_start_frame(void) {
 #ifdef __3DS__
     sBatchId++;
 #endif
+    /* (gfx_start_frame runs once per logic frame: the in-between frames are replays) */
+    sPrerenderedRecent = (sBgThisFrame || sStereoRoomThisFrame) ? 20 : sPrerenderedRecent > 0 ? sPrerenderedRecent - 1 : 0;
     sBgLastFrame = sBgThisFrame; gPortPrerenderedFrame = sBgLastFrame || sStereoRoomThisFrame; sStereoRoomThisFrame = 0;
     sBgThisFrame = 0;
     gfx_wapi->handle_events();
@@ -4541,6 +4589,12 @@ void gfx_run(Gfx *commands) {
     gfx_run_dl(commands);
     gfx_flush();
 #ifdef __3DS__
+    {
+        void* target = sDrawTarget;
+        sDrawTarget = NULL; /* (the frame ends on the screen) */
+        gPortFrameWide = WIDE_ACTIVE();
+        sDrawTarget = target;
+    }
     if (sTjOn) {
         FILE* f = fopen("sdmc:/3ds/oot/tjdump.bin", "wb");
         sTjOn = 0;

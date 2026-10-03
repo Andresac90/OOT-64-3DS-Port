@@ -56,7 +56,13 @@ float gPortStereoConv = 150.0f;
 static Gfx3DSMode sMonoMode;
 static bool sMonoAA;
 static void gfx_3ds_mono_config(bool aa);
-int gPortAA = 1; /* settings aa=0/1 (hardware only: AA is part of N3DS_USE_ANTIALIASING builds) */
+static void flip_init(void); /* the flip presenter (below) */
+static void flip_stop(void);
+/* settings aa=0/1 (hardware only: AA is part of N3DS_USE_ANTIALIASING builds). PORT PERF (2026-10-03): off by
+ * default - hardware v41 (New 3DS, 2D): GPU 11.6 -> 4.6-5.0 ms per frame without it, frames displayed 37.5 -> 52.6-53.8
+ * per second with the present gate; the 2x2 (2x vertical in 800-pixel mode) supersampling more than doubled the GPU
+ * work, which was the frame-rate limit */
+int gPortAA = 0;
 static u32 sMonoFlags;
 static int sMonoW, sMonoH;
 static bool sMonoWide;
@@ -121,6 +127,7 @@ static void gfx_3ds_init(void)
     sTarget = C3D_RenderTargetCreate(sMonoW, sMonoH, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
 	C3D_RenderTargetSetOutput(sTarget, GFX_TOP, GFX_LEFT, sMonoFlags);
     gGfx3DSMode = sMonoMode;
+    flip_init();
 
     if (useWide)
         gfxSetWide(true);
@@ -290,6 +297,7 @@ static void gfx_3ds_main_loop(void (*run_one_game_iter)(void))
     while (aptMainLoop())
         run_one_game_iter();
 
+    flip_stop();
     ndspExit();
     C3D_Fini();
 	gfxExit();
@@ -311,6 +319,7 @@ static void gfx_3ds_handle_events(void)
         /* PORT (2026-09-30): shut graphics down before exit(). exit() unmaps the app heap, and libctru's
          * GSP event thread (stack on that heap) was still running: HOME -> Close crashed with a data
          * abort in gspEventThreadMain (hardware, v17). gfxExit stops that thread. */
+        flip_stop(); /* its thread presents through GSP: stopped before graphics shut down */
         ndspExit();
         C3D_Fini();
         gfxExit();
@@ -476,6 +485,16 @@ void Port3ds_CaptureFrame5551(void* dst) {
     sCaptureDst = dst;
 }
 
+/* PORT (2026-10-03): in widescreen the frame captured for the pause background is 400 pixels wide but the game's
+ * buffer holds the N64's 320: the paused picture shrank to 4:3 (hardware v41). The whole width is also kept here,
+ * same layout, and gfx_pc.c draws it instead when the game copies its buffer to the screen. */
+static u16* sWideCap;     /* 400x240 RGBA5551, pixel k at index k ^ 3 */
+static const void* sWideCapOf; /* the game buffer it stands for */
+
+const void* Port3ds_WideCapFor(const void* gameBuf) {
+    return (sWideCap != NULL && gameBuf != NULL && gameBuf == sWideCapOf) ? sWideCap : NULL;
+}
+
 /* 60 fps interpolation: no in-between frames while a capture/readback is pending for this frame */
 int Port3ds_InterpBlocked(void) {
     return sCaptureDst != NULL || sColorWantFrames > 0;
@@ -535,6 +554,29 @@ static void gfx_3ds_capture_frame(void) {
         }
     }
     gfx_texture_cache_invalidate_range(dst, 320 * 240 * 2);
+    sWideCapOf = NULL;
+    {
+        extern int gPortFrameWide; /* gfx_pc.c: this frame's 3D filled the whole width */
+        if (gPortFrameWide && (sWideCap != NULL || (sWideCap = malloc(400 * 240 * 2)) != NULL)) {
+            for (y = 0; y < 240; y++) {
+                for (x = 0; x < 400; x++) {
+                    unsigned r = 0, g = 0, b = 0, n = (unsigned)(sx * sy);
+                    for (ox = 0; ox < sx; ox++) {
+                        for (oy = 0; oy < sy; oy++) {
+                            u32 w = sLin[(x * sx + ox) * W + (W - 1 - (y * sy + oy))];
+                            r += (w >> 24) & 0xFF;
+                            g += (w >> 16) & 0xFF;
+                            b += (w >> 8) & 0xFF;
+                        }
+                    }
+                    r /= n, g /= n, b /= n;
+                    sWideCap[(y * 400 + x) ^ 3] = (uint16_t)(((r >> 3) << 11) | ((g >> 3) << 6) | ((b >> 3) << 1) | 1);
+                }
+            }
+            gfx_texture_cache_invalidate_range(sWideCap, 400 * 240 * 2);
+            sWideCapOf = dst;
+        }
+    }
 }
 
 /* PORT (2026-09-28): off-screen color images (the pause menu's Link preview, Player_DrawPause, and any other
@@ -771,6 +813,206 @@ static u64 vblank_after(u64 t) {
     return sVbAnchor + (u64)(s64)(n * VB_TICKS);
 }
 
+/* 3ds_main.c: when (milliseconds of svcGetSystemTick) the frame just submitted should reach the screen - the first
+ * vblank after its predicted GPU finish (average GPU time); 0 when unknown */
+double Port3ds_PredictShownMs(void) {
+    extern float gPortGpuDrawMsAvg;
+    u64 vb;
+    if (sSubmitTick == 0 || sVbAnchor == 0) {
+        return 0.0;
+    }
+    vb = vblank_after(sSubmitTick + (u64)((gPortGpuDrawMsAvg + 0.5f) * MS_TICKS));
+    return (double)vb / MS_TICKS;
+}
+
+/* ---- PORT PERF (2026-10-03): flip presenter ----
+ * citro3d copies a finished frame to the LCD's buffer and swaps when the GPU ends it, so a frame reaches the
+ * screen as soon as it is done: two frames finishing within one refresh lost one, and the 60 fps replays had to
+ * wait for each refresh before being drawn (the present gate), holding up the game thread (~15 ms per update,
+ * hardware v41). Here every frame is copied by the GPU into its own buffer of a ring (same queue, right after
+ * the frame), the GPU then stamps the frame's number into a VRAM word, and a small thread points the LCD at the
+ * newest finished frame due at each vblank (gspPresentBuffer, latched by GSP at the vblank). The game thread
+ * renders an update's frames back to back and never waits for a refresh; each frame carries the vblank it is due
+ * at (3ds_main.c: the update's frames on its 4th, 5th and 6th vblank). A late frame repeats the previous one for a
+ * refresh; nothing tears. settings flip=0: citro3d's own output, as before. */
+#define FLIP_N 8
+#define FLIP_BYTES (240 * 800 * 3) /* one 800x240 BGR8 frame, or two 400x240 eyes */
+int gPortFlip = 1;
+static int sFlipOn;                      /* the ring and the thread exist */
+static u8* sFlipBuf[FLIP_N];
+static volatile u32* sFlipStamp;         /* VRAM: the last frame the GPU finished (GX_MemoryFill) */
+static u64 sFlipSlot[FLIP_N];            /* per buffer: the vblank tick it is due at */
+static u8 sFlipMode[FLIP_N];             /* 0 2D (400 wide), 1 800 wide, 2 stereo */
+static volatile u32 sFlipQueued;         /* the last frame id handed to the GPU */
+static volatile u32 sFlipShown;          /* the frame id on screen (latched) */
+static volatile int sFlipRun;
+static u64 sFlipNextSlot;                /* 3ds_main.c: the vblank the next frame is due at (0 = as soon as done) */
+unsigned gPortPerfFlipShown, gPortPerfFlipSkipped, gPortPerfFlipRepeats;
+static Thread sFlipThread;
+
+/* debug (settings flipdump=1): the buffer on screen, once per perf report, to sdmc:/3ds/oot/flip_shown.bin */
+int gPortFlipDump;
+void Port3ds_FlipDump(void) {
+    FILE* f;
+    u32 id = sFlipShown, hdr[3];
+    if (!sFlipOn || !gPortFlipDump || id == 0 || (f = fopen("sdmc:/3ds/oot/flip_shown.bin", "wb")) == NULL) {
+        return;
+    }
+    hdr[0] = id, hdr[1] = sFlipMode[id % FLIP_N], hdr[2] = FLIP_BYTES;
+    fwrite(hdr, 4, 3, f);
+    GSPGPU_InvalidateDataCache(sFlipBuf[id % FLIP_N], FLIP_BYTES);
+    fwrite(sFlipBuf[id % FLIP_N], 1, FLIP_BYTES, f);
+    fclose(f);
+}
+
+void Port3ds_SetFrameSlot(double slotMs) {
+    sFlipNextSlot = slotMs > 0.0 ? (u64)(slotMs * MS_TICKS) : 0;
+}
+int Port3ds_FlipActive(void) {
+    return sFlipOn;
+}
+/* a consistent copy of the vblank anchor (written by the game thread) */
+static u64 flip_anchor(void) {
+    u64 a, b;
+    do {
+        a = sVbAnchor;
+        b = sVbAnchor;
+    } while (a != b);
+    return a;
+}
+
+static void flip_thread(void* arg) {
+    u32 pending = 0, presented = 0;
+    u64 pendingVb = 0;
+    int swap = 0;
+    (void)arg;
+    while (sFlipRun) {
+        u64 anchor = flip_anchor(), now = svcGetSystemTick(), vb, wake;
+        double n;
+        if (anchor == 0) {
+            svcSleepThread(2000000LL);
+            continue;
+        }
+        /* the next vblank at least 1 ms away: present 1.5 ms before it */
+        n = ceil((double)(s64)(now + (u64)(1.0 * MS_TICKS) - anchor) / VB_TICKS);
+        vb = anchor + (u64)(s64)(n * VB_TICKS);
+        wake = vb - (u64)(1.5 * MS_TICKS);
+        if (now < wake) {
+            svcSleepThread((s64)((double)(wake - now) * (1e9 / SYSCLOCK_ARM11)));
+        }
+        if (pending != 0 && svcGetSystemTick() > pendingVb) { /* the previous present latched at its vblank */
+            sFlipShown = pending;
+            pending = 0;
+        }
+        {
+            u32 done = *sFlipStamp, last = sFlipQueued, top = done < last ? done : last, id, chosen = 0;
+            for (id = top; id > presented && id + FLIP_N > last; id--) {
+                if (sFlipSlot[id % FLIP_N] <= vb + (u64)(0.5 * MS_TICKS)) {
+                    chosen = id;
+                    break;
+                }
+            }
+            if (chosen != 0) {
+                int b = chosen % FLIP_N;
+                const u8* fa = sFlipBuf[b];
+                const u8* fb = sFlipMode[b] == 2 ? fa + FLIP_BYTES / 2 : fa;
+                u32 mode = GSP_BGR8_OES | (sFlipMode[b] == 2 ? BIT(5) : sFlipMode[b] == 0 ? BIT(6) : 0) | (1 << 8);
+                if (gspHasGpuRight()) {
+                    gspPresentBuffer(GSP_SCREEN_TOP, swap, fa, fb, 240 * 3, mode);
+                    swap ^= 1;
+                }
+                gPortPerfFlipShown++;
+                gPortPerfFlipSkipped += chosen - presented - 1 < FLIP_N ? chosen - presented - 1 : 0;
+                presented = chosen;
+                pending = chosen;
+                pendingVb = vb;
+            } else if (presented != 0) {
+                gPortPerfFlipRepeats++; /* nothing new due: the screen keeps its frame for this refresh */
+            }
+        }
+        /* past this vblank before planning the next one */
+        now = svcGetSystemTick();
+        if (now < vb + (u64)(0.5 * MS_TICKS)) {
+            svcSleepThread((s64)((double)(vb + (u64)(0.5 * MS_TICKS) - now) * (1e9 / SYSCLOCK_ARM11)));
+        }
+    }
+}
+
+static void flip_init(void) {
+    int i;
+    s32 prio = 0x30;
+    if (!gPortFlip) {
+        return;
+    }
+    for (i = 0; i < FLIP_N; i++) {
+        sFlipBuf[i] = linearAlloc(FLIP_BYTES);
+        if (sFlipBuf[i] == NULL) {
+            break;
+        }
+        memset(sFlipBuf[i], 0, FLIP_BYTES);
+        GSPGPU_FlushDataCache(sFlipBuf[i], FLIP_BYTES);
+    }
+    sFlipStamp = (volatile u32*)vramAlloc(64);
+    if (i < FLIP_N || sFlipStamp == NULL) {
+        extern void PortDbg(const char*);
+        PortDbg("[gfx] flip presenter: no memory, citro3d output");
+        return;
+    }
+    *sFlipStamp = 0;
+    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    sFlipRun = 1;
+    sFlipThread = threadCreate(flip_thread, NULL, 8 * 1024, prio - 2, -2, false);
+    if (sFlipThread == NULL) {
+        sFlipRun = 0;
+        return;
+    }
+    sFlipOn = 1;
+    { extern void PortDbg(const char*); PortDbg("[gfx] flip presenter on"); }
+}
+
+static void flip_stop(void) {
+    if (sFlipThread != NULL) {
+        sFlipRun = 0;
+        threadJoin(sFlipThread, 100000000ULL); /* at most one refresh away from noticing */
+        threadFree(sFlipThread);
+        sFlipThread = NULL;
+    }
+    sFlipOn = 0;
+}
+
+/* swap_buffers_begin, inside the frame: copy it into the next ring buffer after its commands, then stamp it */
+static void flip_submit(void) {
+    u32 id = sFlipQueued + 1;
+    int b = id % FLIP_N, e;
+    while (sFlipShown + FLIP_N <= id && sFlipRun) { /* that buffer may still be on screen: wait for a flip */
+        svcSleepThread(1000000LL);
+    }
+    C3D_FrameSplit(0); /* the frame's commands go into the queue first */
+    if (gGfx3DSMode == GFX_3DS_MODE_STEREO) {
+        u32 flags = GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
+                    GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
+                    GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
+        for (e = 0; e < 2; e++) { /* eye e: half e of the stereo target, to the left / right framebuffer */
+            GX_DisplayTransfer((u32*)((u8*)sTarget->frameBuf.colorBuf + e * 240 * STEREO_EYE_OFFSET * 4),
+                               GX_BUFFER_DIM(240, STEREO_EYE_OFFSET), (u32*)(sFlipBuf[b] + e * (FLIP_BYTES / 2)),
+                               GX_BUFFER_DIM(240, STEREO_EYE_OFFSET), flags);
+        }
+        sFlipMode[b] = 2;
+    } else {
+        GX_DisplayTransfer((u32*)sTarget->frameBuf.colorBuf, GX_BUFFER_DIM(sTarget->frameBuf.width, sTarget->frameBuf.height),
+                           (u32*)sFlipBuf[b], GX_BUFFER_DIM(sTarget->frameBuf.width, sTarget->frameBuf.height),
+                           sMonoFlags);
+        sFlipMode[b] = sMonoWide ? 1 : 0;
+    }
+    GX_MemoryFill((u32*)sFlipStamp, id, (u32*)(sFlipStamp + 4), GX_FILL_TRIGGER | GX_FILL_32BIT_DEPTH, NULL, 0, NULL, 0);
+    sFlipSlot[b] = sFlipNextSlot;
+    sFlipNextSlot = 0;
+    __sync_synchronize();
+    sFlipQueued = id;
+    sTarget->used = false; /* citro3d's own copy and swap: not for this frame */
+    if (sEyeOut[0] != NULL) sEyeOut[0]->used = sEyeOut[1]->used = false;
+}
+
 /* right after C3D_FrameBegin: the previous frame's queue is done, its GPU time known */
 static void present_note_finished(void) {
     u64 done, vb;
@@ -856,7 +1098,7 @@ static bool gfx_3ds_start_frame(void)
 
 static void gfx_3ds_swap_buffers_begin(void) 
 {
-    if (gGfx3DSMode == GFX_3DS_MODE_STEREO) {
+    if (gGfx3DSMode == GFX_3DS_MODE_STEREO && !sFlipOn) {
         /* drawn through the stereo target: mark the aliased outputs for FrameEnd's transfers */
         sEyeOut[0]->used = sEyeOut[1]->used = true;
     }
@@ -877,7 +1119,11 @@ static void gfx_3ds_swap_buffers_begin(void)
         /* settings cmdlist_flush=1 (experiment, hardware): flush only the command list. Every other buffer the
          * GPU reads is flushed explicitly (VBO + indices above, textures at upload) and no frame is split any
          * more (all readbacks run outside frames), which is what froze v24/v25. Off by default until measured. */
-        present_gate();
+        if (sFlipOn) {
+            flip_submit(); /* the flip thread presents it at its vblank: no gate */
+        } else {
+            present_gate();
+        }
         gPortPerfStereoFrames += gGfx3DSMode == GFX_3DS_MODE_STEREO;
         t0 = svcGetSystemTick();
         C3D_FrameEnd(gPortCmdlistFlush ? GX_CMDLIST_FLUSH : 0);

@@ -26,7 +26,18 @@ Plan and criteria: [docs/RELEASE_1.0.md](docs/RELEASE_1.0.md).
 - Stereoscopic 3D: convergence on Link, menus and the HUD at screen depth.
 - Touch screen: top-screen HUD on/off, Navi on the VIEW button.
 
+### Changed
+- Anti-aliasing is off by default (`aa=1` turns it on): it more than doubled the GPU's work per frame; New 3DS in 2D
+  went from about 38 to 53 frames shown per second without it (the 800-pixel-wide mode stays).
+- 60 fps pacing: frames are drawn into a ring of buffers and a small thread shows each at its refresh (flip
+  presenter, `flip=0` to disable): the game never waits for the screen, frames are never lost or torn, and a late
+  frame repeats the previous one for a refresh instead of slowing the game.
+
 ### Fixed
+- Widescreen: pre-rendered rooms stay 4:3 for a second after their picture (camera switches flashed 3D geometry in
+  the side bars); the pause menu's background keeps the whole width; actors near the edges no longer pop while the
+  camera turns fast (drawn a margin past the edge while in-between frames trail the camera).
+- Touch screen: the "TOP HUD" label did not fit its button (now "HUD"); labels are centered on their pixels.
 - Thin bright cracks along some triangle edges on hardware (title screen ground, more visible in 3D): the
   N64-shading split and the near-plane/guard-band clipping added vertices on edges that the neighbouring
   triangle did not have (T-junctions). Edges are now split by a rule that depends on the edge alone, so both

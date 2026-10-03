@@ -340,3 +340,22 @@ depth copy nothing. statediff builds keep the eager per-frame copy. The asynchro
 - **Next:** if AA off brings the GPU near 6 ms per frame, the gate's schedule fits (logic frame ~28 ms) and 60 fps
   is within reach; else smaller texture formats (RGBA8 everywhere today), textures in VRAM, and overlapping CPU
   work with the GPU.
+
+### 2026-10-03: hardware v41, anti-aliasing off, flip presenter (v43)
+
+- **v41 (New 3DS, 2D):** anti-aliasing more than doubled the GPU's work: 11.6 ms per frame with it, 4.6-5.0 without;
+  with the present gate, 37.5 vs 52.6-53.8 frames displayed per second (0 lost). AA is now off by default (`aa=1`).
+  3D (never anti-aliased, two 400x240 eyes): GPU 6.7-8.4 ms per frame, 44-56 frames displayed.
+- **What remained:** the game thread waited ~15 ms per update for refreshes (the gate before each in-between frame
+  and pacing), and an update's first frame had to be drawn within two refreshes of the update's start (it took
+  ~30-33 ms), so heavier updates stretched to four refreshes (18.5-19.2 updates per second).
+- **Flip presenter (gfx_3ds.c, `flip`, default on):** every frame is copied by the GPU into its own buffer of an
+  8-buffer ring (a display transfer queued right after the frame's commands), then the GPU stamps the frame's number
+  into a VRAM word (memory fill). A small thread wakes 1.5 ms before each vblank and points the LCD at the newest
+  finished frame due by then (`gspPresentBuffer`, latched at the vblank). The game thread draws an update's three
+  frames back to back and never waits for a refresh; the frames are due on the update's 4th, 5th and 6th vblank, so
+  the first one has a whole update period to be drawn (one refresh more latency than before). A late frame repeats
+  the previous one for a refresh, frames are never lost or torn, and the report counts frames actually shown.
+- **Azahar:** 2D 59.2-59.5 frames shown per second at 19.8 updates per second (0-1 late frames per report); 3D on/off
+  every 2 s (`stereo_test=1`) works; Old 3DS speed (CPU 25%, frame skip) 18.9-20.1 updates per second; the 7-scene
+  N64 comparison is unchanged. `flip=0` returns to citro3d's own output (and the present gate).

@@ -22,7 +22,7 @@ means a real console, the rest runs in the emulator (`tools/`). Status as of 202
 | [ ] | No unmapped memory accesses in any scene | Azahar log: `grep UnmappedAccess` = 0 after the child and adult tours | 0 in the last child tour |
 | [ ] | One hour of play without a crash or freeze on each console | hardware, `boot.log` | not yet on Old 3DS |
 | [x] | No memory leak across scene changes | 101-scene tour with `prof=1`: linear memory free 44.9-47.4 MB, heap flat (2026-10-02); hardware sessions now log both |
-| [ ] | HOME button, sleep (closing the lid), power off from the HOME menu | hardware | HOME works; sleep untested |
+| [ ] | HOME button, sleep (closing the lid), power off from the HOME menu | hardware | HOME works; sleep works (v41, 2026-10-02); power off from the HOME Menu untested |
 
 ## C. Accuracy
 
@@ -40,7 +40,7 @@ means a real console, the rest runs in the emulator (`tools/`). Status as of 202
 | | Item | How it is verified | Status |
 |---|---|---|---|
 | [x] | New 3DS: full game speed (20 updates/s, like the N64) | hardware, `prof=1` | yes |
-| [ ] | New 3DS: 60 frames shown per second in most scenes | hardware | 43-48 actually displayed in 2D (v39): GPU-bound, 9.4-11.8 ms per frame; v40 tests anti-aliasing and the present gate |
+| [ ] | New 3DS: 60 frames shown per second in most scenes | hardware | 2D: 52.6-53.8 displayed with anti-aliasing off (v41; it more than doubled the GPU work) and the present gate, both now defaults; 3D: 44-56. Next: late first frames drop an in-between frame instead of slowing the game (v42), then a replay thread |
 | [ ] | Old 3DS: full game speed | hardware, `perf_ab=1` | frame skip: 10.25 → 19.5 updates/s in Azahar at 25% CPU; hardware check pending |
 | [ ] | Old 3DS: 60 frames shown per second | hardware | stretch goal; the Old 3DS CPU is about 3 times slower |
 | [x] | Default vertex path chosen (CPU or GPU) | hardware `gpu_ab=1` + `fbdiff` | GPU (2026-10-02): same accuracy, faster on both consoles (v27) |
