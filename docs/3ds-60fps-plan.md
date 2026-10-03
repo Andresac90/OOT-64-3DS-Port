@@ -359,3 +359,25 @@ depth copy nothing. statediff builds keep the eager per-frame copy. The asynchro
 - **Azahar:** 2D 59.2-59.5 frames shown per second at 19.8 updates per second (0-1 late frames per report); 3D on/off
   every 2 s (`stereo_test=1`) works; Old 3DS speed (CPU 25%, frame skip) 18.9-20.1 updates per second; the 7-scene
   N64 comparison is unchanged. `flip=0` returns to citro3d's own output (and the present gate).
+
+### 2026-10-03 (night): hardware v42 read-out, CPU/GPU overlap (v46)
+
+- **v42 (New 3DS):** 2D 54.6-56 frames shown per second. 3D reports were not CPU-bound: the game thread idled
+  33-34% of the time in the present gate (gone with the flip presenter, v43). Old 3DS speed: logic + audio ~16 ms per
+  update, ~54 ms of renderer CPU per drawn frame, so frame skip sits at its floor (9-10 shown/s, same as v30/v34). The
+  half-second pauses were the perf report's SD writes: log lines now go through a background writer thread.
+- **The remaining serialization:** every frame was its own citro3d frame, and `C3D_FrameBegin` waits for the GPU to
+  finish the previous one (one command buffer, GX queue cleared there). An update was logic + walk + 3 x (GPU) + 2 x
+  (replay CPU) in sequence; in 3D on hardware about 6 + 19 + 3 x 8 + 2 x 6 = 61 ms of a 50 ms update.
+- **Overlap (`overlap`, default on; gfx_3ds.c):** with the GPU vertex path an in-between frame only re-issues the walk's
+  draws with other palette matrices (uniforms in the command stream), so the update's frames now share one citro3d
+  frame. Each frame is split off with `GX_CMDLIST_FLUSH` (unflushed splits froze hardware in v24/v25), the linear heap
+  is flushed once (as `C3D_FrameEnd(0)` did), the GX queue is started at once, and the next frame's commands are built
+  while the GPU draws. The early depth copy is queued after the walk's frame and waited for (queue entry index) at the
+  game's read: inside a citro3d frame `C3D_SyncDisplayTransfer` splits without the flush and does not wait. The command
+  buffer is 1 MB (overflow is a panic in libctru): peak use 21.5% in 2D and 36.5% with 3D on, for a whole update.
+- **Azahar:** 59.8 frames shown per second, 2 overlapped frames per update, 0 replay fallbacks, 3D toggling every 2 s
+  works, 7-scene N64 comparison unchanged. Azahar's GPU runs synchronously, so the gain is hardware-only: expected up to
+  ~12 ms per update in 3D and ~6 in 2D. `overlap_ab=1` alternates it every 2 reports for the hardware comparison.
+- **Next:** the second submission of every draw in 3D (a command list reused for both eyes), then the Old 3DS renderer
+  (static room geometry reused between frames).

@@ -1,7 +1,7 @@
 # Release 1.0: what "complete" means
 
 Version 1.0 is published when every item below is checked. Each item has a way to verify it; "hardware"
-means a real console, the rest runs in the emulator (`tools/`). Status as of 2026-10-02 (evening).
+means a real console, the rest runs in the emulator (`tools/`). Status as of 2026-10-03.
 
 ## A. The whole game plays
 
@@ -19,7 +19,7 @@ means a real console, the rest runs in the emulator (`tools/`). Status as of 202
 | | Item | How it is verified | Status |
 |---|---|---|---|
 | [x] | Texture memory is freed when cache slots are reused | code (`C3D_TexDelete` on reuse) | done |
-| [ ] | No unmapped memory accesses in any scene | Azahar log: `grep UnmappedAccess` = 0 after the child and adult tours | 0 in the last child tour |
+| [x] | No unmapped memory accesses in any scene | Azahar log: `grep UnmappedAccess` = 0 after the child and adult tours | 0 in the child tour and in the adult tour (2026-10-03: all 101 scenes reached, 97 identical to the N64; the 4 others are glow flags on object edges and the Ganondorf camera raycast tie, both known) |
 | [ ] | One hour of play without a crash or freeze on each console | hardware, `boot.log` | not yet on Old 3DS |
 | [x] | No memory leak across scene changes | 101-scene tour with `prof=1`: linear memory free 44.9-47.4 MB, heap flat (2026-10-02); hardware sessions now log both |
 | [ ] | HOME button, sleep (closing the lid), power off from the HOME menu | hardware | HOME works; sleep works (v41, 2026-10-02); power off from the HOME Menu untested |
@@ -30,7 +30,7 @@ means a real console, the rest runs in the emulator (`tools/`). Status as of 202
 |---|---|---|---|
 | [x] | No bring-up hacks that change game behavior (`#ifdef __3DS__` audit) | code review of all 116 blocks | done; the rest are platform adaptations, safety guards and port features |
 | [x] | Distant geometry and fog match the N64 (Hyrule Field) | `fbdiff` at noon, 4:3 (Hyrule Field, Lake Hylia, Gerudo Valley) | match; the differences are edges and a 1 px horizon line. Widescreen shows areas the N64 never draws |
-| [ ] | No visible culling at the screen edges in 3D mode (each eye sees past the N64's frame) | hardware, camera moving with 3D on | margin widened by the stereo separation (v37); not reported since, confirm on hardware |
+| [ ] | No visible culling at the screen edges in 3D mode (each eye sees past the N64's frame) | hardware, camera moving with 3D on | margin widened by the stereo separation (v37); in-between frames now keep everything visible to any of their three cameras (v44, hardware v42 still showed pop-in while turning fast); confirm on hardware |
 | [ ] | No stray triangles in the GPU vertex path (red/cyan polygons inside Kokiri houses, hardware v30) | hardware | split pieces in model space (v35); not reported in v39, confirm on hardware |
 | [ ] | No cracks between triangles (thin bright dots on the title screen ground, hardware v39) | `tjdump` + `tools/tjunctions.py`, then hardware | crack-free splitting: title ground 67 port-made T-junctions to 0 on screen; confirm on hardware |
 | [x] | Frame accuracy does not regress | `fbdiff` child tour average | GPU path 5.92 (crack-free splitting: 5.917 to 5.922; lower is better), 96/101 scenes identical state |
@@ -40,9 +40,9 @@ means a real console, the rest runs in the emulator (`tools/`). Status as of 202
 | | Item | How it is verified | Status |
 |---|---|---|---|
 | [x] | New 3DS: full game speed (20 updates/s, like the N64) | hardware, `prof=1` | yes |
-| [ ] | New 3DS: 60 frames shown per second in most scenes | hardware | 2D: 52.6-53.8 displayed with anti-aliasing off (v41; it more than doubled the GPU work) and the present gate, both now defaults; 3D: 44-56. Next: late first frames drop an in-between frame instead of slowing the game (v42), then a replay thread |
-| [ ] | Old 3DS: full game speed | hardware, `perf_ab=1` | frame skip: 10.25 → 19.5 updates/s in Azahar at 25% CPU; hardware check pending |
-| [ ] | Old 3DS: 60 frames shown per second | hardware | stretch goal; the Old 3DS CPU is about 3 times slower |
+| [ ] | New 3DS: 60 frames shown per second in most scenes | hardware | 2D: 52.6-53.8 displayed with anti-aliasing off (v41) and the present gate; v42 54.6-56 shown. v43+ flip presenter (frames never lost, the game never waits for a refresh): Azahar 59.5 shown/s in 2D, 56 with 3D on half the time; hardware pending (v45). 3D costs a second submission of every draw; next: one command list for both eyes |
+| [ ] | Old 3DS: full game speed | hardware, `perf_ab=1` | frame skip: 10.25 → 19.5 updates/s in Azahar at 25% CPU; New 3DS at Old 3DS speed (v42): 17.5-21 updates/s, 9-15 frames shown |
+| [ ] | Old 3DS: 60 frames shown per second | hardware | not reachable with this renderer: at Old 3DS speed a drawn frame costs ~54 ms of CPU (v42), so even 20 frames shown needs a third less; 60 needs a renderer that reuses static geometry between frames |
 | [x] | Default vertex path chosen (CPU or GPU) | hardware `gpu_ab=1` + `fbdiff` | GPU (2026-10-02): same accuracy, faster on both consoles (v27) |
 
 ## E. User experience

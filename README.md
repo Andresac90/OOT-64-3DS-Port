@@ -113,8 +113,9 @@ Detailed notes, emulator testing and debugging tools: [docs/BUILDING_3DS.md](doc
 | START | START (pause) | |
 | SELECT | L (minimap on/off) | |
 | D-Pad | C buttons | the N64 D-pad is unused by the game |
-| ZL / ZR (New 3DS) | C-Down / C-Up | third item / first person and Navi |
-| C-Stick (New 3DS) | C buttons | |
+| ZL (New 3DS) | C-Down | third item (touch pad "I") |
+| ZR (New 3DS) | Boots | cycles the owned boots (touch pad BOOTS) |
+| C-Stick (New 3DS) | camera | `cstick=0` makes it the C buttons |
 | Touch screen | VIEW, items, Ocarina, Boots, pause pages, 4:3 / wide, top HUD | |
 
 Every action is reachable on an Old 3DS without ZL/ZR or the C-Stick. Details:
@@ -132,6 +133,8 @@ set by editing that file (one `name=value` per line):
 | `fps60` | 1 | frame interpolation: 0 = off (20 fps, like the N64) |
 | `frameskip` | automatic | 1 = skip drawing an update when the game falls behind (default on Old 3DS), 0 = never |
 | `aa` | 0 | 1 = anti-aliasing (smoother edges, but more than twice the GPU work: about 38 instead of 53 frames per second on New 3DS) |
+| `cstick` | 1 | New 3DS C-Stick: 1 = camera, 0 = the four C buttons |
+| `overlap` | 1 | 1 = the CPU prepares the next frame while the GPU draws (faster, mostly in 3D); 0 = one at a time |
 | `gpu_vtx` | 1 | vertex processing on the GPU (faster on both consoles); 0 = on the CPU |
 | `prof` | 0 | 1 = per-stage CPU profile in `boot.log` (for bug reports about speed) |
 

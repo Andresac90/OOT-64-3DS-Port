@@ -25,15 +25,30 @@ Plan and criteria: [docs/RELEASE_1.0.md](docs/RELEASE_1.0.md).
   full speed and Old 3DS speed), `gpu_ab=1` (alternates the vertex paths).
 - Stereoscopic 3D: convergence on Link, menus and the HUD at screen depth.
 - Touch screen: top-screen HUD on/off, Navi on the VIEW button.
+- New 3DS C-Stick turns the camera (`cstick=0` in `settings.txt` makes it the four C buttons again).
+- New 3DS ZR presses the BOOTS pad (cycles the owned boots).
 
 ### Changed
 - Anti-aliasing is off by default (`aa=1` turns it on): it more than doubled the GPU's work per frame; New 3DS in 2D
   went from about 38 to 53 frames shown per second without it (the 800-pixel-wide mode stays).
+- The CPU builds the next frame while the GPU draws the previous one (`overlap=0` to disable): the three frames of
+  an update used to take turns with the GPU, which cost the most in 3D.
 - 60 fps pacing: frames are drawn into a ring of buffers and a small thread shows each at its refresh (flip
   presenter, `flip=0` to disable): the game never waits for the screen, frames are never lost or torn, and a late
   frame repeats the previous one for a refresh instead of slowing the game.
 
+- Touch screen: the third item pad is labelled "I" as in *Ocarina of Time 3D* on every model (D-pad down and, on New
+  3DS, ZL press it too; a small "ZL"/"ZR" tag shows on New 3DS only). ZR no longer doubles C-up (VIEW and D-pad up).
+- Log lines are written to the SD card by a background thread: the measurement report (`prof=1`) used to pause the
+  game for up to half a second each time it was written.
+
 ### Fixed
+- Widescreen pause menu: black bars at the top left and right (the background's first strip stayed 4:3 because the
+  previous draw went to Link's off-screen preview).
+- 60 fps: objects at the screen edge popped in late while the camera turned fast; the renderer now keeps everything
+  visible in any of the in-between frames, not only in the update's own frame.
+- Touch screen: item and boots icons are centered on their art (some sit up to 2 pixels off-center in their
+  texture), the tab labels on their pixels, and the "not available" grey is readable.
 - Widescreen: pre-rendered rooms stay 4:3 for a second after their picture (camera switches flashed 3D geometry in
   the side bars); the pause menu's background keeps the whole width; actors near the edges no longer pop while the
   camera turns fast (drawn a margin past the edge while in-between frames trail the camera).

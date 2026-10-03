@@ -71,6 +71,8 @@ static int sGpuAB; /* settings gpu_ab=1: the vertex path alternates every 2 perf
 static int sAaAB;  /* settings aa_ab=1: anti-aliasing alternates every 2 perf reports (gfx_3ds.c) */
 static int sCmdflushAB; /* settings cmdflush_ab=1: C3D_FrameEnd flush mode alternates every 2 reports */
 static int sPresentAB;  /* settings present_ab=1: the present gate (gfx_3ds.c) alternates every 4 reports */
+static int sOverlapAB;  /* settings overlap_ab=1: the CPU/GPU overlap (gfx_3ds.c gPortOverlap) alternates every 2 reports */
+static int sCstickCamera = 1; /* settings cstick=0: the New 3DS C-stick presses the C buttons, not the camera */
 int gPortStereoTest; /* settings stereo_test=1: 3D toggles every 2 s (gfx_3ds.c), freeze reproduction */
 static volatile u32 sProfHist[PROF_COUNT];
 static volatile int sProfRun;
@@ -132,6 +134,9 @@ static void Port3ds_SaveSettings(void) {
             { extern int gPortPresentGate; if (!gPortPresentGate && !sPresentAB) fprintf(f, "present_gate=0\n"); }
             if (sPresentAB) fprintf(f, "present_ab=1\n");
             { extern int gPortFlip; if (!gPortFlip) fprintf(f, "flip=0\n"); }
+            { extern int gPortOverlap; if (!gPortOverlap && !sOverlapAB) fprintf(f, "overlap=0\n"); }
+            if (sOverlapAB) fprintf(f, "overlap_ab=1\n");
+            if (!sCstickCamera) fprintf(f, "cstick=0\n");
             { extern int gPortAA; if (gPortAA && !sAaAB) fprintf(f, "aa=1\n"); }
             { extern int gPortGpuVtx; if (!gPortGpuVtx && !sGpuAB) fprintf(f, "gpu_vtx=0\n"); }
             if (sInterp != 1) fprintf(f, "fps60=%d\n", sInterp);
@@ -184,6 +189,9 @@ static void Port3ds_LoadSettings(void) {
         if (sscanf(line, "present_gate=%d", &v) == 1) { extern int gPortPresentGate; gPortPresentGate = v != 0; }
         if (sscanf(line, "present_ab=%d", &v) == 1) { sPresentAB = v != 0; }
         if (sscanf(line, "flip=%d", &v) == 1) { extern int gPortFlip; gPortFlip = v != 0; }
+        if (sscanf(line, "overlap=%d", &v) == 1) { extern int gPortOverlap; gPortOverlap = v != 0; }
+        if (sscanf(line, "overlap_ab=%d", &v) == 1) { sOverlapAB = v != 0; }
+        if (sscanf(line, "cstick=%d", &v) == 1) { sCstickCamera = v != 0; }
         if (sscanf(line, "flipdump=%d", &v) == 1) { extern int gPortFlipDump; gPortFlipDump = v != 0; }
         if (sscanf(line, "tjdump=%d", &v) == 1) { extern int gPortTjDumpFrame; gPortTjDumpFrame = v; }
         if (sscanf(line, "aa_ab=%d", &v) == 1) {
@@ -238,7 +246,8 @@ static void Port3ds_LoadSettings(void) {
  *   left:   VIEW (C-up: first person / Navi), rupees, small keys, SCREEN (4:3 / wide), OCARINA
  *   centre: hearts + magic, the minimap (software-drawn from gPortMinimap, port_minimap.h),
  *           tabs GEAR / MAP / ITEMS (START straight to that pause page)
- *   right:  C-left (Y), C-down (ZL), C-right (X) with live item icons + ammo, BOOTS (cycles owned boots)
+ *   right:  C-left (Y), C-down (I; ZL on a New 3DS), C-right (X) with live item icons + ammo, BOOTS (cycles owned
+ *           boots; ZR on a New 3DS)
  * Everything redraws only when it changes. Full description: docs/3ds-touch-panel.md. */
 #include "port_minimap.h"
 extern const unsigned char* Port_GetItemIcon(int itemId);
@@ -251,7 +260,7 @@ static int sFbDirty;
 #define PRGB(r, g, b) (u16)((((r) >> 3) << 11) | (((g) >> 2) << 5) | ((b) >> 3))
 #define COL_TEXT   PRGB(244, 244, 244)
 #define COL_SHADOW PRGB(20, 20, 24)
-#define COL_DIM    PRGB(130, 130, 136)
+#define COL_DIM    PRGB(196, 198, 206) /* "not available": still readable on the stone plates (130 was not, v42) */
 
 /* item ids used by the panel (include/item.h) */
 #define PANEL_ITEM_OCARINA_FAIRY   0x07
@@ -272,7 +281,7 @@ static const PanelPad sPads[P_COUNT] = {
     { 4, 148, 56, 32, "HUD", 0, -1, 0, 0, 0 },
     { 4, 184, 56, 52, "OCARINA", 0, -1, 0, 0, 0 },
     { 260, 4, 56, 56, "Y", BTN_CLEFT_, -1, 0, 0, 0 },
-    { 260, 64, 56, 56, "ZL", BTN_CDOWN_, -1, 0, 0, 0 },
+    { 260, 64, 56, 56, "I", BTN_CDOWN_, -1, 0, 0, 0 }, /* OoT3D's touch item slot I (+ ZL / D-pad down) */
     { 260, 124, 56, 56, "X", BTN_CRIGHT_, -1, 0, 0, 0 },
     { 260, 184, 56, 52, "BOOTS", 0, -1, 0, 0, 0 },
     { 66, 208, 60, 30, "GEAR", BTN_START_, 3, 52, 116, 60 },
@@ -295,6 +304,9 @@ static inline int Noise(int x, int y) { /* stable per-pixel grain for the stone 
     unsigned h = (unsigned)(x * 374761393 + y * 668265263);
     h = (h ^ (h >> 13)) * 1274126177u;
     return (int)((h >> 24) & 15) - 8;
+}
+static inline int RoundDiv(int a, int b) { /* a / b to the nearest integer, b > 0 */
+    return a >= 0 ? (a + b / 2) / b : -((-a + b / 2) / b);
 }
 static inline int Clamp8(int v) {
     return v < 0 ? 0 : (v > 255 ? 255 : v);
@@ -379,7 +391,7 @@ static void GlyphInk(unsigned char ch, int* first, int* last) {
 /* centered on the pixels drawn, not on 8-pixel cells; a label wider than a 56-pixel pad's inside ("OCARINA":
  * 7 x 8 = 56 px spilled over the stone border, hardware v41) closes up to 7 pixels per letter (the console font
  * leaves one column blank) */
-static void DrawTextC(int cx, int y, const char* s, u16 c) {
+static void DrawTextCB(int cx, int y, const char* s, u16 c, int bold) {
     int n = (int)strlen(s), adv = n * 8 > 48 ? 7 : 8, i, lo = 1 << 20, hi = -1, f, l;
     char one[2] = { 0, 0 };
     for (i = 0; i < n; i++) {
@@ -390,15 +402,33 @@ static void DrawTextC(int cx, int y, const char* s, u16 c) {
         }
     }
     if (hi < 0) return;
+    hi += bold; /* bold: drawn twice, one pixel apart */
     for (i = 0; i < n; i++) {
         one[0] = s[i];
         DrawText(cx - (hi - lo + 1) / 2 - lo + i * adv, y, one, c);
+        if (bold) DrawText(cx - (hi - lo + 1) / 2 - lo + i * adv + 1, y, one, c);
     }
+}
+static void DrawTextC(int cx, int y, const char* s, u16 c) {
+    DrawTextCB(cx, y, s, c, 0);
 }
 /* 32x32 RGBA32 item icon at size px (nearest), alpha-blended; dim = disabled button */
 static void DrawIcon(int x, int y, const u8* rgba, int size, int dim) {
-    int i, j;
+    int i, j, x0 = 32, x1 = -1, y0 = 32, y1 = -1;
     if (rgba == NULL) return;
+    /* centered on the pixels the art covers, not on its 32x32 cell: item art sits up to 2 texels off-center
+     * (Kokiri boots 2 right, bomb 1 right: visibly off on the plates, 2026-10-03) */
+    for (j = 0; j < 32; j++) {
+        for (i = 0; i < 32; i++) {
+            if (rgba[(((j * 32 + i) * 4) + 3) ^ 7] != 0) {
+                x0 = i < x0 ? i : x0, x1 = i > x1 ? i : x1;
+                y0 = j < y0 ? j : y0, y1 = j > y1 ? j : y1;
+            }
+        }
+    }
+    if (x1 < 0) return;
+    x += RoundDiv((32 - (x0 + x1 + 1)) * size, 64);
+    y += RoundDiv((32 - (y0 + y1 + 1)) * size, 64);
     for (j = 0; j < size; j++) {
         for (i = 0; i < size; i++) {
             /* game RAM keeps logical byte k at address k ^ 7 on the 3DS (see gfx_src_swizzle) */
@@ -438,13 +468,16 @@ static void DrawPad(int i) {
                          sShown.cAmmo[c] == 0 ? PRGB(255, 90, 60) : PRGB(120, 250, 120));
             }
         }
-        /* the 3DS button that also presses it (ZL only exists on the New 3DS) */
-        if (c != 1 || sTouchUiN3ds) DrawText(p->x + 4, p->y + 4, p->label, PRGB(255, 230, 120));
+        /* the 3DS button that also presses it; the middle slot is OoT3D's touch slot "I" on every model (D-pad
+         * down presses it too), and the New 3DS adds a "ZL" tag (2026-10-03: ZL alone meant nothing on an Old 3DS) */
+        DrawText(p->x + 4, p->y + 4, p->label, PRGB(255, 230, 120));
+        if (c == 1 && sTouchUiN3ds) DrawText(p->x + p->w - 4 - 16, p->y + 4, "ZL", PRGB(200, 204, 214));
     } else if (i == P_BOOTS) {
         if (sShown.boots >= 1 && sShown.boots <= 3) {
             DrawIcon(cx - 20, p->y + 3, Port_GetItemIcon(PANEL_ITEM_BOOTS_KOKIRI + sShown.boots - 1), 40, 0);
         }
         DrawTextC(cx, p->y + p->h - 12, "BOOTS", COL_TEXT);
+        if (sTouchUiN3ds) DrawText(p->x + p->w - 4 - 16, p->y + 4, "ZR", PRGB(200, 204, 214)); /* ZR presses it */
     } else if (i == P_OCARINA) {
         int have = sShown.ocarina == PANEL_ITEM_OCARINA_FAIRY || sShown.ocarina == PANEL_ITEM_OCARINA_OF_TIME;
         if (have) DrawIcon(cx - 20, p->y + 3, Port_GetItemIcon(sShown.ocarina), 40, 0);
@@ -487,9 +520,8 @@ static void DrawPad(int i) {
         DrawTextC(cx, p->y + 5, "HUD", COL_TEXT); /* the HUD on the top screen ("TOP HUD" did not fit) */
         DrawTextC(cx, p->y + 18, gPortHudTop ? "ON" : "OFF", PRGB(255, 230, 120));
     } else {
-        /* tab: bold label */
-        DrawText(cx - (int)strlen(p->label) * 4, p->y + 12, p->label, COL_TEXT);
-        DrawText(cx - (int)strlen(p->label) * 4 + 1, p->y + 12, p->label, COL_TEXT);
+        /* tab: bold label, centered on its pixels between the tab's side rims (it sat 1-2 px right) */
+        DrawTextCB(cx, p->y + 12, p->label, COL_TEXT, 1);
     }
     sFbDirty = 1;
 }
@@ -807,6 +839,9 @@ static unsigned short Port3ds_TouchUiPoll(void) {
             gPortTouchPage = sPads[hit].page;
         }
     }
+    /* New 3DS: ZR is the BOOTS pad (pressed look while held) */
+    if (hidKeysDown() & KEY_ZR) gPortTouchBoots = 3;
+    if (hit < 0 && (hidKeysHeld() & KEY_ZR)) hit = P_BOOTS;
     if (hit != sHeldPad) {
         int old = sHeldPad;
         sHeldPad = hit;
@@ -900,6 +935,7 @@ static unsigned short Port3ds_TouchUiPoll(void) {
 }
 
 
+s8 gPortCamX, gPortCamY;     /* C-stick camera input for this update (z_camera.c) */
 static void Port3ds_PollInput(void) {
     hidScanInput();
     u32 k = hidKeysHeld();
@@ -907,8 +943,8 @@ static void Port3ds_PollInput(void) {
      *   A/B = A/B, L = Z-target, R = shield, Y/X = C-left/C-right, D-pad = C-up/C-down/C-left/C-right
      *   (the N64 D-pad is unused by OoT), SELECT = N64 L (minimap), START = START, touch panel =
      *   VIEW/C buttons/OCARINA/BOOTS/pause tabs/SCREEN + the minimap (docs/3ds-touch-panel.md).
-     * New 3DS extras: C-stick = the four C buttons, ZL = C-down (third item), ZR = C-up (first-person /
-     * Navi), so every item and the look view are reachable while moving. */
+     * New 3DS extras: C-stick = camera (settings cstick=0: the four C buttons), ZL = C-down (item slot I),
+     * ZR = BOOTS (cycles the owned boots, like tapping the pad; 2026-10-03, it was a third C-up). */
     unsigned short b = 0;
     if (k & KEY_A)      b |= BTN_A_;
     if (k & KEY_B)      b |= BTN_B_;
@@ -919,16 +955,31 @@ static void Port3ds_PollInput(void) {
     if (k & KEY_L)      b |= BTN_Z_;
     if (k & KEY_R)      b |= BTN_R_;
     if (k & KEY_ZL)     b |= BTN_CDOWN_;
-    if (k & KEY_ZR)     b |= BTN_CUP_;
+    /* ZR: the BOOTS pad (Port3ds_TouchUiPoll); C-up stays on VIEW and D-pad up */
     if (k & KEY_DUP)    b |= BTN_CUP_;
     if (k & KEY_DDOWN)  b |= BTN_CDOWN_;
     if (k & KEY_DLEFT)  b |= BTN_CLEFT_;
     if (k & KEY_DRIGHT) b |= BTN_CRIGHT_;
-    /* C-stick (New 3DS) -> C buttons */
-    if (k & KEY_CSTICK_UP)    b |= BTN_CUP_;
-    if (k & KEY_CSTICK_DOWN)  b |= BTN_CDOWN_;
-    if (k & KEY_CSTICK_LEFT)  b |= BTN_CLEFT_;
-    if (k & KEY_CSTICK_RIGHT) b |= BTN_CRIGHT_;
+    /* C-stick (New 3DS): turns the camera (z_camera.c Camera_Normal1) - PORT (2026-10-03), asked for on
+     * hardware; settings cstick=0 makes it the four C buttons again (they are on Y/X/ZL/ZR/D-pad too) */
+    gPortCamX = gPortCamY = 0;
+    if (sCstickCamera) {
+        static int sIrrst = -1;
+        circlePosition cs;
+        if (sIrrst < 0) sIrrst = R_SUCCEEDED(irrstInit());
+        if (sIrrst) {
+            irrstScanInput();
+            irrstCstickRead(&cs);
+            /* range about +-146; a dead zone, then -127..127 */
+            gPortCamX = (s8)(abs(cs.dx) < 20 ? 0 : (cs.dx > 146 ? 127 : cs.dx < -146 ? -127 : cs.dx * 127 / 146));
+            gPortCamY = (s8)(abs(cs.dy) < 20 ? 0 : (cs.dy > 146 ? 127 : cs.dy < -146 ? -127 : cs.dy * 127 / 146));
+        }
+    } else {
+        if (k & KEY_CSTICK_UP)    b |= BTN_CUP_;
+        if (k & KEY_CSTICK_DOWN)  b |= BTN_CDOWN_;
+        if (k & KEY_CSTICK_LEFT)  b |= BTN_CLEFT_;
+        if (k & KEY_CSTICK_RIGHT) b |= BTN_CRIGHT_;
+    }
     b |= Port3ds_TouchUiPoll();
 
     circlePosition cp;
@@ -1329,6 +1380,8 @@ void PortGfx_RunTask(OSTask* task) {
         }
     }
     if (!skip) {
+        extern int gPortFramesFollow;
+        gPortFramesFollow = (sInterp && sReplayN > 0) ? sReplayN : 0; /* gfx_3ds.c overlap: frames after the walk */
         Port3ds_SetSlot(0, (sInterp && sReplayN > 0) ? sReplayN + 1 : 1, Port3ds_UpdateRate());
         gfx_start_frame();
         gfx_run((Gfx*)task->t.data_ptr);
@@ -1398,6 +1451,7 @@ void PortGfx_RunTask(OSTask* task) {
             }
             u64 gateR = gPortGateTicksTotal;
             t0 = svcGetSystemTick();
+            { extern int gPortFramesFollow; gPortFramesFollow = sReplayN - 1 - i; }
             gfx_replay_frame(2 - sReplayN + 1 + i);
             gfx_end_frame();
             ms = (double)(svcGetSystemTick() - t0 - (gPortGateTicksTotal - gateR)) / (SYSCLOCK_ARM11 / 1000.0);
@@ -1406,6 +1460,12 @@ void PortGfx_RunTask(OSTask* task) {
             sInterpFrames++;
         }
         tC = svcGetSystemTick();
+    }
+    {
+        extern void Port3ds_EndUpdateFrames(void);
+        extern int gPortFramesFollow;
+        gPortFramesFollow = 0;
+        Port3ds_EndUpdateFrames(); /* gfx_3ds.c overlap: a citro3d frame still open (planned frames not drawn) ends */
     }
     gPortInterpOn = sInterp && !skip && sReplayN > 0; /* for the NEXT update's actor drawing (z_actor.c) */
     PROF_SET(PROF_PACE);
@@ -1425,7 +1485,7 @@ void PortGfx_RunTask(OSTask* task) {
           extern void PortDbgX(const char*, unsigned); extern void* gRegEditor;
           /* PORT (2026-10-01): the report goes to boot.log only while a measurement switch is on (prof,
            * perf_ab, gpu_ab, aa_ab): ~50 lines every 15 s, each flushed to the SD card, otherwise */
-          { extern int gPortPerfAB; sLogMute = !(sProfOn || gPortPerfAB || sGpuAB || sAaAB || sCmdflushAB || sPresentAB); }
+          { extern int gPortPerfAB; sLogMute = !(sProfOn || gPortPerfAB || sGpuAB || sAaAB || sCmdflushAB || sPresentAB || sOverlapAB); }
           PortDbgX("perf updates/s x10", (unsigned)(3000000ull / (t1 - t0 ? t1 - t0 : 1)));
           PortDbgX("perf frames shown/s x10 (60fps interp)",
                    (unsigned)((300ull - sSkipCount + sInterpFrames) * 10000ull / (t1 - t0 ? t1 - t0 : 1)));
@@ -1489,6 +1549,25 @@ void PortGfx_RunTask(OSTask* task) {
               PortDbgX("perf flip refreshes repeating a frame", gPortPerfFlipRepeats);
               gPortPerfFlipShown = gPortPerfFlipSkipped = gPortPerfFlipRepeats = 0;
           }
+          { /* gfx_3ds.c CPU/GPU overlap: frames that handed the GPU over without ending the citro3d frame */
+              extern int gPortOverlap;
+              extern u32 gPortPerfOverlapFrames;
+              extern float gPortPerfCmdBufMax;
+              PortDbgX("perf overlap on", (unsigned)gPortOverlap);
+              PortDbgX("perf overlap frames (of 300 updates)", gPortPerfOverlapFrames);
+              PortDbgX("perf cmdbuf peak use % (1 MB)", (unsigned)(gPortPerfCmdBufMax * 100.0f));
+              {
+                  extern u64 gPortPerfDepthWait;
+                  extern u32 gPortPerfDepthAsync;
+                  PortDbgX("perf queued depth copies read", gPortPerfDepthAsync);
+                  PortDbgX("perf us/read waiting for a queued depth copy",
+                           gPortPerfDepthAsync ? (unsigned)(gPortPerfDepthWait / gPortPerfDepthAsync / (SYSCLOCK_ARM11 / 1000000)) : 0);
+                  gPortPerfDepthWait = 0;
+                  gPortPerfDepthAsync = 0;
+              }
+              gPortPerfOverlapFrames = 0;
+              gPortPerfCmdBufMax = 0.0f;
+          }
           sReplayDropped = 0;
           sLateUpdates = sReplayNoChoice = 0;
           sReplayHist[0] = sReplayHist[1] = sReplayHist[2] = 0;
@@ -1540,6 +1619,11 @@ void PortGfx_RunTask(OSTask* task) {
                   extern int gPortPresentGate;
                   gPortPresentGate = !gPortPresentGate;
               }
+              static unsigned sOvReports;
+              if (sOverlapAB && (++sOvReports % 2) == 0) { /* from the next update (gfx_3ds.c reads it per frame) */
+                  extern int gPortOverlap;
+                  gPortOverlap = !gPortOverlap;
+              }
               static unsigned sCfReports;
               if (sCmdflushAB && (++sCfReports % 2) == 0) { /* applied from the next C3D_FrameEnd */
                   extern int gPortCmdlistFlush;
@@ -1581,6 +1665,79 @@ static void boot_flush(void) {
  * line (crash still leaves the last line on the card), and print to the console — no vblank
  * wait, no reopen. The bottom-screen console updates on the graph loop's own swap. */
 static FILE* sLogFile = NULL;
+/* PORT PERF (2026-10-03): once the game runs, log lines are written by a low-priority thread. Each line used
+ * to be flushed to the SD card on the spot; the perf report (~60 lines every 300 updates while a measurement
+ * switch is on) stalled the game for up to half a second each time (hardware v42: one update a retrace late in
+ * every report, felt as a pause "out of nowhere"). Boot messages stay synchronous: a crash during startup still
+ * leaves its last line in boot.log. */
+#define LOG_BUF 16384
+static char sLogBuf[2][LOG_BUF];
+static int sLogLen, sLogCur;
+static LightLock sLogLock;
+static LightEvent sLogEvent;
+static Thread sLogThread;
+static volatile int sLogAsync;
+
+static void Log_WriterThread(void* arg) {
+    (void)arg;
+    for (;;) {
+        char* buf;
+        int len;
+        LightEvent_Wait(&sLogEvent);
+        LightLock_Lock(&sLogLock);
+        buf = sLogBuf[sLogCur];
+        len = sLogLen;
+        sLogCur ^= 1; /* the game appends to the other buffer meanwhile */
+        sLogLen = 0;
+        LightLock_Unlock(&sLogLock);
+        if (len > 0) {
+            if (!sLogFile) sLogFile = fopen(LOG_PATH, "a");
+            if (sLogFile) {
+                fwrite(buf, 1, (size_t)len, sLogFile);
+                fflush(sLogFile);
+            }
+        }
+    }
+}
+
+static void Log_StartAsync(void) {
+    s32 prio = 0x30;
+    LightLock_Init(&sLogLock);
+    LightEvent_Init(&sLogEvent, RESET_ONESHOT);
+    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    sLogThread = threadCreate(Log_WriterThread, NULL, 8 * 1024, 0x3F, -2, true); /* lowest priority, same core */
+    sLogAsync = sLogThread != NULL;
+    (void)prio;
+}
+
+/* append one line for the writer thread (sLogAsync) */
+static void Log_Append(const char* s) {
+    int n = (int)strlen(s);
+    LightLock_Lock(&sLogLock);
+    if (sLogLen + n + 1 <= LOG_BUF) { /* full (the writer far behind): the line is dropped */
+        memcpy(sLogBuf[sLogCur] + sLogLen, s, (size_t)n);
+        sLogBuf[sLogCur][sLogLen + n] = '\n';
+        sLogLen += n + 1;
+    }
+    LightLock_Unlock(&sLogLock);
+    LightEvent_Signal(&sLogEvent);
+}
+
+/* before exit(): what the writer has not written yet (gfx_3ds.c HOME -> Close) */
+void Port3ds_LogFlush(void) {
+    if (!sLogAsync) return;
+    LightLock_Lock(&sLogLock);
+    if (sLogLen > 0) {
+        if (!sLogFile) sLogFile = fopen(LOG_PATH, "a");
+        if (sLogFile) {
+            fwrite(sLogBuf[sLogCur], 1, (size_t)sLogLen, sLogFile);
+            fflush(sLogFile);
+        }
+        sLogLen = 0;
+    }
+    LightLock_Unlock(&sLogLock);
+}
+
 static void Log(const char* s) {
     /* PORT (2026-09-20): an engine path calls the logger with an empty string ~15x/frame,
      * which flooded boot.log with bare '\n' (millions of lines / ~18 MB per session — real
@@ -1588,6 +1745,10 @@ static void Log(const char* s) {
      * lines carry no information, so drop them here at the chokepoint. */
     if (s == NULL || s[0] == '\0' || sLogMute) return;
     if (!sTouchUi) printf("%s\n", s); /* the bottom screen is the touch panel once it is up */
+    if (sLogAsync) {
+        Log_Append(s);
+        return;
+    }
     if (!sLogFile) sLogFile = fopen(LOG_PATH, "a");
     if (sLogFile) { fputs(s, sLogFile); fputc('\n', sLogFile); fflush(sLogFile); }
 }
@@ -1612,12 +1773,22 @@ void PortDbgX(const char* label, unsigned val) {
 /* Fast file-only loggers for high-volume renderer tracing (no console print). */
 void PortLogFast(const char* s) {
     if (s == NULL || s[0] == '\0') return;
+    if (sLogAsync) { /* the writer thread owns the file now */
+        Log_Append(s);
+        return;
+    }
     if (!sLogFile) sLogFile = fopen(LOG_PATH, "a");
     if (sLogFile) { fputs(s, sLogFile); fputc('\n', sLogFile); }
 }
 void PortLogFastX(const char* label, unsigned val) {
+    /* hex by hand like PortDbgX: the port's sprintf("%s=%08x") gives an empty string, so these lines were dropped */
     char buf[96];
-    sprintf(buf, "%s=%08x", label, val);
+    int n = 0, i;
+    static const char hx[] = "0123456789abcdef";
+    if (label) { while (label[n] != '\0' && n < 80) { buf[n] = label[n]; n++; } }
+    buf[n++] = '='; buf[n++] = '0'; buf[n++] = 'x';
+    for (i = 28; i >= 0; i -= 4) buf[n++] = hx[(val >> i) & 0xF];
+    buf[n] = '\0';
     PortLogFast(buf);
 }
 
@@ -1814,6 +1985,7 @@ int main(int argc, char** argv) {
       Audio_InitSound(); Log("Audio_InitSound done"); }
 
     Port3ds_TouchUiInit(); /* boot finished: the bottom screen becomes the control panel */
+    Log_StartAsync();      /* from here on the SD card is written by a background thread */
     Graph_ThreadEntry(0);
 
     boot_halt("graph loop exited");

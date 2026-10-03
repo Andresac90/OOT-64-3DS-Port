@@ -1599,6 +1599,10 @@ s32 Camera_Noop(Camera* camera) {
     return true;
 }
 
+#ifdef __3DS__
+static Camera* sPortCamHold; /* PORT: the camera whose C-stick angle is kept (Camera_Normal1) */
+#endif
+
 s32 Camera_Normal1(Camera* camera) {
     Vec3f* eye = &camera->eye;
     Vec3f* at = &camera->at;
@@ -1664,6 +1668,9 @@ s32 Camera_Normal1(Camera* camera) {
             rwData->swingYawTarget = atEyeGeo.yaw;
             sUpdateCameraDirection = 0;
             rwData->startSwingTimer = CAM_GLOBAL_50 + CAM_GLOBAL_51;
+#ifdef __3DS__
+            sPortCamHold = NULL; /* a new camera setting or scene starts without the C-stick angle */
+#endif
             break;
         default:
             break;
@@ -1767,6 +1774,28 @@ s32 Camera_Normal1(Camera* camera) {
         eyeAdjustment.pitch =
             Camera_CalcDefaultPitch(camera, atEyeNextGeo.pitch, roData->pitchTarget, rwData->slopePitchAdj);
     }
+#ifdef __3DS__
+    {
+        /* PORT (2026-10-03): the New 3DS C-stick turns the camera around Link (3ds_main.c Port3ds_PollInput;
+         * settings cstick=0 turns it off). While it is held it sets the angles from the current ones, about
+         * 180 degrees per second sideways and 90 up/down; stick right turns the view right, up looks up. Once
+         * released the angle stays while Link stands still (the N64 camera would swing back behind him within
+         * a second, measured in Azahar); when he moves, the camera follows him as before. */
+        extern s8 gPortCamX, gPortCamY;
+
+        if (camera->status != CAM_STAT_ACTIVE || camera->xzSpeed > 0.001f) {
+            sPortCamHold = NULL;
+        }
+        if ((gPortCamX != 0 || gPortCamY != 0) && (camera->status == CAM_STAT_ACTIVE)) {
+            eyeAdjustment.yaw = atEyeNextGeo.yaw - (s16)(gPortCamX * 13);
+            eyeAdjustment.pitch = atEyeNextGeo.pitch - (s16)(gPortCamY * 6);
+            sPortCamHold = camera;
+        } else if (sPortCamHold == camera) {
+            eyeAdjustment.yaw = atEyeNextGeo.yaw;
+            eyeAdjustment.pitch = atEyeNextGeo.pitch;
+        }
+    }
+#endif
 
     // set eyeAdjustment pitch from 79.65 degrees to -85 degrees
     if (eyeAdjustment.pitch > 0x38A4) {

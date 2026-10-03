@@ -1859,22 +1859,31 @@ static void gfx_sp_vertex_gpu(size_t n_vertices, size_t dest_index, const Vtx* v
                 mx[k] = o > mx[k] ? o : mx[k];
             }
         }
-        rej = 1 | 2 | 4 | 8 | 32;
-        for (c = 0; c < 8 && rej != 0; c++) {
-            float ox = (c & 1) ? mx[0] : mn[0], oy = (c & 2) ? mx[1] : mn[1], oz = (c & 4) ? mx[2] : mn[2];
-            float x = ox * m[0][0] + oy * m[1][0] + oz * m[2][0] + m[3][0];
-            float y = ox * m[0][1] + oy * m[1][1] + oz * m[2][1] + m[3][1];
-            float z = ox * m[0][2] + oy * m[1][2] + oz * m[2][2] + m[3][2];
-            float w = ox * m[0][3] + oy * m[1][3] + oz * m[2][3] + m[3][3];
-            uint8_t cr = 0;
-            x = (x + rsp.half_px_x * w) * aspect;
-            y -= rsp.half_px_y * w;
-            if (x < -w) cr |= 1;
-            if (x > w) cr |= 2;
-            if (y < -w) cr |= 4;
-            if (y > w) cr |= 8;
-            if (z > w) cr |= 32;
-            rej &= cr;
+        /* PORT (2026-10-03): the slot's output rows (y', -x', -(z + w) / 2, w: half-pixel offset and aspect
+         * included) for the logic frame and, when the walk records 60 fps in-between frames, for the t = 1/3 and
+         * 2/3 cameras those frames show: rejected only if off screen for all three. Judged by the logic frame's
+         * camera alone, objects at the trailing edge of a fast camera turn vanished from the in-between frames
+         * (whole sub-display lists too, through G_CULLDL; hardware v42). */
+        int k0 = gPortReplayRec ? 0 : 2, t;
+        rej = (slot == GPU_SLOT_IDENTITY) ? 0 : (1 | 2 | 4 | 8 | 32);
+        (void)m;
+        (void)aspect;
+        for (t = k0; t <= 2 && rej != 0; t++) {
+            const float(*r)[4] = (const float(*)[4])sGpuSlot[slot].rows[t];
+            for (c = 0; c < 8 && rej != 0; c++) {
+                float ox = (c & 1) ? mx[0] : mn[0], oy = (c & 2) ? mx[1] : mn[1], oz = (c & 4) ? mx[2] : mn[2];
+                float o0 = r[0][0] * ox + r[0][1] * oy + r[0][2] * oz + r[0][3]; /* y' */
+                float o1 = r[1][0] * ox + r[1][1] * oy + r[1][2] * oz + r[1][3]; /* -x' */
+                float o2 = r[2][0] * ox + r[2][1] * oy + r[2][2] * oz + r[2][3]; /* -(z + w) / 2 */
+                float w = r[3][0] * ox + r[3][1] * oy + r[3][2] * oz + r[3][3];
+                uint8_t cr = 0;
+                if (o1 > w) cr |= 1;   /* x' < -w */
+                if (o1 < -w) cr |= 2;  /* x' > w */
+                if (o0 < -w) cr |= 4;
+                if (o0 > w) cr |= 8;
+                if (o2 < -w) cr |= 32; /* z > w */
+                rej &= cr;
+            }
         }
     }
     for (size_t i = 0; i < n_vertices; i++, dest_index++) {
@@ -2791,8 +2800,8 @@ static void gpu_emit_cpu(const uint8_t vidx[3], const uint16_t sl[3]) {
         /* what the CPU path does before splitting: trivial off-screen rejection (all three outside the
          * same plane) and back/front-face culling (without them the split code also cut up triangles
          * the CPU path never drew: 156 vs 68 per-mille of frame time in "emit") */
-        uint8_t rej = 0x2F;
-        for (i = 0; i < 3; i++) {
+        uint8_t rej = gPortReplayRec ? 0 : 0x2F; /* recording: the in-between cameras may still see it */
+        for (i = 0; i < 3 && rej != 0; i++) {
             const PVtx* p = &pv[i];
             uint8_t r = 0;
             if (p->x < -p->w) r |= 1;
@@ -3546,6 +3555,11 @@ static void gfx_apply_scissor(void) {
  * capture instead and their rectangles span the whole target */
 static const void* sWideCapImg;     /* the wide capture standing for the current texture image, if any */
 static uint8_t sWideLoaded[2];      /* per TMEM slot: the last load came from the wide capture */
+/* WIDE_ACTIVE for the color image the game has set: the draw target follows it only at the next draw
+ * (gfx_select_target), and during the pause the frame's earlier draw is Link's off-screen preview, so the first
+ * strip was judged off-screen, stayed 320 wide and left black corners at the top (hardware v42) */
+#define WIDE_ACTIVE_CIMG() (gPortWidescreen && !sBgThisFrame && !sBgLastFrame && !sStereoRoomThisFrame && \
+                            sPrerenderedRecent == 0 && gfx_cimg_is_screen())
 int gPortFrameWide;                 /* gfx_3ds.c: this frame's 3D filled the whole width (set at the frame's end) */
 #endif
 static void gfx_dp_set_texture_image(uint32_t format, uint32_t size, uint32_t width, const void* addr) {
@@ -3686,7 +3700,7 @@ static void gfx_dp_load_tile(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t 
 #ifdef __3DS__
     slot = rdp.tiles[tile & 7].tmem != 0;
     sWideLoaded[slot] = 0;
-    if (sWideCapImg != NULL && WIDE_ACTIVE() && uls == 0 && (lrs >> G_TEXTURE_IMAGE_FRAC) == 319 &&
+    if (sWideCapImg != NULL && WIDE_ACTIVE_CIMG() && uls == 0 && (lrs >> G_TEXTURE_IMAGE_FRAC) == 319 &&
         (rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_COPY) {
         rdp.texture_to_load.addr = sWideCapImg; /* the same rows, 400 pixels wide */
         rdp.texture_to_load.width = 400;
@@ -3845,7 +3859,7 @@ static void gfx_dp_texture_rectangle_impl(int32_t ulx, int32_t uly, int32_t lrx,
     rdp.drawing_rect = true;
 #ifdef __3DS__
     if (sWideLoaded[rdp.tiles[tile & 7].tmem != 0] && (rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_COPY &&
-        ulx == 0 && WIDE_ACTIVE()) {
+        ulx == 0 && WIDE_ACTIVE_CIMG()) {
         /* the wide capture's strip: 400 texels, from the target's left edge (N64 x = -40) to its right (360) */
         struct TileDesc* t = &rdp.tiles[tile & 7];
         t->line_size_bytes = 400 * 2;
