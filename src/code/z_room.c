@@ -756,7 +756,21 @@ void Room_Draw(PlayState* play, Room* room, u32 flags) {
         gSegments[3] = OS_K0_TO_PHYSICAL(room->segment);
         ASSERT(room->roomShape->base.type < ARRAY_COUNTU(sRoomDrawHandlers),
                "this->ground_shape->polygon.type < number(Room_Draw_Proc)", "../z_room.c", 1125);
+#ifdef __3DS__
+        /* PORT (2026-10-05): the room's geometry between two G_NOOP tags (0x3D5E5200 begin, 0x3D5E5201 end), so the
+         * renderer knows which draws are static room geometry (gfx_pc.c) */
+        OPEN_DISPS(play->state.gfxCtx, "../z_room.c", 0);
+        if (flags & ROOM_DRAW_OPA) gDPNoOpTag(POLY_OPA_DISP++, 0x3D5E5200);
+        if (flags & ROOM_DRAW_XLU) gDPNoOpTag(POLY_XLU_DISP++, 0x3D5E5200);
+        CLOSE_DISPS(play->state.gfxCtx, "../z_room.c", 0);
+#endif
         sRoomDrawHandlers[room->roomShape->base.type](play, room, flags);
+#ifdef __3DS__
+        OPEN_DISPS(play->state.gfxCtx, "../z_room.c", 0);
+        if (flags & ROOM_DRAW_OPA) gDPNoOpTag(POLY_OPA_DISP++, 0x3D5E5201);
+        if (flags & ROOM_DRAW_XLU) gDPNoOpTag(POLY_XLU_DISP++, 0x3D5E5201);
+        CLOSE_DISPS(play->state.gfxCtx, "../z_room.c", 0);
+#endif
     }
 }
 

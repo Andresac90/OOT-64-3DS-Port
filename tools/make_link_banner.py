@@ -5,13 +5,14 @@ YOUR game data.
 Link's model is Nintendo's, so the images cannot be committed: this tool renders them locally and writes
 port/banner_local.bnr (and with --icon port/icon_local.png), both ignored by git. Makefile.3ds uses them when
 they exist, else the original artwork port/banner.bnr and port/icon.png (tools/make_banner.sh, tools/make_icon.py).
-The banner needs bannertool (https://github.com/diasurgical/bannertool) on PATH, in $BANNERTOOL or in
-$DEVKITPRO/tools/bin.
+The banner is stereoscopic (tools/make_banner3d.py: Link in front of the screen, the title at it, the sky behind) and
+needs bannertool (https://github.com/diasurgical/bannertool) on PATH, in $BANNERTOOL or in $DEVKITPRO/tools/bin,
+pycgfx (https://github.com/skyfloogle/pycgfx) in tools/pycgfx/ or $PYCGFX, and Python 3.10+ with gltflib.
 
 How: builds the port with GAME_EXTRA=-DPORT_ICONGEN (boots straight into Link's house, opens the pause
 menu, writes the Equipment page's Link preview, drawn at 2x = 128x224, to sdmc:/3ds/oot/link_icon.bin),
 runs it in Azahar, then rebuilds the normal ROM. The preview is cut out of its black background; the banner is
-tools/make_banner.py's with Link in place of the ocarina, the icon Link's head and shoulders on the original
+tools/make_banner3d.py's stereoscopic banner with Link in place of the ocarina (in front of the screen), the icon Link's head and shoulders on the original
 icon's night sky.
 
 usage: make_link_banner.py [--age adult|child] [--icon] [--raw link_icon.bin]   (--raw: only redo the images)
@@ -122,17 +123,15 @@ def bannertool():
 
 
 def make_banner(link, out):
-    """tools/make_banner.py's banner with Link in the left column, packed by bannertool. False: no bannertool."""
+    """the stereoscopic banner (tools/make_banner3d.py) with Link in front of the screen. False: no bannertool."""
     tool = bannertool()
     if tool is None:
         return False
     with tempfile.TemporaryDirectory() as tmp:
         link.save(os.path.join(tmp, "link.png"))
-        subprocess.run([sys.executable, os.path.join(REPO, "tools/make_banner.py"), tmp, os.path.join(tmp, "link.png")],
-                       check=True)
-        shutil.copy(os.path.join(tmp, "banner.png"), os.path.splitext(out)[0] + "_preview.png")
-        subprocess.run([tool, "makebanner", "-i", os.path.join(tmp, "banner.png"), "-a",
-                        os.path.join(tmp, "banner.wav"), "-o", out], check=True, stdout=subprocess.DEVNULL)
+        subprocess.run([sys.executable, os.path.join(REPO, "tools/make_banner3d.py"), out, "--figure",
+                        os.path.join(tmp, "link.png"), "--preview", os.path.splitext(out)[0] + "_preview.png"],
+                       check=True, env=dict(os.environ, BANNERTOOL=tool))
     return True
 
 

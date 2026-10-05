@@ -1,0 +1,10 @@
+# SCENE capture_frame end_frame script   (frames from the entry's start, including its transition)
+# Chamber of the Sages arrival cutscene (Link in the light crystal, the medallion pedestals): consecutive frames
+# to compare the crystal's env-mapped, rotating surface with the N64 frame by frame (flicker report 2026-10-05).
+SCENE_CHAMBER_OF_THE_SAGES 80  85  idle
+SCENE_CHAMBER_OF_THE_SAGES 100 105 idle
+SCENE_CHAMBER_OF_THE_SAGES 110 115 idle
+SCENE_CHAMBER_OF_THE_SAGES 111 116 idle
+SCENE_CHAMBER_OF_THE_SAGES 112 117 idle
+SCENE_CHAMBER_OF_THE_SAGES 113 118 idle
+SCENE_CHAMBER_OF_THE_SAGES 120 125 idle

@@ -16,34 +16,37 @@ This project is not affiliated with, endorsed by, or sponsored by Nintendo.
 
 ## Features
 
-- **Both consoles:** New 3DS and Old 3DS (Old 3DS currently runs below full speed, see [Status](#status)).
+- **Both consoles:** New 3DS at 60 frames per second, Old 3DS at the game's full speed with fewer frames shown
+  (see [Status](#status)).
 - **Top screen:** 400×240 gameplay, original 4:3 or widescreen (toggle on the touch screen, saved).
 - **Stereoscopic 3D** with the 3D slider: automatic convergence on Link, HUD and menus at screen depth.
 - **Bottom screen, in the style of *Ocarina of Time 3D*:** live minimap with Link's position and chest
-  markers, hearts and magic, rupees and keys, touch buttons for the C items (with ammo), first person / Navi,
+  markers, hearts and magic, rupees and keys, touch buttons for the C items (with ammo), first person / Navi
+  (the button pulses when Navi wants to talk, also with the top-screen HUD off),
   a dedicated **Ocarina** button, a **Boots** button that cycles the boots you own, and shortcuts to the
   Gear / Map / Items pause pages.
 - **Optional top-screen HUD** (on by default, can be hidden from the touch screen).
-- **Frame interpolation toward 60 fps** (experimental): the game logic keeps the N64's 20 updates per
-  second, and extra in-between frames are shown when there is CPU time for them.
+- **60 fps by frame interpolation:** the game logic keeps the N64's 20 updates per second, and in-between
+  frames are drawn from the game's own transforms (`fps60=0` shows the N64's 20).
 - **Accuracy work:** the renderer is compared frame by frame against the N64 running the same inputs
   (tools in `tools/statediff`), and the audio is compared against the N64's output.
 - Saves to the SD card (`sdmc:/3ds/oot/save.bin`).
+- A stereoscopic HOME Menu banner: the sky behind the screen, the title at it, the figure in front (move the 3D
+  slider while the game is selected).
 
 ## Status
 
-Work in progress. The title screen, file select and gameplay run on New 3DS at the N64's full game speed,
-but not every area and dungeon has been tested yet, and known issues remain (tracked in
-[PORT_ROADMAP.md](PORT_ROADMAP.md) and the issue tracker). Keep backups of `sdmc:/3ds/oot/save.bin`.
+Every scene of the game loads for both ages, and the game state matches the N64's (compared field by field
+with the N64 running the same inputs). A full playthrough on hardware is still in progress, so keep backups of
+`sdmc:/3ds/oot/save.bin`. Remaining items for 1.0: [docs/RELEASE_1.0.md](docs/RELEASE_1.0.md).
 
 | | New 3DS | Old 3DS |
 |---|---|---|
-| Game speed (N64 = 20 updates/s) | full speed | about half speed |
-| Frames shown per second (60 fps interpolation) | about 45–54 depending on the scene | 10 |
+| Game speed (N64 = 20 updates/s) | full speed | full speed |
+| Frames shown per second | 60 in 2D and 3D (measured on hardware) | depends on the scene: about 10–13 in the biggest (Kokiri Forest), around 45 in interiors such as Link's house, fewer in 3D (measured on a New 3DS running at Old 3DS speed with the Old 3DS's thread layout, and in the emulator at Old 3DS speed) |
 | Stereoscopic 3D | yes | yes |
 
-Performance is the current focus; progress and measurements are in
-[docs/3ds-60fps-plan.md](docs/3ds-60fps-plan.md).
+Measurements and the work behind them: [docs/3ds-60fps-plan.md](docs/3ds-60fps-plan.md).
 
 ## Requirements
 
@@ -54,7 +57,8 @@ Performance is the current focus; progress and measurements are in
 - The 3DS DSP firmware dump for sound: `sdmc:/3ds/dspfirm.cdc`. Luma3DS creates it from your own console:
   Rosalina menu (L + D-pad down + SELECT) → Miscellaneous options → **Dump DSP firmware**.
 - A computer to build on (macOS or Linux; WSL on Windows) with [devkitPro](https://devkitpro.org/wiki/Getting_Started)
-  (`3ds-dev`: devkitARM, libctru, citro3d, picasso, makerom).
+  (`3ds-dev`: devkitARM, libctru, citro3d, picasso) and `makerom` from
+  [Project_CTR](https://github.com/3DSGuy/Project_CTR/releases) on your `PATH` (not part of devkitPro).
 
 ## Building
 
@@ -66,11 +70,13 @@ export DEVKITPRO=/opt/devkitpro DEVKITARM=/opt/devkitpro/devkitARM
 # 2. Your ROM (never commit it; *.z64 is ignored by git)
 cp /path/to/your/oot-us-1.0.z64 baseroms/ntsc-1.0/baserom.z64
 
-# 3. Extract the assets from your ROM (the decompilation's setup step; needs Python 3)
+# 3. Extract the assets from your ROM (the decompilation's setup step; needs Python 3.10 or newer -
+#    macOS's own python3 is 3.9: first `python3.12 -m venv .venv` with Homebrew's python@3.12)
 make setup VERSION=ntsc-1.0          # macOS: use gmake (Homebrew make) for steps 3 and 4
 
-# 4. Generate the sources the 3DS build includes (textures, soundfonts, text)
-make VERSION=ntsc-1.0 -j8
+# 4. Generate the sources the 3DS build includes (textures, soundfonts, text). COMPARE=0: the N64 ROM it also
+#    builds differs from the retail one (the port changes shared sources), which is expected
+make VERSION=ntsc-1.0 COMPARE=0 -j8
 
 # 5. Build the 3DS port
 make -f Makefile.3ds cia             # -> build/3ds/oot.cia (install with FBI)
@@ -79,11 +85,13 @@ make -f Makefile.3ds cci             # -> build/3ds/oot.3ds (for the Azahar emul
 
 Step 3 also creates `baseroms/ntsc-1.0/baserom-decompressed.z64`, which the game reads at run time.
 
-**Optional, HOME Menu art from your game data** (needs Azahar and Pillow): `python3 tools/make_navi_icon.py`
-renders Navi from the game's own model into `port/icon_local.png` (the icon), and `python3 tools/make_link_banner.py`
-(also needs [bannertool](https://github.com/diasurgical/bannertool)) renders Link into `port/banner_local.bnr`
-(the banner). Later builds use them. These files are ignored by git and must never be shared; without them the
-build uses the original artwork (a drawn fairy and an ocarina).
+**Optional, Link and Navi on the HOME Menu, from your game data** (needs the Azahar emulator and Python 3.10+
+with Pillow and gltflib): `python3 tools/make_link_banner.py` renders Link's 3D model and puts him in front of the
+screen in the stereoscopic top-screen banner (`port/banner_local.bnr`; also needs
+[bannertool](https://github.com/diasurgical/bannertool) and [pycgfx](https://github.com/skyfloogle/pycgfx), cloned
+into `tools/pycgfx/`), and `python3 tools/make_navi_icon.py` renders Navi into the icon (`port/icon_local.png`). Run them before step 5; later builds use them. These files
+are made from Nintendo's models, so they are ignored by git and must never be shared; without them the build uses
+the original artwork (a drawn fairy and an ocarina).
 
 **Troubleshooting (macOS):** if Anaconda or Miniconda is on your `PATH`, the audio tools can link against
 its libxml2 and then fail with `Library not loaded: @rpath/libxml2.2.dylib`. Run steps 3 and 4 with conda
@@ -93,7 +101,9 @@ Detailed notes, emulator testing and debugging tools: [docs/BUILDING_3DS.md](doc
 
 ## Installation
 
-1. Install `build/3ds/oot.cia` with FBI.
+1. Install `build/3ds/oot.cia` with FBI. Updating from a development build: if the HOME Menu still shows the old
+   icon or banner, delete the title in FBI and install again (saves are on the SD card and stay). Builds before
+   October 2026 used the title ID `0xF8000`: delete that title once.
 2. Copy `baseroms/ntsc-1.0/baserom-decompressed.z64` to the SD card as:
    ```
    sdmc:/3ds/oot/baserom-decompressed.z64
@@ -123,26 +133,45 @@ Every action is reachable on an Old 3DS without ZL/ZR or the C-Stick. Details:
 
 ## Settings
 
-Most options are on the touch screen and are saved to `sdmc:/3ds/oot/settings.txt`. A few more can be
-set by editing that file (one `name=value` per line):
+Most options are on the touch screen and are saved to `sdmc:/3ds/oot/settings.txt`. A few more can be set by
+editing that file (one `name=value` per line):
 
 | Setting | Default | Effect |
 |---|---|---|
-| `widescreen` | 0 | 1 = widescreen, 0 = original 4:3 |
-| `hud` | 1 | top-screen HUD on/off |
-| `fps60` | 1 | frame interpolation: 0 = off (20 fps, like the N64) |
+| `widescreen` | 0 | 1 = widescreen, 0 = original 4:3 (also on the touch screen) |
+| `hud` | 1 | top-screen HUD on/off (also on the touch screen) |
+| `fps60` | 1 | 60 fps frame interpolation; 0 = the N64's 20 frames per second |
 | `frameskip` | automatic | 1 = skip drawing an update when the game falls behind (default on Old 3DS), 0 = never |
-| `aa` | 0 | 1 = anti-aliasing (smoother edges, but more than twice the GPU work: about 38 instead of 53 frames per second on New 3DS) |
 | `cstick` | 1 | New 3DS C-Stick: 1 = camera, 0 = the four C buttons |
-| `overlap` | 1 | 1 = the CPU prepares the next frame while the GPU draws (faster, mostly in 3D); 0 = one at a time |
-| `gpu_vtx` | 1 | vertex processing on the GPU (faster on both consoles); 0 = on the CPU |
-| `prof` | 0 | 1 = per-stage CPU profile in `boot.log` (for bug reports about speed) |
+| `aa` | 0 | 1 = anti-aliasing: smoother edges, but more than twice the GPU work (the frame rate drops well below 60) |
+| `audio_share` | 55 | Old 3DS: percent of the system core for the audio mixer (less: crackling; more: slower system services) |
+
+### Diagnostics
+
+For bug reports and measurements only; the defaults are the fastest and most accurate settings.
+
+| Setting | Default | Effect |
+|---|---|---|
+| `prof` | 0 | 1 = per-stage CPU profile and performance figures in `boot.log` (for bug reports about speed) |
+| `render_thread` | 1 | New 3DS: draw on core 2 while the game computes the next update; 0 = one core |
+| `overlap` | 1 | 1 = the CPU prepares the next frame while the GPU draws; 0 = one at a time |
+| `raw_vtx` | 1 | 1 = the GPU's vertex shader does the N64's per-vertex work on the game's own vertices; 0 = the CPU prepares every vertex |
+| `raw_ratio` | 30 | geometry whose far side is more than this / 10 times farther than its near side stays on the CPU path, which reproduces the N64's screen-linear shading |
+| `fastswitch` | 1 | 0 = switch between the two vertex programs through citro3d (for graphics bug reports) |
+| `replay_copy` | 1 | 1 = 60 fps in-between frames are copies of the first frame's GPU commands with the matrices patched; 0 = each replays the draw log (`replay_copy_check=1` compares both) |
+| `raw_relax` | 0 | Old 3DS: 1 = geometry near the camera stays on the raw vertex path (only triangles reaching behind the eye are clipped on the CPU): about 8% less drawing time, less N64-accurate shading |
+| `gpu_vtx` | 1 | vertex processing on the GPU; 0 = on the CPU |
+| `o3ds_sim`, `o3ds_layout` | 0 | on a New 3DS: 1 = Old 3DS speed (268 MHz, no L2 cache) / the Old 3DS thread layout |
+| `perf_ab`, `raw_vtx_ab`, `render_thread_ab`, `audio_share_ab`, ... | 0 | 1 = alternate one option during a session to compare both in `boot.log` |
+
+Holding L while the game starts reads `settings_b.txt` instead (when it exists): a second set of settings for tests.
 
 ## Bug reports
 
 Please open an issue with the console model (Old / New 3DS), what happened and where in the game, and attach
-`sdmc:/3ds/oot/boot.log` from the session (it is rewritten each launch, so copy it right after the problem).
-A photo of the screen helps for graphics issues.
+`sdmc:/3ds/oot/boot.log` from the session (each launch rewrites it and keeps the previous one as
+`boot_prev.log`). A photo of the screen helps for graphics issues; `prof=1` in `settings.txt` adds performance
+figures to the log.
 
 ## Legal
 
@@ -169,6 +198,9 @@ A photo of the screen helps for graphics issues.
   details. Ship of Harkinian's frame interpolation design also informed this port's.
 - [Zelda64Recomp](https://github.com/Zelda64Recomp/Zelda64Recomp) and [RT64](https://github.com/rt64/rt64):
   reference for the transform tagging used by the 60 fps interpolation.
+- The [Super Mario 64 3DS port by Wyatt-James](https://github.com/Wyatt-James/sm64-3ds-port) ("Emu64": N64
+  vertices processed by the 3DS vertex shader) and [gdx-3ds](https://github.com/cruxxxxxx/gdx-3ds) (render
+  thread on the New 3DS, hardware findings): design references.
 - [devkitPro](https://devkitpro.org/), libctru and citro3d; [stb_image](https://github.com/nothings/stb);
   the [Azahar](https://github.com/azahar-emu/azahar) emulator and the [ares](https://ares-emu.net/) N64
   emulator, used for testing.
@@ -182,4 +214,5 @@ Licenses and terms of the code this port builds on: [THIRD_PARTY_NOTICES.md](THI
 - [docs/3ds-touch-panel.md](docs/3ds-touch-panel.md): controls, touch panel, minimap
 - [docs/3ds-stereo-3d.md](docs/3ds-stereo-3d.md): stereoscopic 3D design
 - [docs/3ds-60fps-plan.md](docs/3ds-60fps-plan.md): performance and 60 fps work
-- [PORT_ROADMAP.md](PORT_ROADMAP.md): port status and history
+- [docs/RELEASE_1.0.md](docs/RELEASE_1.0.md): what was verified for 1.0, and how
+- [PORT_ROADMAP.md](PORT_ROADMAP.md): development history (bring-up notes)

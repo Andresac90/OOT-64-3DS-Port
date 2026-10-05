@@ -75,7 +75,7 @@ AccessControlInfo:
   IdealProcessor                : 0
   AffinityMask                  : 1
   Priority                      : 16
-  MaxCpu                        : 0x9E # Default
+  MaxCpu                        : 0xD9 # up to 89% of the system core for the Old 3DS audio mixer (default 0x9E = 30%)
   HandleTableSize               : 0x200
   DisableDebug                  : false
   EnableForceDebug              : false

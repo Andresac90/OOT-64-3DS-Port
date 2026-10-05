@@ -1,0 +1,18 @@
+# Title -> file select -> File 1 (empty) -> name entry; three letters, START (cursor to END), A: the file is created
+# and saved (SRAM write -> sdmc:/3ds/oot/save.bin, "[save] written" in boot.log). Frames = GameState_Update calls.
+0    0      0 0
+700  START  0 0
+703  0      0 0
+790  A      0 0
+793  0      0 0
+900  A      0 0
+903  0      0 0
+915  A      0 0
+918  0      0 0
+930  A      0 0
+933  0      0 0
+950  START  0 0
+953  0      0 0
+970  A      0 0
+973  0      0 0
+capture 1100

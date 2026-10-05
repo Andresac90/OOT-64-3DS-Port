@@ -17,7 +17,9 @@ instead of `gmake`.
 
 ### devkitPro
 Install devkitPro's pacman ([instructions](https://devkitpro.org/wiki/Getting_Started)), then the 3DS
-toolchain (devkitARM, libctru, citro3d, picasso, 3dsxtool, makerom):
+toolchain (devkitARM, libctru, citro3d, picasso, 3dsxtool). `makerom` (for the `.3ds` and `.cia` files) is not part
+of devkitPro: download it from [Project_CTR's releases](https://github.com/3DSGuy/Project_CTR/releases) (tested with
+v0.19.0) and put it on your `PATH`.
 ```bash
 sudo dkp-pacman -S 3ds-dev
 # in ~/.zprofile:
@@ -28,7 +30,12 @@ export PATH=$PATH:$DEVKITPRO/tools/bin
 
 ### Tools for the decompilation's asset extraction (Homebrew)
 ```bash
-brew install coreutils make gsed libxml2
+brew install coreutils make gsed libxml2 python@3.12
+```
+The extraction tools need Python 3.10 or newer; macOS's own `python3` is 3.9 and fails during setup
+(`TypeError: unsupported operand type(s) for |`). Create the Python environment with a newer one before step 2:
+```bash
+python3.12 -m venv .venv
 ```
 If Anaconda or Miniconda is on your `PATH`, the decompilation's audio tools can link against conda's
 libxml2 and fail at run time (`Library not loaded: @rpath/libxml2.2.dylib`). Run the steps below with
@@ -51,9 +58,18 @@ at `baseroms/ntsc-1.0/baserom-decompressed.z64`: setup accepts it when its check
 The 3DS build includes sources that the decompilation's own build generates (textures, soundfonts, text
 tables). Run its build once:
 ```bash
-gmake VERSION=ntsc-1.0 -j8
+gmake VERSION=ntsc-1.0 COMPARE=0 -j8
 ```
-This also produces an N64 ROM in `build/ntsc-1.0/`, which the 3DS port does not use.
+This also produces an N64 ROM in `build/ntsc-1.0/`, which the 3DS port does not use. It differs from the retail ROM
+(the port changes some shared sources), so the decompilation's final checksum check is turned off with `COMPARE=0`;
+without it the step ends with `md5sum: WARNING: 1 computed checksum did NOT match` on Linux.
+
+### HOME Menu art (optional)
+`port/banner.bnr` is committed, so builds need nothing else. To regenerate the stereoscopic banner
+(`tools/make_banner.sh`, or `tools/make_link_banner.py` for Link from your game data) you need bannertool, Python
+3.10+ with Pillow and gltflib (`pip install gltflib pillow`), and pycgfx:
+`git clone https://github.com/skyfloogle/pycgfx tools/pycgfx` (ignored by git). The tools write a side-by-side
+preview of both eyes next to the banner.
 
 ## 4. Build the port
 ```bash

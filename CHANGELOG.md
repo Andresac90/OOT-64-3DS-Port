@@ -4,6 +4,17 @@ No game builds are published; each version is a source release. See the [README]
 
 ## Unreleased (toward 1.0)
 
+Highlights so far (1.0 also needs 60 fps on the Old 3DS):
+- The whole game: every scene of both ages loads, and the game state matches the N64's in 96-98 of 101 scenes
+  (101-scene tours compared field by field; the rest are small known differences), with the original audio.
+- New 3DS: 60 frames per second in 2D and in 3D (the game keeps the N64's 20 updates per second; the frames in
+  between are interpolated), stereoscopic 3D, widescreen option, C-Stick camera.
+- Old 3DS: the game runs at its full speed; frames are skipped when the console cannot draw them all (about 10-13
+  per second in the biggest scenes such as Kokiri Forest, around 45 in interiors such as Link's house). 60 frames
+  per second on the Old 3DS is the remaining 1.0 goal.
+- An OoT3D-style touch screen: C items, ocarina, boots, pause pages, minimap, HUD and screen options.
+- Saves are written atomically to the SD card; the HOME menu and sleep (closing the lid) work.
+
 The title ID changed to `0xF0C64`: uninstall the previous version with FBI once. Saves are not affected.
 
 Plan and criteria: [docs/RELEASE_1.0.md](docs/RELEASE_1.0.md).
@@ -29,8 +40,64 @@ Plan and criteria: [docs/RELEASE_1.0.md](docs/RELEASE_1.0.md).
 - New 3DS ZR presses the BOOTS pad (cycles the owned boots).
 
 ### Changed
+- In-between frames by copy (`replay_copy`, on by default): an update's 60 fps frames differ only in their matrices,
+  so the walk draws the first one itself and the others are copies of its GPU commands with the matrices patched in,
+  instead of each replaying the walk's draw log through citro3d. Measured in the emulator: an in-between frame
+  costs a quarter to a sixth of before (attract demo 2.5 -> 0.6 ms, Kokiri Forest 4.8 -> 0.8 ms), about a fifth
+  less render CPU per update; at Old 3DS speed Link's house went from 28 to 46 frames shown per second. Checked
+  word for word against the draw log's replay (`replay_copy_check=1`) over thousands of frames, in 2D and 3D. The
+  draw log's replay also starts from the walk's draw state now (it started from the state the walk ended in).
+- `raw_relax=1` (Old 3DS, off by default): geometry reaching the camera stays on the raw vertex path and only
+  triangles with a vertex at or behind the eye are clipped on the CPU; deep geometry is not split for the N64's
+  screen-linear shading. Kokiri Forest: 72% -> 85% of the triangles on the raw path, 8% less drawing time - but 19%
+  more error against the N64 over 20 tour scenes, so it stays an option.
 - Anti-aliasing is off by default (`aa=1` turns it on): it more than doubled the GPU's work per frame; New 3DS in 2D
   went from about 38 to 53 frames shown per second without it (the 800-pixel-wide mode stays).
+- Render thread (`render_thread`, on by default): the game computes the next update while another CPU core draws the
+  current one, as the N64's CPU and RCP did. New 3DS: drawing on core 2. Not on the Old 3DS: its second core is
+  shared with the system, which keeps most of it (measured: drawing there was 3-4 times slower, and the game loop
+  there could not keep up), so the Old 3DS draws on core 0 and only the audio mixer uses core 1. If the renderer ever
+  stops for 2 seconds, `boot.log` names where.
+- About a fifth less CPU per drawn frame (measured with the new `tools/pcprof.py`, a sampling profiler through
+  Azahar's GDB stub): dead timing code from the PC port, faster palette loads and per-command bookkeeping, fewer
+  per-triangle and per-vertex checks, and faster copies of two citro3d routines (`port/src/gfx3ds/c3d_fast.c`).
+- Old 3DS audio: the title now allows up to 89% of the system core (`port/oot.rsf` MaxCpu; it was the template's
+  30%, which silently refused the port's request). At 30% each mixer task took 12-18 ms instead of ~4, and the game
+  waited on it: very low frame rate and crackling audio at Old 3DS speed (hardware v52). At 80% (v54) the mixer kept
+  up, but every request to the system services on that core got slower, and the game's audio engine took 3-4 times
+  longer, on a New 3DS too. Now: no share at all on a New 3DS (the mixer is on core 2), 55% on an Old 3DS
+  (`audio_share`; `audio_share_ab=1` cycles 30/55/80 for a measurement). The share and the New 3DS speed mode are
+  re-applied after the HOME menu or sleep, which reset them.
+- CPU cache flushes for the GPU and the DSP (vertex buffers, audio buffers, the frame) go to the kernel directly
+  instead of through the GPU and DSP system services.
+- Visible facets on Link's hat (hardware v54): a triangle joining two limbs was lit with the first limb's light
+  directions on the raw vertex path. Such triangles, and triangles joining a raw and a CPU-prepared load (which were
+  dropped or got wrong colours), are now lit on the CPU with each vertex's own lights. Also fewer draws (-12%).
+- Holding L while the game starts uses `settings_b.txt` instead of `settings.txt` (when present), and the previous
+  session's log is kept as `boot_prev.log`: two test setups in one sitting.
+- Each save writes one line to `boot.log` with its duration (or the step that failed).
+- The HOME Menu banner is stereoscopic: three picture layers at different depths for the HOME Menu's camera (the sky
+  behind the screen, the title at it, the ocarina - or Link, with the optional local tool - in front).
+  `tools/make_banner3d.py` builds it with pycgfx (glTF to CGFX) and bannertool.
+- The touch screen's NAVI button pulses (blue and green) while Navi wants to talk, so her call is noticed with the
+  top-screen HUD off.
+- The CIA carries the title version 1.0.0, so FBI installs it as an update and the HOME Menu refreshes its icon and
+  banner.
+- Touch pads no longer miss quick taps when the frame rate is low: taps between two updates are kept until the next
+  one reads them.
+- `render_thread=0` was written to `settings.txt` after a session in the Old 3DS layout, turning the render thread
+  off for later sessions.
+- Raw vertex path (`raw_vtx`, on by default; `raw_vtx_ab=1` alternates it for measurements): the game's own 16-byte
+  N64 vertices go to the GPU unchanged, and the vertex shader does what the N64's RSP did per vertex (matrix,
+  directional lights, texture coordinates, fog), as the Super Mario 64 3DS port does. The CPU no longer transforms,
+  lights or packs most vertices, and writes 16 bytes per vertex instead of 56. Geometry near the camera or very
+  deep (floors under Link, long corridors) keeps the CPU path, which reproduces the N64's screen-linear shading:
+  the N64 comparison is unchanged (7 most shading-sensitive scenes). About 15% less renderer CPU in Azahar; more is
+  expected on hardware, where the Old 3DS spent 12-17% of its time writing vertices.
+- Smaller GPU command lists: raw-path parameters are only re-sent when they change (about a fifth less command data
+  per frame), switching between the raw and the CPU-prepared vertex programs sends only the 9 GPU registers that
+  differ instead of citro3d's whole program setup (18 command words instead of ~100; `fastswitch=0` restores
+  citro3d's way), and vertices are written to the vertex buffer as whole blocks.
 - The CPU builds the next frame while the GPU draws the previous one (`overlap=0` to disable): the three frames of
   an update used to take turns with the GPU, which cost the most in 3D.
 - 60 fps pacing: frames are drawn into a ring of buffers and a small thread shows each at its refresh (flip
@@ -43,6 +110,12 @@ Plan and criteria: [docs/RELEASE_1.0.md](docs/RELEASE_1.0.md).
   game for up to half a second each time it was written.
 
 ### Fixed
+- Metallic and crystal surfaces with linear environment maps (`G_TEXTURE_GEN_LINEAR`): the map was squeezed 1.57x (the
+  PC-port formula `acos(-x) / 4` spans more than the plain mapping's range; GlideN64's spans the same). The blue
+  warp's crystal in the Chamber of the Sages came out streaked white, hid Link and flickered as it turned: 10-11.5% of
+  the pixels off against the N64 before, 3-4% after (`tools/statediff/scenarios/chamber_child.txt`).
+- Color combines of the form `(A - B) * C + A` are exact now (computed as `2 * (A - lerp(A, B, C) / 2)`): they were too
+  bright wherever A < B * C (the warp crystal's `(TEXEL0 - PRIM) * PRIM_LOD_FRAC + TEXEL0`).
 - Widescreen pause menu: black bars at the top left and right (the background's first strip stayed 4:3 because the
   previous draw went to Link's off-screen preview).
 - 60 fps: objects at the screen edge popped in late while the camera turned fast; the renderer now keeps everything

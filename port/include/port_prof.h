@@ -27,6 +27,13 @@ enum {
     PROF_SPLIT,      /* N64-exact triangle splitting/clipping (gfx_emit_tri_one's slow path) */
     PROF_GPU_PAL,    /* GPU path: matrix palette lookup/insert per triangle */
     PROF_GPU_PACK,   /* GPU path: packing vertices new to the batch (uv, colour, palette index) */
+    /* PORT (2026-10-04): finer stages for the Old 3DS hardware profile */
+    PROF_VTX_BOX,    /* G_VTX: the load's bounding box (off-screen rejection, raw-path near/depth test) */
+    PROF_VTX_RAW,    /* G_VTX: raw-path load (pointers only) */
+    PROF_RAW_EMIT,   /* raw-path triangle: palette, parameters, 16-byte vertex copies */
+    PROF_C3D_CTX,    /* citro3d C3Di_UpdateContext: dirty render state, textures, combiners, program */
+    PROF_C3D_UNIF,   /* citro3d C3D_UpdateUniforms */
+    PROF_C3D_DRAW,   /* citro3d draw command (fixed register sequence) */
     PROF_COUNT
 };
 extern volatile unsigned char gPortProf;

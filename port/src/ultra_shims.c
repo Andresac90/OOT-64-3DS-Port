@@ -110,12 +110,23 @@ void PortShim_RaiseEvent(OSEvent e) {
 OSIntMask osSetIntMask(OSIntMask mask) { (void)mask; return OS_IM_ALL; }
 u32 osGetIntMask(void) { return OS_IM_ALL; }
 
+#ifdef __3DS__
+extern u64 svcGetSystemTick(void);
+/* OS_CLOCK_RATE ticks (46.875 MHz counter on N64) from the 268.111856 MHz system tick: tick * 46875000 / 268111856
+ * as a 32.32 fixed-point product (clock_gettime's 64-bit software divisions were measurable on the Old 3DS) */
+static u64 TicksNow(void) {
+    const u64 k = 750905219ULL; /* 46875000 / 268111856 * 2^32 */
+    u64 t = svcGetSystemTick();
+    return (t >> 32) * k + (((t & 0xFFFFFFFFULL) * k) >> 32);
+}
+#else
 static u64 TicksNow(void) {
     struct PortTimespec ts;
     clock_gettime(PORT_CLOCK_MONOTONIC, &ts);
     /* OS_CLOCK_RATE ticks (46.875 MHz counter on N64) */
     return (u64)ts.tv_sec * 46875000ULL + (u64)ts.tv_nsec * 46875ULL / 1000000ULL;
 }
+#endif
 
 #ifndef __3DS__
 /* on 3DS, libctru provides osGetTime — avoid the symbol collision */
@@ -227,7 +238,9 @@ extern void PortDbgX(const char* label, unsigned val);
 static void Port3ds_PumpAudio_impl(void);
 void Port3ds_PumpAudio(void) {
     extern volatile unsigned char gPortProf;
+    extern void Port3ds_ScanBetweenUpdates(void);
     unsigned char prev = gPortProf;
+    Port3ds_ScanBetweenUpdates(); /* (3ds_main.c: taps between updates) */
     gPortProf = 10; /* PROF_AUDIO (port_prof.h) */
     Port3ds_PumpAudio_impl();
     gPortProf = prev;

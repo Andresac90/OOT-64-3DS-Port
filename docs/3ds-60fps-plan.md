@@ -381,3 +381,147 @@ depth copy nothing. statediff builds keep the eager per-frame copy. The asynchro
   ~12 ms per update in 3D and ~6 in 2D. `overlap_ab=1` alternates it every 2 reports for the hardware comparison.
 - **Next:** the second submission of every draw in 3D (a command list reused for both eyes), then the Old 3DS renderer
   (static room geometry reused between frames).
+
+### 2026-10-03 (evening): v47 hardware, Old 3DS profile, render thread (v49)
+
+- **v47 (New 3DS):** 2D 59.7-59.8 frames shown per second with the overlap on (58.2 / 53.3 with it off), 3D 53-58 with
+  dips in big views (Kokiri Forest from above); the overlap is now always on. Old 3DS speed: full game speed, 9.4-11
+  frames shown (frame skip every other update): logic + audio ~13 ms per update, renderer ~38 ms per drawn frame.
+- **Renderer CPU -16% to -22% (v48):** measured with `tools/pcprof.py` (Azahar GDB-stub PC sampling), see
+  docs/3ds-native-speed-research.md. On the Old 3DS this should make most updates fit in 50 ms (no frame skip).
+- **Render thread (`render_thread`, off by default; `render_thread_ab=1` alternates every 2 reports):** the game thread
+  hands each update's display list to a thread on core 2 (New 3DS) and goes on with the next update's logic, the
+  N64's CPU/RCP split. One update in flight (the next hand-over waits for the renderer), game requests latched per
+  frame (pause capture, menu stereo flag, Link's distance), texture-cache invalidations from the game thread queued,
+  depth read only from queued copies, audio pumped only by the game thread, HOME / sleep handled on the game thread
+  while the renderer is idle. Azahar: 7-scene N64 comparison unchanged with it on, pause capture correct, 3D and Old
+  3DS paths run; Azahar runs all emulated cores on one host thread, so the gain is hardware-only. Not used on the
+  Old 3DS yet (its second core is shared with the system and the audio mixer).
+
+### 2026-10-03 (night): v49 hardware, the Old 3DS layout (v50)
+
+- **v49, render thread A/B:** New 3DS 2D 59.7-59.8 shown with and without it; 3D with it up to 59.8 (a report entirely
+  in 3D), 56-58 otherwise. At Old 3DS speed (on core 2, which a real Old 3DS does not have): 58.4 frames shown in a
+  light scene (1,130 triangles, walk 24.8 ms), ~20 in a heavy one (2,169 triangles, walk 43.6 ms); without it ~10
+  (frame skip every other update; the walk's time also includes the audio pumps made during it). Now on by default.
+- **Old 3DS layout (v50):** core 1 gives an application at most 55% safely (stock firmware 30%), too little for the
+  drawing but enough for the game logic and the audio engine (~13 ms per update at 268 MHz). The game loop moves to a
+  thread on core 1; the main thread (core 0) waits for the frames it hands over and draws them, with the audio mixer
+  beside it. Expected on a real Old 3DS: about 39 ms of drawing per update, enough for 60 frames in light scenes.
+  `o3ds_layout=1` forces it on a New 3DS, with `o3ds_sim=1` (268 MHz, no L2) for a faithful Old 3DS test. Azahar:
+  7-scene N64 comparison unchanged in this layout.
+
+### 2026-10-03 (late): v50 on hardware, Old 3DS layout corrected (v51)
+
+- **v50 (game on core 1, drawing on core 0), Old 3DS speed:** low frame rate and crackling audio from the title
+  screen (41 instead of 60 updates per second, 57.6 audio pumps per second instead of 60): at 55% of core 1 the game
+  thread could not keep up. Turning 3D off froze the game (no crash dump; the log stopped at `[stereo] leave`, the
+  low-priority log writer shared core 0 with the busy renderer).
+- **v51:** the game and all of the audio stay on core 0 (~27 ms of 50 per update at 268 MHz); only the drawing goes
+  to core 1 (`o3ds_layout=1` on a New 3DS). The game thread pumps audio while it waits for a slow frame. Azahar at
+  25% CPU: 18.9 updates and 21.6 frames shown per second, 60.2 audio pumps per second (single core: ~11 shown).
+  Watchdog: if the renderer has not finished a frame for 2 s, `boot.log` gets `[render] STUCK ... phase N` (1 job
+  start, 2 frame start, 3 walk, 10+i in-between frame, 20 closing, 30 presenter ring full, 31 C3D_FrameBegin,
+  32 3D switch, 33 C3D_FrameEnd).
+
+### 2026-10-04: v51 on hardware: the Old 3DS's second core cannot draw (v52)
+
+- **v51 (drawing on core 1, 55% requested), Old 3DS speed:** 72-128 ms of drawing per frame for 745-1,118
+  triangles (25-40 ms on core 0), the game waiting 70-122 ms per update for it: 7-13 updates per second. With v50's
+  result (the game loop there could not keep up), the Old 3DS's second core is out for both: the system keeps most of
+  it. Only the audio mixer (~22% of a core at 268 MHz) stays there.
+- **v52:** Old 3DS (and `o3ds_layout=1`): no render thread, the mixer on core 1 - the v49 single-core path, now also a
+  faithful audio test on a New 3DS. New 3DS unchanged (drawing on core 2).
+- **What 60 fps on the Old 3DS needs:** everything on one 268 MHz core: logic ~9 ms + audio engine ~4 ms per update
+  leave ~37 ms for three frames, against ~25-40 ms for one today. The translation of N64 display lists has to get
+  about three times cheaper: static geometry converted once (vertex/index buffers and draw lists reused across
+  frames), lighting and texture-coordinate generation in the vertex shader, and in-between frames as re-submissions
+  of recorded GPU command lists.
+
+### 2026-10-04: raw vertex path on by default, and what the Old 3DS really spends (v53)
+
+- **Correction to the Old 3DS numbers above:** the report's per-frame times (`perf us/frame dl (cpu)`, game, triangles,
+  draws) are averaged over all 300 updates of a report, skipped updates included. With frame skip drawing every other
+  update (v49 at Old 3DS speed, single core: 145-149 of 300 skipped), a drawn frame cost ~75-80 ms, not 37-40.
+- **Where it goes on hardware** (v49 sampling profiler, Old 3DS speed, single core, share of all time): writing
+  GPU-path vertices into the vertex buffer 12-17% (1% at New 3DS speed), citro3d draw submission 8-10%, game logic
+  14-19%, triangle setup 7%, display-list walk 6-7%, vertex transform + lighting 11%, shading split 7%, matrices 5%,
+  audio 6-7%. The vertex buffer and command buffer are linear memory; without an L2 cache their writes cost far
+  more than the instruction count suggests (Azahar shows the vertex writes as 2.5%).
+- **v53:** the raw vertex path is on by default (`raw_vtx`): most vertices go to the GPU as the game's own 16 bytes
+  instead of 56 CPU-prepared bytes, and the shader does the N64's per-vertex work. Loads near the camera or deeper
+  than 3:1 stay on the CPU path, which keeps the N64's screen-linear shading (7-scene comparison unchanged). Azahar,
+  identical workload: renderer 13.05 -> 11.10 ms per frame (Old 3DS path); at 60 fps the logic frame gets cheaper
+  (20.8 -> 18.7 ms) but the two in-between replays dearer (2.0 -> 2.8 ms each: more draws, because each lit limb
+  needs its own light uniforms), so an update is only ~2% cheaper there. Raw parameters are only re-sent when they
+  change (command data per frame -22%); a switch between the raw and GPU-path programs sends only the 9 registers that
+  differ (`port/src/gfx3ds/c3d_fast.c`: citro3d's output for both configurations is captured once and diffed; 18
+  words instead of ~100, `fastswitch=0` to disable); vertices are written as whole blocks; the near/depth test of each
+  load is 12 products instead of 8 corner transforms; the minimap flushes only its own columns. Open: skipping the
+  two shader constants on a switch (both programs now carry identical ones) drew one Jabu-Jabu surface too bright
+  in one of seven Azahar runs, never reproduced - they are still re-sent (12 words).
+- **Next for the raw path:** lighting per limb splits draws (each limb's model-space light directions are uniforms);
+  view-space lighting with a per-slot normal matrix would let limbs share a draw again, as the CPU path does.
+- **Hardware measurement in v53:** `raw_vtx_ab=1` alternates the raw path every 2 reports; with `perf_ab=1` the Old 3DS
+  phases also turn the render thread off (an Old 3DS has no core 2). Each report adds a memory probe (`perf mem probe
+  ...`: ticks per 32-byte line for word stores, block stores, loads and cache flush, linear memory vs heap) and finer
+  profiler stages (`vtx.box`, `vtx.raw`, `raw emit`, `c3d context`, `c3d uniforms`, `c3d draw`).
+- **60 fps in 3D, honestly:** New 3DS - 2D is at 60 most of the time; in 3D the GPU (17-20 ms per update for the
+  three frames) and the render thread (16-21 ms walk + replays) both approach the 50 ms update in big views (Kokiri
+  Forest overview); v53 lowers both (less CPU, 3.5x less vertex data for the GPU to fetch). Old 3DS - no: one 268 MHz
+  core has to run logic + audio (~13 ms per update) and the drawing; 20 frames per second (the N64's rate) needs the
+  drawing at ~37 ms per frame, about half of v49's. v53's cuts are expected to bring it to roughly 13-15 drawn frames
+  per second at full game speed; the rest needs static room geometry converted once and re-used across frames.
+
+### 2026-10-04 (later): v54 on hardware, system-core share and IPC (v55)
+
+- **v54 (raw path, mixer share 80%):** the Old 3DS mixer kept up (5-6.7 ms per task instead of 12-18 at 30%), but the
+  game's audio engine took 3-4x longer than in v49 on both speeds (New 3DS ~4 ms per update, Old 3DS speed 10-14 ms),
+  in-between frames 2-3x longer, although Azahar shows no change. The audio engine asks the DSP service (on the system
+  core) to flush each buffer; with 80% of that core reserved for the game, the services there answer late - and the
+  share had been reserved on the New 3DS too (for perf_ab's second worker). Within the session the raw path was
+  faster on both consoles (frames shown, raw on vs off: New 3DS +10-20%, Old 3DS speed +15-25%).
+- **v55:** no system-core share on a New 3DS; 55% on an Old 3DS until `audio_share_ab` measures 30/55/80; cache flushes
+  through the kernel (`Port3ds_CacheFlush`, svcFlushProcessDataCache) instead of the GSP/DSP services; raw triangles
+  that join loads with different light sets (limb seams: Link's hat, hardware photo) or raw and processed loads are
+  lit on the CPU per vertex - also -12% draws and -11% replay time in Azahar.
+
+### 2026-10-05: in-between frames by copy, the walk draws the first one (1.0)
+
+- **Observation:** an update's in-between frames (t = 1/3, 2/3) and its logic frame differ only in the palette
+  matrices (each slot's rows for that t) and the skinned-vertex blend (stp.y = 1 - t): the same draws, states,
+  textures and vertices (the GPU path never rewrites the vertex buffer). Replaying the draw log through citro3d for
+  each of them rebuilt the same command words three times - in Kokiri Forest 4.8 ms per in-between frame in Azahar,
+  about a third of a walk.
+- **Copy and patch (`replay_copy`, default on):** the walk now draws the update's first shown frame itself (with that
+  frame's matrices) and its command words are captured: `c3d_fast.c C3Df_CaptureBegin` marks every piece of citro3d
+  state for re-sending (the list citro3d re-sends after the HOME menu, minus the shader code) so the words do not
+  depend on what was on the GPU before, and `C3D_UpdateUniforms` reports where each uniform run lands. Every other
+  frame of the update is a `memcpy` of those words into the command buffer with the palette rows and stp.y patched
+  for its t. The draw log is still recorded: it is replayed when a copy cannot be used (the 3D slider moved between
+  frames, a full command buffer) and when the walk has to stop recording (an off-screen render) - then the frame
+  already drawn is patched in place to the logic frame's matrices.
+- **Exactness:** `replay_copy_check=1` replays the draw log for every copied frame instead and compares its command
+  words with the patched copy: 0 differing words over ~10,000 frames (Kokiri Forest, Link's house, the attract demo's
+  scenes, 3D toggling every 2 s, render thread and CPU/GPU overlap off); the one exception is a boot frame that
+  contains citro3d's one-time capture of the two vertex-program configurations. Getting there fixed an old replay
+  inaccuracy: the first replay used to start from the draw state the walk ENDED in (gfx_pc.c only sends what changed
+  since the previous frame), so its first draws could get the walk's last alpha test or texture; the log now starts
+  with the walk's initial state, and every frame starts from the frame's own viewport and fixed values of the
+  per-frame uniforms.
+- **Cost (Azahar):** in-between frame 4.83 -> 0.77 ms (Kokiri Forest), 2.47 -> 0.62 ms (attract demo; walk + first
+  frame 18.5 -> 17.2 ms): about a fifth less render CPU per update on the New 3DS. At Old 3DS speed (Azahar CPU clock
+  25%, the Old 3DS thread layout): Link's house 28.0 -> 39.9 (copies) -> 45.9 (walk draws the first frame) frames
+  shown per second; updates with both in-between frames 0 -> 133 of 300.
+- **Old 3DS raw-path rules (`raw_relax=1`, an option, off by default):** a load whose box reaches the camera stayed on
+  the CPU path entirely; now it stays raw and only triangles with a vertex at or behind the eye go to the CPU clipper
+  (the raw shader already clamps depth at the near plane like the NoN microcode), and deep loads are not split for
+  screen-linear shading - the Old 3DS already uses coarse splits. Kokiri Forest: raw triangles 72% -> 85%, drawing
+  -8%; but the tour's framebuffer error against the N64 over 20 scenes rose from 5.8 to 6.9 (Royal Family's Tomb
+  1.3% -> 4.3% of pixels off), so it is not the default.
+- **Old 3DS, honestly:** heavy scenes stay far from 60. Kokiri Forest at Old 3DS speed draws one frame in about
+  71 ms (logic ~10 ms per update on top): every other update is skipped, ~10 frames shown per second. What is left
+  is spread over the whole display-list interpreter (8,900 commands, ~400 texture loads and ~350 draws per frame in
+  Kokiri Forest), with no single hot spot; halving it needs the static geometry of rooms (and actors' static
+  display lists) converted once and re-used across frames - the next step, since 60 fps on the Old 3DS is a 1.0
+  goal. Interiors and smaller scenes get in-between frames now.

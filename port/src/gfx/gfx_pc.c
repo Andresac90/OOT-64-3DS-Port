@@ -231,17 +231,15 @@ static uint32_t sBatchStamp[MAX_VERTICES + 4];
 static struct GfxWindowManagerAPI *gfx_wapi;
 static struct GfxRenderingAPI *gfx_rapi;
 
-#include <time.h>
-static unsigned long get_time(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (unsigned long)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
-}
+/* PORT PERF (2026-10-03): the sm64 PC port's get_time() timed every flush and texture import and threw the result
+ * away; clock_gettime does 64-bit divisions in software on the ARM11 (no divide instruction): ~6% of the Old 3DS CPU
+ * in Azahar PC samples (tools/pcprof.py). Removed. */
 
 /* PORT PERF (2026-09-28): stage timers (opt-in, see PORT_PERF_STAGES) for the frame profiler (3ds_main.c Port3ds_PerfReport), in
  * 268 MHz ticks: texture import, vertex transform, triangle setup (excluding flushes), backend draws. */
 #ifdef __3DS__
 #include <3ds/svc.h>
+#include <3ds/synchronization.h>
 u64 gPortPerfTex, gPortPerfVtx, gPortPerfTri, gPortPerfFlush, gPortPerfEmit, gPortPerfMtx;
 u32 gPortPerfTexImports;
 /* opt-in: compile-time PORT_PERF_STAGES, or at run time with perf_stages=1 in settings.txt (one tick
@@ -268,7 +266,12 @@ static void import_texture_impl(int unit, int tile_index);
 static float gfx_adjust_x_for_aspect_ratio(float x);
 /* GPU vertex path (gpu_vtx=1): the batch's matrix palette, flushed with the draw (see "GPU vertex path") */
 extern int gPortGpuVtx;
-#define GPU_PAL 20
+extern void gfx_citro3d_draw_indexed(void);
+#ifdef __3DS__
+static int sInRoomDl;  /* walking the room's geometry (z_room.c G_NOOP tags 0x3D5E5200 / 0x3D5E5201) */
+u32 gPortPerfRoomTris; /* perf report */
+#endif
+#define GPU_PAL 18
 static uint16_t sGpuPal[GPU_PAL];
 static int sGpuPalN, sGpuPalSent; /* entries in use / entries already uploaded to the GPU */
 static uint32_t sGpuPalEpoch = 1; /* bumps when the palette is emptied (full, new frame) */
@@ -429,8 +432,6 @@ void PortGfx_WriteDrawLog(int back, const char* path) {
 
 static void gfx_flush_impl(void) {
     if (buf_vbo_len > 0) {
-        int num = buf_vbo_num_tris;
-        unsigned long t0 = get_time();
 #ifdef __3DS__
         port_draw_id_begin();
 #endif
@@ -454,10 +455,6 @@ static void gfx_flush_impl(void) {
 #endif
         buf_vbo_len = 0;
         buf_vbo_num_tris = 0;
-        unsigned long t1 = get_time();
-        /*if (t1 - t0 > 1000) {
-            printf("f: %d %d\n", num, (int)(t1 - t0));
-        }*/
     }
 }
 
@@ -590,10 +587,54 @@ static uint32_t gfx_cc_usage(uint64_t key) {
  * after a new label was DMA'd to the same address the cache kept returning the old one ("Attack"
  * instead of "Decide" on the pause screen). dma_shim.c calls this for every DMA destination; any
  * cached texture starting inside the written range is dropped (sentinel address never matches). */
+#ifdef __3DS__
+/* PORT (2026-10-03): with the render thread (3ds_main.c), the game thread loads data for the next frame while the
+ * renderer draws the current one, which may still use the old contents (as the N64's RCP did). Invalidations from
+ * other threads are queued and applied when the renderer starts its next frame (gfx_start_frame). */
+extern int gPortRenderThreaded;
+extern int Port3ds_OnRenderThread(void);
+static struct { const void* start; uint32_t size; } sInvQ[64];
+static int sInvN, sInvOverflow;
+static LightLock sInvLock = 1; /* libctru: 1 = unlocked */
+static void gfx_texture_cache_invalidate_now(const void* start, uint32_t size);
+static void gfx_texture_cache_apply_queued(void) {
+    int i, n;
+    if (sInvN == 0 && !sInvOverflow) {
+        return;
+    }
+    LightLock_Lock(&sInvLock);
+    n = sInvN;
+    for (i = 0; i < n; i++) {
+        gfx_texture_cache_invalidate_now(sInvQ[i].start, sInvQ[i].size);
+    }
+    if (sInvOverflow) { /* more than the queue holds before one frame: drop every cached texture */
+        gfx_texture_cache_invalidate_now((const void*)0, 0xFFFFFFFFu);
+    }
+    sInvN = 0;
+    sInvOverflow = 0;
+    LightLock_Unlock(&sInvLock);
+}
 void gfx_texture_cache_invalidate_range(const void* start, uint32_t size) {
+    if (gPortRenderThreaded && !Port3ds_OnRenderThread()) {
+        LightLock_Lock(&sInvLock);
+        if (sInvN < (int)(sizeof(sInvQ) / sizeof(sInvQ[0]))) {
+            sInvQ[sInvN].start = start, sInvQ[sInvN].size = size, sInvN++;
+        } else {
+            sInvOverflow = 1;
+        }
+        LightLock_Unlock(&sInvLock);
+        return;
+    }
+    gfx_texture_cache_invalidate_now(start, size);
+}
+static void gfx_texture_cache_invalidate_now(const void* start, uint32_t size) {
+#else
+void gfx_texture_cache_invalidate_range(const void* start, uint32_t size) {
+#endif
     const uint8_t* s = (const uint8_t*)start;
     const uint8_t* e = s + size;
     size_t i;
+    if (e < s) e = (const uint8_t*)~(uintptr_t)0; /* the whole address space */
     for (i = 0; i < gfx_texture_cache.pool_pos; i++) {
         struct TextureHashmapNode* n = &gfx_texture_cache.pool[i];
         if (n->texture_addr >= s && n->texture_addr < e) {
@@ -965,7 +1006,6 @@ static void import_texture_impl(int unit, int tile_index) {
     if (staged == 0) return;
     rdp.loaded_texture[tile].addr = sTexStage; /* decoders read the logical-order staging copy */
     rdp.loaded_texture[tile].size_bytes = staged;
-    int t0 = get_time();
     if (fmt == G_IM_FMT_RGBA) {
         if (siz == G_IM_SIZ_16b) {
             import_texture_rgba16(tile);
@@ -1004,8 +1044,6 @@ static void import_texture_impl(int unit, int tile_index) {
     unsupported:
         fprintf(stderr, "[gfx] unsupported texture fmt %d siz %d (skipped)\n", fmt, siz);
     }
-    int t1 = get_time();
-    //printf("Time diff: %d\n", t1 - t0);
     rdp.loaded_texture[tile].addr = orig_addr;
     rdp.loaded_texture[tile].size_bytes = orig_size;
 #ifdef PORT_TEXDUMP
@@ -1563,6 +1601,15 @@ void gfx_gpu_slot_rows(uint16_t slot, int k, float rows[4][4]) {
     memcpy(rows, sGpuSlot[slot].rows[k < 0 || k > 2 ? 2 : k], sizeof(float) * 16);
 }
 
+/* the same rows as one array of 16 floats, without a copy (gfx_citro3d.c replay by copy) */
+const float* gfx_gpu_slot_row_ptr(uint16_t slot, int k) {
+    static const float ident[16] = { 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, -0.5f, -0.5f, 0, 0, 0, 1 };
+    if (slot == GPU_SLOT_IDENTITY || sGpuSlot == NULL || slot >= sGpuSlotN) {
+        return ident;
+    }
+    return &sGpuSlot[slot].rows[k < 0 || k > 2 ? 2 : k][0][0];
+}
+
 /* rewrite the VBO positions for replay k (0: t = 1/3, 1: t = 2/3, 2: the recorded t = 1) */
 void gfx_replay_positions(int k, bool z_is_from_0_to_1) {
     int pos_dummy;
@@ -1746,6 +1793,31 @@ static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
     gPortPerfVtx += PERF_T() - t0;
 }
 
+/* the lights' and LookAt's directions in the current model space (after a matrix or light change) */
+static void lights_refresh(void) {
+    for (int i = 0; i < rsp.current_num_lights - 1; i++) {
+        calculate_normal_dir(&rsp.current_lights[i], rsp.current_lights_coeffs[i]);
+    }
+    /* PORT (2026-09-30): the game's LookAt (camera direction for G_TEXTURE_GEN environment maps
+     * and hilites), transformed like the lights - libultraship GfxSpVertex. It was always a fixed
+     * +x/+y (sm64 PC port): dull swords/metal, the flat N64 boot logo. */
+    /* No LookAt loaded yet this frame: a fixed +x/+y (sm64 PC port). Measured with tools/statediff
+     * (Chamber of the Sages pedestal, the one surface env-mapped before any LookAt): this 263
+     * wrong flat px, a ZERO LookAt 449, the previous frame's last one 446. On the N64 the LookAt
+     * lives outside the 0x420-byte F3DZEX2 data image reloaded per task (that image is zero
+     * there), so it keeps what an earlier task left - not reproducible exactly. */
+    static const Light_t lookat_def[2] = { {{0, 0, 0}, 0, {0, 0, 0}, 0, {127, 0, 0}, 0},
+                                           {{0, 0, 0}, 0, {0, 0, 0}, 0, {0, 127, 0}, 0} };
+    for (int k = 0; k < 2; k++) {
+        const Light_t* la = &rsp.current_lookat[k];
+        if (la->dir[0] == 0 && la->dir[1] == 0 && la->dir[2] == 0) {
+            la = &lookat_def[k];
+        }
+        calculate_normal_dir(la, rsp.current_lookat_coeffs[k]);
+    }
+    rsp.lights_changed = false;
+}
+
 /* shade colour (lighting, or the vertex colour) and texture coordinates (texgen, or the vertex's), shared
  * by the CPU and GPU vertex paths; alpha and position are each path's */
 static inline __attribute__((always_inline)) void vtx_shade(const Vtx_t* v, const Vtx_tn* vn, struct LoadedVertex* d,
@@ -1756,27 +1828,7 @@ static inline __attribute__((always_inline)) void vtx_shade(const Vtx_t* v, cons
     if (rsp.geometry_mode & G_LIGHTING) {
         PROF_SET(PROF_VTX_LIGHT);
         if (rsp.lights_changed) {
-            for (int i = 0; i < rsp.current_num_lights - 1; i++) {
-                calculate_normal_dir(&rsp.current_lights[i], rsp.current_lights_coeffs[i]);
-            }
-            /* PORT (2026-09-30): the game's LookAt (camera direction for G_TEXTURE_GEN environment maps
-             * and hilites), transformed like the lights - libultraship GfxSpVertex. It was always a fixed
-             * +x/+y (sm64 PC port): dull swords/metal, the flat N64 boot logo. */
-            /* No LookAt loaded yet this frame: a fixed +x/+y (sm64 PC port). Measured with tools/statediff
-             * (Chamber of the Sages pedestal, the one surface env-mapped before any LookAt): this 263
-             * wrong flat px, a ZERO LookAt 449, the previous frame's last one 446. On the N64 the LookAt
-             * lives outside the 0x420-byte F3DZEX2 data image reloaded per task (that image is zero
-             * there), so it keeps what an earlier task left - not reproducible exactly. */
-            static const Light_t lookat_def[2] = { {{0, 0, 0}, 0, {0, 0, 0}, 0, {127, 0, 0}, 0},
-                                                   {{0, 0, 0}, 0, {0, 0, 0}, 0, {0, 127, 0}, 0} };
-            for (int k = 0; k < 2; k++) {
-                const Light_t* la = &rsp.current_lookat[k];
-                if (la->dir[0] == 0 && la->dir[1] == 0 && la->dir[2] == 0) {
-                    la = &lookat_def[k];
-                }
-                calculate_normal_dir(la, rsp.current_lookat_coeffs[k]);
-            }
-            rsp.lights_changed = false;
+            lights_refresh();
         }
 
         int r = rsp.current_lights[rsp.current_num_lights - 1].col[0];
@@ -1809,14 +1861,18 @@ static inline __attribute__((always_inline)) void vtx_shade(const Vtx_t* v, cons
             doty += vn->n[1] * rsp.current_lookat_coeffs[1][1];
             doty += vn->n[2] * rsp.current_lookat_coeffs[1][2];
 
-            /* libultraship: clamp, and G_TEXTURE_GEN_LINEAR maps through acos */
+            /* libultraship: clamp, and G_TEXTURE_GEN_LINEAR maps through acos.
+             * PORT (2026-10-05): over the same range as the plain mapping, 0..1/2 (GlideN64: acos(-x) * 325.94931 =
+             * acos(-x) / pi * 1024, against (x + 1) * 512). libultraship's acos(-x) / 4 spans 0..pi/4, so every linearly
+             * mapped metal or crystal had its environment map squeezed 1.57x: the blue warp's crystal came out streaked
+             * white instead of blue (Chamber of the Sages, user report + tools/statediff fbdiff). */
             dotx *= inv127;
             doty *= inv127;
             dotx = dotx < -1.0f ? -1.0f : (dotx > 1.0f ? 1.0f : dotx);
             doty = doty < -1.0f ? -1.0f : (doty > 1.0f ? 1.0f : doty);
             if (rsp.geometry_mode & G_TEXTURE_GEN_LINEAR) {
-                dotx = acosf(-dotx) / 4.0f;
-                doty = acosf(-doty) / 4.0f;
+                dotx = acosf(-dotx) * (0.5f / 3.14159265f);
+                doty = acosf(-doty) * (0.5f / 3.14159265f);
             } else {
                 dotx = (dotx + 1.0f) / 4.0f;
                 doty = (doty + 1.0f) / 4.0f;
@@ -1836,28 +1892,111 @@ static inline __attribute__((always_inline)) void vtx_shade(const Vtx_t* v, cons
 }
 
 #ifdef __3DS__
+/* PORT PERF (2026-10-04): raw vertex path (settings raw_vtx, 3ds_main.c; shader_raw.v.pica). A load that needs no
+ * CPU vertex work - no texture coordinate generation, no skinned 60 fps delta, at most 4 directional lights - only
+ * records where the game's vertices are, their matrix slot and (lit) a snapshot of the lights in model space, as the
+ * RSP evaluated them at load time. Its triangles copy the 16-byte vertices into the raw vertex buffer as they are
+ * (gpu_emit_tri_raw); the shader does the rest. No CPU split for the N64's screen-linear shading there: the GPU's
+ * perspective-correct interpolation (as PC ports draw). The Super Mario 64 3DS port's design (Emu64): the per-vertex
+ * and per-triangle CPU work was ~45% of an Old 3DS frame here (tools/pcprof.py). */
+int gPortRawVtx;          /* this frame (latched in gfx_start_frame) */
+int gPortRawVtxWant = 1;  /* settings raw_vtx=0/1 (default on), raw_vtx_ab=1 alternates it (3ds_main.c) */
+#ifdef PORT_PERF_STAGES
+u32 gPortRawWhy[8]; /* vertices kept off the raw path: near, deep, lights, skinned, texgen, identity, range; raw */
+#endif
+int gPortRawNear = 1; /* (measurement) */
+float gPortRawRatio = 3.0f; /* settings raw_ratio x10: loads deeper than this stay processed (see gfx_sp_vertex_gpu) */
+typedef struct {
+    float amb[3], dir[4][3], col[4][3];
+} RawLights;
+#define RAW_LIGHT_SETS 64
+static const Vtx* sLoadRaw[MAX_VERTICES + 4];   /* the game's vertex behind a loaded slot (raw path), NULL: processed */
+static uint8_t sLoadLit[MAX_VERTICES + 4];       /* its light set + 1, 0 = unlit */
+static uint8_t sRawNear[MAX_VERTICES + 4];       /* raw, but at or behind the eye in a frame drawn from it (gPortRawRelax) */
+/* PORT PERF (2026-10-05): Old 3DS option (settings raw_relax=1, off by default), set by 3ds_main.c while frame skip is on. A load reaching the
+ * camera stays raw and only the triangles with a vertex at or behind the eye go to the CPU (clipping there; the raw
+ * shader already clamps depth at the near plane as the NoN microcode does), and deep loads are not split for the RDP's
+ * screen-linear shading: the coarse shading splits of that mode, a step further. The New 3DS keeps the exact rules.
+ * Measured: Kokiri Forest 72% -> 85% raw triangles, -8% drawing; 20 tour scenes' error against the N64 5.8 -> 6.9
+ * (Royal Family's Tomb 1.3% -> 4.3% of pixels off) - not worth it by default. */
+int gPortRawRelax;
+static RawLights sRawLights[RAW_LIGHT_SETS];
+static int sRawLightsN;                          /* sets this frame */
+static int sRawDraw;                             /* the backend draws with the raw program */
+static int sRawLitCur = -1;                      /* light set (+1) of the raw batch being built */
+static uint32_t sRawParamBatch;                  /* batch whose raw parameters were sent */
+extern void gfx_citro3d_raw_mode(int raw);
+extern int gfx_citro3d_raw_ready(void);
+extern void gfx_citro3d_raw_params(const float uvc0[4], const float uvc1[4], float lit, const float lamb[3],
+                                   const float ldir[4][3], const float lcol[4][3]);
+extern void* gfx_citro3d_raw_vbo(int** pos, u32* cap);
+
+/* the current lights as a raw light set (+1); 0 when they do not fit (the load stays on the processed path) */
+static int raw_light_set(void) {
+    RawLights L;
+    int i, k, n = rsp.current_num_lights - 1;
+    if (n > 4 || n < 0) {
+        return 0;
+    }
+    if (rsp.lights_changed) {
+        lights_refresh();
+    }
+    memset(&L, 0, sizeof(L));
+    for (k = 0; k < 3; k++) {
+        L.amb[k] = rsp.current_lights[n].col[k] * (1.0f / 255.0f);
+    }
+    for (i = 0; i < n; i++) {
+        for (k = 0; k < 3; k++) {
+            L.dir[i][k] = rsp.current_lights_coeffs[i][k] * (1.0f / 127.0f);
+            L.col[i][k] = rsp.current_lights[i].col[k] * (1.0f / 255.0f);
+        }
+    }
+    if (sRawLightsN > 0 && memcmp(&L, &sRawLights[sRawLightsN - 1], sizeof(L)) == 0) {
+        return sRawLightsN;
+    }
+    if (sRawLightsN >= RAW_LIGHT_SETS) {
+        return 0;
+    }
+    sRawLights[sRawLightsN++] = L;
+    return sRawLightsN;
+}
+
 /* GPU vertex path: model space + matrix slot; the shader transforms, clips and fogs. Skinned vertices
  * carry the delta to the previous frame's position for the 60 fps in-between frames. */
 static void gfx_sp_vertex_gpu(size_t n_vertices, size_t dest_index, const Vtx* vertices) {
     const float inv127 = 1.0f / 127.0f;
     const uint16_t slot = (uint16_t)gpu_slot_get(); /* one matrix state for the whole load */
     uint8_t rej = 0;
+    int nearEye = 0; /* the raw path: the load reaches the eye's neighbourhood */
+    int nearVtx = 0, nearVtxK0 = 2; /* gPortRawRelax: raw, its vertices tested one by one (frames nearVtxK0..2) */
+    PROF_SET(PROF_VTX_BOX);
     {
         /* PORT PERF (2026-10-01): off-screen rejection for the whole load. The GPU path doesn't transform
          * vertices on the CPU, so it could not drop off-screen triangles, and a material entirely off
          * screen became a draw (367 draws/frame vs 144). The load's model-space bounding box is
          * transformed instead (8 corners): every vertex is outside a clip plane if all corners are (the
          * plane tests are linear), so its triangles are skipped exactly as clip_rej skips them. */
-        float mn[3] = { 32767.0f, 32767.0f, 32767.0f }, mx[3] = { -32768.0f, -32768.0f, -32768.0f };
+        /* the box in integers, converted once (per-component float compares stall the ARM11 VFP: ~25% of this
+         * function in the Old 3DS profile) */
+        int imn[3] = { 32767, 32767, 32767 }, imx[3] = { -32768, -32768, -32768 };
+        float mn[3], mx[3];
         const float aspect = gfx_adjust_x_for_aspect_ratio(1.0f);
         const float(*m)[4] = rsp.MP_matrix;
         int c, k;
         for (size_t i = 0; i < n_vertices; i++) {
+            const short* ob = vertices[i].v.ob;
+            /* PORT PERF (2026-10-04): this loop is the frame's first read of the game's vertices; on an Old 3DS a cache
+             * miss costs 50-190 cycles per 32-byte line (hardware v55 memory probe), so the line two ahead is requested
+             * early (PLD: a hint, never faults) */
+            __builtin_prefetch(&vertices[i + 4]);
             for (k = 0; k < 3; k++) {
-                float o = vertices[i].v.ob[k];
-                mn[k] = o < mn[k] ? o : mn[k];
-                mx[k] = o > mx[k] ? o : mx[k];
+                int o = ob[k];
+                imn[k] = o < imn[k] ? o : imn[k];
+                imx[k] = o > imx[k] ? o : imx[k];
             }
+        }
+        for (k = 0; k < 3; k++) {
+            mn[k] = (float)imn[k], mx[k] = (float)imx[k];
         }
         /* PORT (2026-10-03): the slot's output rows (y', -x', -(z + w) / 2, w: half-pixel offset and aspect
          * included) for the logic frame and, when the walk records 60 fps in-between frames, for the t = 1/3 and
@@ -1865,6 +2004,7 @@ static void gfx_sp_vertex_gpu(size_t n_vertices, size_t dest_index, const Vtx* v
          * camera alone, objects at the trailing edge of a fast camera turn vanished from the in-between frames
          * (whole sub-display lists too, through G_CULLDL; hardware v42). */
         int k0 = gPortReplayRec ? 0 : 2, t;
+        nearVtxK0 = k0;
         rej = (slot == GPU_SLOT_IDENTITY) ? 0 : (1 | 2 | 4 | 8 | 32);
         (void)m;
         (void)aspect;
@@ -1885,6 +2025,99 @@ static void gfx_sp_vertex_gpu(size_t n_vertices, size_t dest_index, const Vtx* v
                 rej &= cr;
             }
         }
+        if (gPortRawVtx && rej == 0 && slot != GPU_SLOT_IDENTITY) {
+            /* raw path: near the eye - a box corner behind it or in front of the near plane, in any of the frames drawn
+             * from this load. Its triangles need the CPU's N64 handling (the NoN clamp, clipping behind the eye; the
+             * screen-linear split matters most there too: the floor under the camera), so the load is processed. */
+            for (t = k0; t <= 2 && !nearEye; t++) {
+                const float(*r)[4] = (const float(*)[4])sGpuSlot[slot].rows[t];
+                /* w and -(z + w) / 2 are linear over the box: their extremes over the 8 corners are per-axis choices
+                 * of the box's ends (PORT PERF 2026-10-04: 12 products instead of 8 corners x 2 dot products) */
+                float wlo = r[3][3], whi = r[3][3], o2hi = r[2][3];
+                for (k = 0; k < 3; k++) {
+                    float a = r[3][k] * mn[k], b = r[3][k] * mx[k], e = r[2][k] * mn[k], f = r[2][k] * mx[k];
+                    wlo += a < b ? a : b;
+                    whi += a < b ? b : a;
+                    o2hi += e < f ? f : e;
+                }
+                if ((wlo <= 1.0f || o2hi > 0.0f) && gPortRawNear) {
+                    if (!gPortRawRelax) {
+                        nearEye = 1; /* a corner behind the eye or in front of the near plane */
+                    } else if (wlo <= 1.0f) {
+                        nearVtx = 1; /* (in front of the near plane only: the shader's clamp is the NoN clamp) */
+                    }
+                }
+#ifdef PORT_PERF_STAGES
+                if (nearEye) gPortRawWhy[0] += n_vertices;
+#endif
+                /* a deep load (its far side gPortRawRatio times farther than its near side): its shade and fog would
+                 * be interpolated with perspective over a long gradient (House of Skulltula's floor: 7.4 -> 13.6 mean
+                 * error against the N64) - the processed path splits it N64-style */
+                if (!nearEye && !gPortRawRelax && whi > gPortRawRatio * wlo) {
+                    nearEye = 1;
+#ifdef PORT_PERF_STAGES
+                    gPortRawWhy[1] += n_vertices;
+#endif
+                }
+            }
+        }
+    }
+    {
+        int lit = 0, raw = gPortRawVtx && sVtxPrev == NULL && !(rsp.geometry_mode & G_TEXTURE_GEN) &&
+                           dest_index + n_vertices <= MAX_VERTICES && slot != GPU_SLOT_IDENTITY;
+        if (nearEye) {
+            raw = 0; /* (see nearEye) */
+        }
+        if (raw && (rsp.geometry_mode & G_LIGHTING)) {
+            lit = raw_light_set();
+            raw = lit != 0;
+#ifdef PORT_PERF_STAGES
+            if (!raw) gPortRawWhy[2] += n_vertices;
+#endif
+        }
+#ifdef PORT_PERF_STAGES
+        if (gPortRawVtx && rej == 0) {
+            if (sVtxPrev != NULL) gPortRawWhy[3] += n_vertices;
+            else if (rsp.geometry_mode & G_TEXTURE_GEN) gPortRawWhy[4] += n_vertices;
+            else if (slot == GPU_SLOT_IDENTITY) gPortRawWhy[5] += n_vertices;
+            else if (dest_index + n_vertices > MAX_VERTICES) gPortRawWhy[6] += n_vertices;
+            if (raw) gPortRawWhy[7] += n_vertices;
+        }
+#endif
+        if (raw) {
+            PROF_SET(PROF_VTX_RAW);
+            for (size_t i = 0; i < n_vertices; i++, dest_index++) {
+                const Vtx_t* v = &vertices[i].v;
+                struct LoadedVertex* d = &rsp.loaded_vertices[dest_index];
+                sPVStamp[dest_index] = 0;
+                sBatchStamp[dest_index] = 0;
+                sLoadSlot[dest_index] = slot;
+                sProbeStale[dest_index] = 1;
+                sZWStale[dest_index] = 1;
+                sLoadRaw[dest_index] = &vertices[i];
+                sLoadLit[dest_index] = (uint8_t)lit;
+                sRawNear[dest_index] = 0;
+                if (nearVtx) {
+                    int t;
+                    for (t = nearVtxK0; t <= 2; t++) {
+                        const float(*r)[4] = (const float(*)[4])sGpuSlot[slot].rows[t];
+                        if (r[3][0] * v->ob[0] + r[3][1] * v->ob[1] + r[3][2] * v->ob[2] + r[3][3] <= 1.0f) {
+                            sRawNear[dest_index] = 1;
+                        }
+                    }
+                }
+                d->x = v->ob[0], d->y = v->ob[1], d->z = v->ob[2], d->w = 1.0f; /* (G_BRANCH_Z, rectangles' neighbours) */
+                d->clip_rej = rej;
+            }
+            return;
+        }
+        for (size_t i = 0; i < n_vertices && dest_index + i < MAX_VERTICES + 4; i++) {
+            sLoadRaw[dest_index + i] = NULL;
+        }
+    }
+    PROF_SET(PROF_VTX);
+    if (sVtxPrev == NULL && dest_index + n_vertices <= MAX_VERTICES + 4) {
+        memset(sLoadDpos[dest_index], 0, n_vertices * sizeof(sLoadDpos[0])); /* not skinned: no motion */
     }
     for (size_t i = 0; i < n_vertices; i++, dest_index++) {
         const Vtx_t* v = &vertices[i].v;
@@ -1901,8 +2134,6 @@ static void gfx_sp_vertex_gpu(size_t n_vertices, size_t dest_index, const Vtx* v
             sLoadDpos[dest_index][0] = sVtxPrev[i][0] - v->ob[0];
             sLoadDpos[dest_index][1] = sVtxPrev[i][1] - v->ob[1];
             sLoadDpos[dest_index][2] = sVtxPrev[i][2] - v->ob[2];
-        } else {
-            sLoadDpos[dest_index][0] = sLoadDpos[dest_index][1] = sLoadDpos[dest_index][2] = 0.0f;
         }
         vtx_shade(v, vn, d, inv127);
         d->color.a = v->cn[3]; /* with G_FOG the shader replaces it by the fog factor */
@@ -2519,12 +2750,22 @@ static void gfx_emit_tri_one(const PVtx* a, const PVtx* b, const PVtx* c, bool z
  * read back into the game's buffer after the frame (gfx_3ds.c Port3ds_SetDrawTarget). Off-screen targets
  * are a 1:1 320x240 N64-pixel space: no pillarbox, no aspect squeeze, no supersampling. */
 static void* sDrawTarget; /* NULL = screen */
+/* PORT PERF (2026-10-03): the target only changes with the color image (or the frame boundary): checked per triangle
+ * and rectangle, it re-ran gfx_cimg_is_screen each time (~1.6% of the Old 3DS CPU, tools/pcprof.py) */
+static bool sTargetDirty = true;
 static void gfx_apply_viewport(void);
 static void gfx_apply_scissor(void);
-static void gfx_select_target(void) {
+static void gfx_select_target_slow(void);
+static inline void gfx_select_target(void) {
+    if (sTargetDirty) {
+        gfx_select_target_slow();
+    }
+}
+static void gfx_select_target_slow(void) {
 #ifdef __3DS__
     extern void Port3ds_SetDrawTarget(void* addr, int width, int height);
     void* want = gfx_cimg_is_screen() ? NULL : rdp.color_image_address;
+    sTargetDirty = false;
     if (want == sDrawTarget) {
         return;
     }
@@ -2586,6 +2827,24 @@ static int* sGpuVboPos;
 static u32 sGpuVboCap;
 static float sGpuScale[4];
 static uint32_t sGpuVboBatch;
+/* PORT PERF (2026-10-03): per batch, each texture coordinate is one multiply-add of the loaded vertex's u or v:
+ * uv0.x = u * sGpuUvA[0] + sGpuUvB[0], uv0.y = 1 - (v * sGpuUvA[1] + sGpuUvB[1]), the same for uv1 with [2], [3]
+ * (scale, offset, filter half-texel, 1 / size and the VBO's texture scale folded together) */
+static float sGpuUvA[4], sGpuUvB[4];
+static void gpu_uv_coeffs(void) {
+    int t;
+    for (t = 0; t < 2; t++) {
+        if (sTC.used_textures[t]) {
+            float half = sTC.linear_filter ? 0.5f : 0.0f;
+            sGpuUvA[2 * t] = sTC.u_scale[t] * sTC.inv_tex_w[t] * sGpuScale[2 * t];
+            sGpuUvB[2 * t] = (half - sTC.u_off[t]) * sTC.inv_tex_w[t] * sGpuScale[2 * t];
+            sGpuUvA[2 * t + 1] = sTC.v_scale[t] * sTC.inv_tex_h[t] * sGpuScale[2 * t + 1];
+            sGpuUvB[2 * t + 1] = (half - sTC.v_off[t]) * sTC.inv_tex_h[t] * sGpuScale[2 * t + 1];
+        } else {
+            sGpuUvA[2 * t] = sGpuUvB[2 * t] = sGpuUvA[2 * t + 1] = sGpuUvB[2 * t + 1] = 0.0f;
+        }
+    }
+}
 static int sGpuCull = -1, sGpuFogOn = -1;
 static int16_t sGpuFogMul, sGpuFogOff;
 static float sGpuConvSet = -1.0f;
@@ -2712,16 +2971,16 @@ static void gpu_pack_clip_tri(const PVtx* t[3]) {
     if (sGpuVboBatch != sBatchId) {
         sGpuVbo = (GpuVtx*)gfx_citro3d_gpu_vbo(&sGpuVboPos, &sGpuVboCap, sGpuScale);
         sGpuVboBatch = sBatchId;
+        gpu_uv_coeffs(); /* gpu_emit_tri's per-batch coefficients */
     }
     for (i = 0; i < 3; i++) {
         const PVtx* p = t[i];
-        GpuVtx* d;
+        GpuVtx tv, *d = &tv; /* built here, then one block store into the vertex buffer (see gpu_emit_tri) */
         int k;
         if (sGpuVbo == NULL || (u32)*sGpuVboPos >= sGpuVboCap) {
             return;
         }
         ix[i] = (*sGpuVboPos)++;
-        d = &sGpuVbo[ix[i]];
         if (spal >= 0) { /* model space with the source's palette entry (z clamps at the near plane in the shader) */
             for (k = 0; k < 3; k++) {
                 d->pos[k] = wgt[i][0] * sPieceModel[0][k] + wgt[i][1] * sPieceModel[1][k] + wgt[i][2] * sPieceModel[2][k];
@@ -2744,6 +3003,8 @@ static void gpu_pack_clip_tri(const PVtx* t[3]) {
             float c = p->c[k] * 255.0f + 0.5f;
             d->c[k] = (uint8_t)(c < 0.0f ? 0.0f : c > 255.0f ? 255.0f : c);
         }
+        tv.pad[0] = tv.pad[1] = tv.pad[2] = 0;
+        memcpy(&sGpuVbo[ix[i]], &tv, sizeof(tv));
     }
     if (!gfx_citro3d_idx_push(ix[0], ix[1], ix[2])) {
         return;
@@ -2851,9 +3112,225 @@ static void gpu_emit_cpu(const uint8_t vidx[3], const uint16_t sl[3]) {
 }
 
 u32 gPortGpuRoute[4]; /* perf report: GPU-path triangles tested / behind the eye / near plane / split on the CPU */
+u32 gPortPerfRawTris;  /* perf report: triangles drawn by the raw vertex path */
+
+/* raw vertex path (gfx_sp_vertex_gpu): the three vertices are the game's own, copied as they are */
+/* this frame's raw vertex buffer (gfx_citro3d_raw_vbo): base, running index, capacity */
+static uint8_t* sRawVboP;
+static int* sRawPosP;
+static u32 sRawCapN;
+static uint32_t sRawVboFrame = ~0u;
+
+static void gpu_emit_tri_raw(const uint8_t vidx[3]) {
+    uint16_t sl[3];
+    int i, j, need = 0, ix[3];
+    const int lit = sLoadLit[vidx[0]]; /* (gpu_emit_tri: all three raw, one light set) */
+    PROF_SET(PROF_RAW_EMIT);
+    for (i = 0; i < 3; i++) {
+        sl[i] = sLoadSlot[vidx[i]];
+    }
+    if (!sRawDraw) { /* the raw program and vertex format */
+        gfx_flush();
+        gfx_citro3d_raw_mode(1);
+        sRawDraw = 1;
+        sRawParamBatch = 0;
+    }
+    if (lit != sRawLitCur && buf_vbo_num_tris > 0) {
+        gfx_flush(); /* other lights: a draw of its own */
+    }
+    for (i = 0; i < 3; i++) {
+        int dup = 0;
+        for (j = 0; j < i; j++) dup |= sl[j] == sl[i];
+        if (!dup && gpu_pal_index(sl[i]) < 0) need++;
+    }
+    if (sGpuPalN + need > GPU_PAL) { /* palette full: draw what uses it, then start an empty one */
+        gfx_flush();
+        sGpuPalEpoch++;
+        sGpuPalN = sGpuPalSent = 0;
+    } else if (buf_vbo_num_tris == MAX_BUFFERED) {
+        gfx_flush();
+    }
+    if (sRawParamBatch != sBatchId || lit != sRawLitCur) {
+        /* texture coordinates: U = tc * scaling >> 16 then the per-tile math of gpu_emit_tri, folded into one
+         * multiply-add per axis; t flipped (1 - t) as the GPU path writes it */
+        float uvc[2][4], scale[4];
+        int t;
+        int* dummyPos;
+        u32 dummyCap;
+        (void)gfx_citro3d_gpu_vbo(&dummyPos, &dummyCap, scale); /* the bound units' texture scales */
+        for (t = 0; t < 2; t++) {
+            if (sTC.used_textures[t]) {
+                float half = sTC.linear_filter ? 0.5f : 0.0f;
+                float ks = rsp.texture_scaling_factor.s * (1.0f / 65536.0f);
+                float kt = rsp.texture_scaling_factor.t * (1.0f / 65536.0f);
+                uvc[t][0] = ks * sTC.u_scale[t] * sTC.inv_tex_w[t] * scale[2 * t];
+                uvc[t][1] = -(kt * sTC.v_scale[t] * sTC.inv_tex_h[t] * scale[2 * t + 1]);
+                uvc[t][2] = (half - sTC.u_off[t]) * sTC.inv_tex_w[t] * scale[2 * t];
+                uvc[t][3] = 1.0f - (half - sTC.v_off[t]) * sTC.inv_tex_h[t] * scale[2 * t + 1];
+            } else {
+                uvc[t][0] = uvc[t][1] = uvc[t][2] = uvc[t][3] = 0.0f;
+            }
+        }
+        if (lit > 0) {
+            const RawLights* L = &sRawLights[lit - 1];
+            gfx_citro3d_raw_params(uvc[0], uvc[1], 1.0f, L->amb, L->dir, L->col);
+        } else {
+            gfx_citro3d_raw_params(uvc[0], uvc[1], 0.0f, NULL, NULL, NULL);
+        }
+        sRawParamBatch = sBatchId;
+        sRawLitCur = lit;
+    }
+    if (sRawVboFrame != gfx_port_frame_index || sRawVboP == NULL) {
+        sRawVboP = (uint8_t*)gfx_citro3d_raw_vbo(&sRawPosP, &sRawCapN);
+        sRawVboFrame = gfx_port_frame_index;
+    }
+    for (i = 0; i < 3; i++) {
+        int slot = vidx[i];
+        uint8_t* d;
+        if (sBatchStamp[slot] == sBatchId) {
+            ix[i] = sBatchVtx[slot];
+            continue;
+        }
+        if (sRawVboP == NULL || (u32)*sRawPosP >= sRawCapN) {
+            return; /* this frame's raw vertex buffer is full */
+        }
+        ix[i] = (*sRawPosP)++;
+        d = sRawVboP + (size_t)ix[i] * 16;
+        {
+            /* one 16-byte block store: the buffer is linear memory, where scattered small stores cost the most on
+             * an Old 3DS (no L2). The N64 flag field (bytes 6-7, the high half of word 1) carries the palette index. */
+            const uint32_t pal = (uint32_t)gpu_pal_add(sl[i]);
+            const uint32_t* w = (const uint32_t*)(const void*)sLoadRaw[slot];
+            uint32_t* o = (uint32_t*)(void*)d; /* 16-byte aligned (the buffer and the stride) */
+            uint32_t w0 = w[0], w1 = w[1], w2 = w[2], w3 = w[3];
+            o[0] = w0, o[1] = (w1 & 0xFFFFu) | (pal << 16), o[2] = w2, o[3] = w3;
+        }
+        sBatchVtx[slot] = (uint16_t)ix[i];
+        sBatchStamp[slot] = sBatchId;
+    }
+    if (!gfx_citro3d_idx_push(ix[0], ix[1], ix[2])) {
+        return;
+    }
+    gPortPerfRawTris++;
+    buf_vbo_len = buf_vbo_len ? buf_vbo_len : 1;
+    if (++buf_vbo_num_tris == MAX_BUFFERED) {
+        gfx_flush();
+    }
+}
+
+/* PORT (2026-10-04): a raw vertex turned into a processed one (gpu_emit_tri), lit on the CPU with its own load's light
+ * set exactly as shader_raw.v.pica does: ambient + sum max(0, n . L) * C, clamped */
+u32 gPortPerfRawMaterialized;
+static void raw_materialize(int slot) {
+    const Vtx* vtx = sLoadRaw[slot];
+    const Vtx_t* v = &vtx->v;
+    struct LoadedVertex* d = &rsp.loaded_vertices[slot];
+    const int lit = sLoadLit[slot];
+    d->u = (short)(v->tc[0] * rsp.texture_scaling_factor.s >> 16);
+    d->v = (short)(v->tc[1] * rsp.texture_scaling_factor.t >> 16);
+    if (lit > 0) {
+        const RawLights* L = &sRawLights[lit - 1];
+        const signed char* n = vtx->n.n;
+        float c[3];
+        int k, i;
+        for (k = 0; k < 3; k++) {
+            c[k] = L->amb[k];
+        }
+        for (i = 0; i < 4; i++) {
+            float in = n[0] * L->dir[i][0] + n[1] * L->dir[i][1] + n[2] * L->dir[i][2];
+            if (in > 0.0f) {
+                for (k = 0; k < 3; k++) {
+                    c[k] += in * L->col[i][k];
+                }
+            }
+        }
+        d->color.r = (uint8_t)(c[0] >= 1.0f ? 255 : (int)(c[0] * 255.0f + 0.5f));
+        d->color.g = (uint8_t)(c[1] >= 1.0f ? 255 : (int)(c[1] * 255.0f + 0.5f));
+        d->color.b = (uint8_t)(c[2] >= 1.0f ? 255 : (int)(c[2] * 255.0f + 0.5f));
+    } else {
+        d->color.r = v->cn[0], d->color.g = v->cn[1], d->color.b = v->cn[2];
+    }
+    d->color.a = v->cn[3];
+    sLoadDpos[slot][0] = sLoadDpos[slot][1] = sLoadDpos[slot][2] = 0.0f; /* (raw loads skip that reset) */
+    sLoadRaw[slot] = NULL;
+    sBatchStamp[slot] = 0; /* not in this batch's GPU-path vertices yet */
+    gPortPerfRawMaterialized++;
+}
+
+/* PORT PERF (2026-10-05): the raw path's common case - a triangle in a run of raw triangles under the same state -
+ * without the general triangle path (target, culling, state and mode checks, palette insertion, the parameters):
+ * all three vertices raw with the batch's light set, nothing changed since the last accepted triangle, and every
+ * vertex new to the batch with its matrix already in the palette. Anything else (or a buffer about to fill) returns 0
+ * and takes gfx_sp_tri1, which does the same work in full. */
+static int raw_tri_fast(int a, int b, int c) {
+    const int v[3] = { a, b, c };
+    int i, ix[3];
+    if (!sTriStateOk || !sRawDraw || sRawParamBatch != sBatchId || a >= MAX_VERTICES || b >= MAX_VERTICES ||
+        c >= MAX_VERTICES || sLoadRaw[a] == NULL || sLoadRaw[b] == NULL || sLoadRaw[c] == NULL ||
+        sLoadLit[a] != sRawLitCur || sLoadLit[b] != sRawLitCur || sLoadLit[c] != sRawLitCur ||
+        (sRawNear[a] | sRawNear[b] | sRawNear[c]) ||
+        buf_vbo_num_tris + 1 >= MAX_BUFFERED || sRawVboFrame != gfx_port_frame_index || sRawVboP == NULL) {
+        return 0;
+    }
+    if (rsp.loaded_vertices[a].clip_rej & rsp.loaded_vertices[b].clip_rej & rsp.loaded_vertices[c].clip_rej) {
+        gfx_port_tri_count++;
+        { extern u32 gPortPerfTrisIn; gPortPerfTrisIn++; gPortPerfRoomTris += sInRoomDl != 0; }
+        return 1; /* entirely outside one clip plane: as gfx_sp_tri1_impl */
+    }
+    for (i = 0; i < 3; i++) {
+        int slot = v[i];
+        if (sBatchStamp[slot] == sBatchId) {
+            ix[i] = sBatchVtx[slot];
+        } else {
+            int pal = gpu_pal_index(sLoadSlot[slot]);
+            const uint32_t* w;
+            uint32_t* o;
+            if (pal < 0 || (u32)*sRawPosP >= sRawCapN) {
+                return 0; /* (vertices placed so far stay valid in the batch) */
+            }
+            ix[i] = (*sRawPosP)++;
+            w = (const uint32_t*)(const void*)sLoadRaw[slot];
+            o = (uint32_t*)(void*)(sRawVboP + (size_t)ix[i] * 16);
+            o[0] = w[0], o[1] = (w[1] & 0xFFFFu) | ((uint32_t)pal << 16), o[2] = w[2], o[3] = w[3];
+            sBatchVtx[slot] = (uint16_t)ix[i];
+            sBatchStamp[slot] = sBatchId;
+        }
+    }
+    gfx_port_tri_count++;
+    { extern u32 gPortPerfTrisIn; gPortPerfTrisIn++; gPortPerfRoomTris += sInRoomDl != 0; }
+    if (!gfx_citro3d_idx_push(ix[0], ix[1], ix[2])) {
+        return 1; /* index buffer full: dropped, as the general path does */
+    }
+    gPortPerfRawTris++;
+    buf_vbo_len = buf_vbo_len ? buf_vbo_len : 1;
+    ++buf_vbo_num_tris;
+    return 1;
+}
+
 static void gpu_emit_tri(const uint8_t vidx[3]) {
     uint16_t sl[3];
     int i, j, need = 0, ix[3];
+    {
+        /* raw only when all three vertices are raw and share one light set: the shader lights a draw with one set, in
+         * one model space. A triangle across two limbs (Link's hat and head) with the first limb's lights showed its
+         * facets (hardware v54); a triangle across a raw and a processed load was dropped or got garbage colours. */
+        int r0 = vidx[0] < MAX_VERTICES && sLoadRaw[vidx[0]] != NULL;
+        int r1 = vidx[1] < MAX_VERTICES && sLoadRaw[vidx[1]] != NULL;
+        int r2 = vidx[2] < MAX_VERTICES && sLoadRaw[vidx[2]] != NULL;
+        if (r0 && r1 && r2 && sLoadLit[vidx[0]] == sLoadLit[vidx[1]] && sLoadLit[vidx[0]] == sLoadLit[vidx[2]] &&
+            !(sRawNear[vidx[0]] | sRawNear[vidx[1]] | sRawNear[vidx[2]])) {
+            gpu_emit_tri_raw(vidx);
+            return;
+        }
+        if (r0) raw_materialize(vidx[0]);
+        if (r1) raw_materialize(vidx[1]);
+        if (r2) raw_materialize(vidx[2]);
+    }
+    if (sRawDraw) { /* back to the GPU path's program and vertex format */
+        gfx_flush();
+        gfx_citro3d_raw_mode(0);
+        sRawDraw = 0;
+    }
     {
         int lin = gPortShadeLinear && gPortShadeSplit && !sTC.used_textures[1];
         if (lin != sGpuLin) {
@@ -2930,6 +3407,7 @@ static void gpu_emit_tri(const uint8_t vidx[3]) {
     if (sGpuVboBatch != sBatchId) { /* textures are bound per batch: fetch once */
         sGpuVbo = (GpuVtx*)gfx_citro3d_gpu_vbo(&sGpuVboPos, &sGpuVboCap, sGpuScale);
         sGpuVboBatch = sBatchId;
+        gpu_uv_coeffs();
     }
     for (i = 0; i < 3; i++) {
         int slot = vidx[i];
@@ -2944,34 +3422,30 @@ static void gpu_emit_tri(const uint8_t vidx[3]) {
         }
         ix[i] = (*sGpuVboPos)++;
         d = &sGpuVbo[ix[i]];
-        d->pos[0] = lv->x, d->pos[1] = lv->y, d->pos[2] = lv->z, d->pos[3] = 1.0f;
-        d->dpos[3] = 0.0f;
-        { /* texture coordinates: as gfx_sp_tri1_impl's packed vertices (libultraship per-tile math) */
-            float uv[2][2] = { { 0.0f, 0.0f }, { 0.0f, 0.0f } };
-            int t;
-            for (t = 0; t < 2; t++) {
-                if (sTC.used_textures[t]) {
-                    float u = lv->u * sTC.u_scale[t] - sTC.u_off[t], v = lv->v * sTC.v_scale[t] - sTC.v_off[t];
-                    if (sTC.linear_filter) {
-                        u += 0.5f;
-                        v += 0.5f;
-                    }
-                    uv[t][0] = u * sTC.inv_tex_w[t];
-                    uv[t][1] = v * sTC.inv_tex_h[t];
-                }
+        {
+            /* built in registers / the stack, then one sequential block store into the vertex buffer (linear memory:
+             * the scattered float and byte stores were the Old 3DS's "gpu pack" stage, 12-17% of its time on
+             * hardware v49 against 1% at New 3DS speed) */
+            GpuVtx t;
+            float u = (float)lv->u, v = (float)lv->v;
+            t.pos[0] = lv->x, t.pos[1] = lv->y, t.pos[2] = lv->z, t.pos[3] = 1.0f;
+            /* texture coordinates: as gfx_sp_tri1_impl's packed vertices (libultraship per-tile math), per batch
+             * coefficients (gpu_uv_coeffs) */
+            t.uv0[0] = u * sGpuUvA[0] + sGpuUvB[0];
+            t.uv0[1] = 1 - (v * sGpuUvA[1] + sGpuUvB[1]);
+            t.uv1[0] = u * sGpuUvA[2] + sGpuUvB[2];
+            t.uv1[1] = 1 - (v * sGpuUvA[3] + sGpuUvB[3]);
+            if (slot < MAX_VERTICES) {
+                t.dpos[0] = sLoadDpos[slot][0], t.dpos[1] = sLoadDpos[slot][1], t.dpos[2] = sLoadDpos[slot][2];
+            } else {
+                t.dpos[0] = t.dpos[1] = t.dpos[2] = 0.0f;
             }
-            d->uv0[0] = uv[0][0] * sGpuScale[0];
-            d->uv0[1] = 1 - uv[0][1] * sGpuScale[1];
-            d->uv1[0] = uv[1][0] * sGpuScale[2];
-            d->uv1[1] = 1 - uv[1][1] * sGpuScale[3];
+            t.dpos[3] = 0.0f;
+            t.c[0] = lv->color.r, t.c[1] = lv->color.g, t.c[2] = lv->color.b, t.c[3] = lv->color.a;
+            t.idx = (uint8_t)gpu_pal_add(sl[i]);
+            t.pad[0] = t.pad[1] = t.pad[2] = 0;
+            memcpy(d, &t, sizeof(t));
         }
-        if (slot < MAX_VERTICES) {
-            d->dpos[0] = sLoadDpos[slot][0], d->dpos[1] = sLoadDpos[slot][1], d->dpos[2] = sLoadDpos[slot][2];
-        } else {
-            d->dpos[0] = d->dpos[1] = d->dpos[2] = 0.0f;
-        }
-        d->c[0] = lv->color.r, d->c[1] = lv->color.g, d->c[2] = lv->color.b, d->c[3] = lv->color.a;
-        d->idx = (uint8_t)gpu_pal_add(sl[i]);
         sBatchVtx[slot] = (uint16_t)ix[i];
         sBatchStamp[slot] = sBatchId;
     }
@@ -3019,12 +3493,13 @@ static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_id
     gfx_select_target();
     gfx_port_tri_count++;
 #ifdef __3DS__
-    { extern u32 gPortPerfTrisIn; gPortPerfTrisIn++; }
+    { extern u32 gPortPerfTrisIn; gPortPerfTrisIn++; gPortPerfRoomTris += sInRoomDl != 0; }
 #endif
     struct LoadedVertex *v1 = &rsp.loaded_vertices[vtx1_idx];
     struct LoadedVertex *v2 = &rsp.loaded_vertices[vtx2_idx];
     struct LoadedVertex *v3 = &rsp.loaded_vertices[vtx3_idx];
     struct LoadedVertex *v_arr[3] = {v1, v2, v3};
+#ifndef __3DS__
     {
         static int trilog_target = -2;
         if (trilog_target == -2) {
@@ -3033,23 +3508,11 @@ static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_id
         }
         if (trilog_target >= 0 && (int)gfx_port_frame_index == trilog_target
             && gfx_port_tri_count <= 8) {
-            if (gfx_port_tri_count == 1) { /* PORT MP dump */
-                float (*m)[4] = rsp.MP_matrix;
-                for (int r = 0; r < 4; r++)
-                    fprintf(stderr, "[MP] %8.3f %8.3f %8.3f %8.3f\n",
-                            m[r][0], m[r][1], m[r][2], m[r][3]);
-            }
-            fprintf(stderr,
-                "[tri %u] ndc=(%.2f,%.2f,%.2f)(%.2f,%.2f,%.2f)(%.2f,%.2f,%.2f) "
-                "clip=%x|%x|%x cc=%08x gm=%08x\n",
-                gfx_port_tri_count,
-                v1->x/v1->w, v1->y/v1->w, v1->z/v1->w,
-                v2->x/v2->w, v2->y/v2->w, v2->z/v2->w,
-                v3->x/v3->w, v3->y/v3->w, v3->z/v3->w,
-                v1->clip_rej, v2->clip_rej, v3->clip_rej,
-                (uint32_t)rdp.combine_mode, rsp.geometry_mode);
+            fprintf(stderr, "[tri %u] clip=%x|%x|%x cc=%08x gm=%08x\n", gfx_port_tri_count, v1->clip_rej, v2->clip_rej,
+                    v3->clip_rej, (uint32_t)rdp.combine_mode, rsp.geometry_mode);
         }
     }
+#endif
     
     //if (rand()%2) return;
     
@@ -3060,12 +3523,16 @@ static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_id
     
     /* PORT PERF: cache the debug env lookup — this is per-triangle; an uncached getenv()
      * here scans the environment for every tri (thousands/frame) and crushes emulated fps. */
+#ifdef __3DS__
+    /* PORT PERF (2026-10-03): getenv is always NULL on the 3DS; the per-triangle checks of these debug switches (and of
+     * the GPU path's draw state below while no command changed it) showed in the Old 3DS profile (tools/pcprof.py) */
+    const int nocull = 0;
+    if (gPortGpuVtx) { /* the GPU culls (and clips) */
+        if (!sTriStateOk && !gpu_tri_state()) return; /* sTriStateOk: no state command since an accepted triangle */
+    } else
+#else
     static int nocull = -2;
     if (nocull == -2) nocull = getenv("PORT_NOCULL") ? 1 : 0;
-#ifdef __3DS__
-    if (gPortGpuVtx) { /* the GPU culls (and clips) */
-        if (!gpu_tri_state()) return;
-    } else
 #endif
     if (nocull) { /* skip */ } else
     if ((rsp.geometry_mode & G_CULL_BOTH) != 0) {
@@ -3618,8 +4085,27 @@ static void gfx_dp_load_tlut(uint8_t tile, uint32_t high_index) {
         return;
     }
     uintptr_t sw = gfx_src_swizzle(src);
-    for (i = 0; i < count && dest + i < 256; i++) {
-        rdp.tlut[dest + i] = (TEX_SRC_BYTE_X(src + i * 2, sw) << 8) | TEX_SRC_BYTE_X(src + i * 2 + 1, sw);
+    if (dest + count <= 256 && (count & 3) == 0 && ((sw == 7u && ((uintptr_t)src & 7) == 0) || (sw == 3u && ((uintptr_t)src & 3) == 0))) {
+        /* PORT PERF (2026-10-03): whole words. Entries are big-endian u16s in byte-reversed groups (8 bytes for game
+         * memory, 4 for u32 assets), so each entry is one half of a native u32: no per-byte work (this loop was ~18% of
+         * the display-list walk's own time at Old 3DS speed, tools/pcprof.py) */
+        const uint32_t* w = (const uint32_t*)src;
+        uint16_t* t = &rdp.tlut[dest];
+        if (sw == 7u) {
+            for (i = 0; i < count; i += 4, w += 2, t += 4) {
+                uint32_t lo = w[0], hi = w[1];
+                t[0] = (uint16_t)(hi >> 16), t[1] = (uint16_t)hi, t[2] = (uint16_t)(lo >> 16), t[3] = (uint16_t)lo;
+            }
+        } else {
+            for (i = 0; i < count; i += 2, w++, t += 2) {
+                uint32_t v = w[0];
+                t[0] = (uint16_t)(v >> 16), t[1] = (uint16_t)v;
+            }
+        }
+    } else {
+        for (i = 0; i < count && dest + i < 256; i++) {
+            rdp.tlut[dest + i] = (TEX_SRC_BYTE_X(src + i * 2, sw) << 8) | TEX_SRC_BYTE_X(src + i * 2 + 1, sw);
+        }
     }
     sTlutHashValid = 0; /* palette hashes are recomputed on the next CI lookup */
     rdp.textures_changed[0] = true;
@@ -3629,27 +4115,35 @@ static void gfx_dp_load_tlut(uint8_t tile, uint32_t high_index) {
 /* CI textures depend on the palette colors they index: part of the texture cache key */
 /* PORT PERF (2026-09-30): hashes of the 16 CI4 banks and the whole CI8 palette, computed once per TLUT
  * change instead of on every CI texture lookup (256 multiply-xors each, ~1-2 us on the 3DS CPU). */
+/* PORT PERF (2026-10-05): lazily, only the hash a lookup needs (one CI4 bank, or the CI8 palette): every TLUT load
+ * cleared them and the next CI lookup re-hashed all 16 banks plus all 256 colours (import_texture was ~6% of the
+ * Kokiri Forest walk, tools/pcprof.py). sTlutHashValid: bit k = bank k valid, bit 16 = the 256-colour hash. */
 static uint32_t gfx_ci_palette_hash(uint32_t fmt, uint32_t siz) {
-    uint32_t i, k;
+    uint32_t i;
     if (fmt != G_IM_FMT_CI) {
         return 0;
     }
-    if (!sTlutHashValid) {
-        uint32_t h256 = 2166136261u;
-        for (k = 0; k < 16; k++) {
+    if (siz == G_IM_SIZ_4b) {
+        uint32_t k = sImpTile->palette & 15;
+        if (!(sTlutHashValid & (1u << k))) {
             uint32_t h = 2166136261u;
             for (i = 0; i < 16; i++) {
                 h = (h ^ rdp.tlut[k * 16 + i]) * 16777619u;
             }
             sTlutHash16[k] = h | 1; /* never 0, which means "not CI" */
+            sTlutHashValid |= 1u << k;
         }
+        return sTlutHash16[k];
+    }
+    if (!(sTlutHashValid & (1u << 16))) {
+        uint32_t h256 = 2166136261u;
         for (i = 0; i < 256; i++) {
             h256 = (h256 ^ rdp.tlut[i]) * 16777619u;
         }
         sTlutHash256 = h256 | 1;
-        sTlutHashValid = 1;
+        sTlutHashValid |= 1u << 16;
     }
-    return (siz == G_IM_SIZ_4b) ? sTlutHash16[sImpTile->palette & 15] : sTlutHash256;
+    return sTlutHash256;
 }
 
 static void gfx_dp_load_block(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t lrs, uint32_t dxt) {
@@ -3985,6 +4479,7 @@ static void gfx_dp_set_z_image(void *z_buf_address) {
 static void gfx_dp_set_color_image(uint32_t format, uint32_t size, uint32_t width, void* address) {
     rdp.color_image_address = address;
     rdp.color_image_width = width + 1; /* the command carries width - 1 */
+    sTargetDirty = true;
 }
 
 static void gfx_sp_set_other_mode(uint32_t shift, uint32_t num_bits, uint64_t mode) {
@@ -4139,12 +4634,23 @@ static void gfx_s2dex_bg_rect(const uObjBg* bg, bool copy) {
 }
 
 static uint32_t rdp_half1; /* G_RDPHALF_1 word for G_BRANCH_Z */
+#ifdef __3DS__
+static uint32_t sDlBranches; /* display-list branches this frame (runaway guard, gfx_run_dl) */
+#endif
 
+static const uint8_t sKeepsTriState[256] = {
+    [G_VTX] = 1, [G_TRI1] = 1, [G_TRI2] = 1, [G_QUAD] = 1, [G_MTX] = 1, [(uint8_t)G_POPMTX] = 1, [G_DL] = 1,
+    [(uint8_t)G_ENDDL] = 1, [(uint8_t)G_NOOP] = 1,
+    /* PORT PERF (2026-09-30): the syncs are no-ops here (~1000/frame) */
+    [(uint8_t)G_RDPPIPESYNC] = 1, [(uint8_t)G_RDPLOADSYNC] = 1, [(uint8_t)G_RDPTILESYNC] = 1, [(uint8_t)G_RDPFULLSYNC] = 1,
+#ifdef F3DEX_GBI_2
+    [(uint8_t)G_RDPHALF_1] = 1, [(uint8_t)G_BRANCH_Z] = 1, [(uint8_t)G_CULLDL] = 1,
+#endif
+};
 static void gfx_run_dl(Gfx* cmd) {
     int dummy = 0;
 #ifdef __3DS__
     extern unsigned PortMem_ReadableEnd(unsigned addr);
-    unsigned long steps = 0;
     uintptr_t valid_until = 0; /* cmd reads are safe below this mapped-block end */
 #endif
     for (;;) {
@@ -4163,12 +4669,6 @@ static void gfx_run_dl(Gfx* cmd) {
             }
             valid_until = end;
         }
-        /* A single linear DL is at most a few thousand commands; a huge count
-         * means a runaway that happens to stay in mapped memory. Bail. */
-        if (++steps > 2000000UL) {
-            PortLogFastX("[GFX] RUNAWAY stop cmd", (unsigned)(uintptr_t)cmd);
-            return;
-        }
 #endif
         uint32_t opcode = cmd->words.w0 >> 24;
 #ifdef __3DS__
@@ -4177,7 +4677,9 @@ static void gfx_run_dl(Gfx* cmd) {
             extern void Port3ds_MaybePumpAudio(void);
             Port3ds_MaybePumpAudio(); /* audio preempts rendering on each retrace, like the N64 */
         }
+#ifdef PORT_PERF_STAGES
         { extern u32 gPortPerfOpCounts[256]; gPortPerfOpCounts[opcode & 0xFF]++; }
+#endif
 #endif
         if (opcode == (uint8_t)G_LOAD_UCODE) { /* track which microcode the DL runs under */
             extern uint64_t gspS2DEX2d_fifoTextStart[];
@@ -4196,32 +4698,13 @@ static void gfx_run_dl(Gfx* cmd) {
 #ifdef PORT_GBIAUDIT
         { extern unsigned gPortGbiCounts[256]; gPortGbiCounts[opcode & 0xFF]++; }
 #endif
-        switch (opcode) { /* commands that cannot change triangle render state keep the fast path */
-            case G_VTX:
-            case G_TRI1:
-            case G_TRI2:
-            case G_QUAD:
-            case G_MTX:
-            case (uint8_t)G_POPMTX:
-            case G_DL:
-            case (uint8_t)G_ENDDL:
-            case (uint8_t)G_NOOP:
-            case (uint8_t)G_RDPPIPESYNC: /* PORT PERF (2026-09-30): the syncs are no-ops here (~1000/frame) */
-            case (uint8_t)G_RDPLOADSYNC:
-            case (uint8_t)G_RDPTILESYNC:
-            case (uint8_t)G_RDPFULLSYNC:
-#ifdef F3DEX_GBI_2
-            case (uint8_t)G_RDPHALF_1:
-            case (uint8_t)G_BRANCH_Z:
-            case (uint8_t)G_CULLDL:
-#endif
-                break;
-            default:
-                sTriStateOk = false;
-                break;
+        /* commands that cannot change triangle render state keep the fast path (a table: one load per command
+         * instead of a second switch, PORT PERF 2026-10-03) */
+        if (!sKeepsTriState[opcode & 0xFF]) {
+            sTriStateOk = false;
         }
 
-#ifdef __3DS__
+#if defined(__3DS__) && defined(PORT_PERF_STAGES)
         uint64_t tOp = PERF_T(); /* perf_stages: time per opcode (G_DL sub-lists excluded) */
 #endif
         switch (opcode) {
@@ -4231,6 +4714,9 @@ static void gfx_run_dl(Gfx* cmd) {
             case (uint8_t)G_NOOP:
                 if (((cmd->words.w0 >> 16) & 0xFF) == PORT_INTERP_TAG) {
                     interp_group(cmd->words.w0, cmd->words.w1);
+                } else if ((cmd->words.w1 & 0xFFFFFFFEu) == 0x3D5E5200u) {
+                    /* z_room.c: room geometry begins (0) / ends (1) */
+                    sInRoomDl = (cmd->words.w1 & 1) == 0;
                 } else if ((cmd->words.w1 & 0xFFFFFF00u) == 0x3D5E3D00u) {
                     extern void gfx_citro3d_set_stereo_mode(int mode);
                     gfx_flush();
@@ -4297,6 +4783,14 @@ static void gfx_run_dl(Gfx* cmd) {
 #ifdef __3DS__
                 gPortPerfDlCalls++;
 #endif
+#ifdef __3DS__
+                /* a runaway (garbage decoded as a branch) can only loop through branches: they are counted here
+                 * instead of every command (PORT PERF 2026-10-05; linear runs end at unmapped memory, see above) */
+                if (++sDlBranches > 400000u) {
+                    PortLogFastX("[GFX] RUNAWAY stop cmd", (unsigned)(uintptr_t)cmd);
+                    return;
+                }
+#endif
                 if (C0(16, 1) == 0) {
                     // Push return address
                     gfx_run_dl((Gfx *)seg_addr(cmd->words.w1));
@@ -4318,6 +4812,12 @@ static void gfx_run_dl(Gfx* cmd) {
             case (uint8_t)G_BRANCH_Z: {
                 uint32_t vi = C0(0, 12) / 2;
                 if (vi < MAX_VERTICES && rsp.loaded_vertices[vi].z <= (float)(int32_t)cmd->words.w1) {
+#ifdef __3DS__
+                    if (++sDlBranches > 400000u) {
+                        PortLogFastX("[GFX] RUNAWAY stop cmd", (unsigned)(uintptr_t)cmd);
+                        return;
+                    }
+#endif
                     cmd = (Gfx *)seg_addr(rdp_half1);
                     --cmd; // increase after break
                 }
@@ -4349,6 +4849,11 @@ static void gfx_run_dl(Gfx* cmd) {
 #endif
             case (uint8_t)G_TRI1:
 #ifdef F3DEX_GBI_2
+#ifdef __3DS__
+                if (raw_tri_fast(C0(16, 8) / 2, C0(8, 8) / 2, C0(0, 8) / 2)) {
+                    break;
+                }
+#endif
                 gfx_sp_tri1(C0(16, 8) / 2, C0(8, 8) / 2, C0(0, 8) / 2);
 #elif defined(F3DEX_GBI) || defined(F3DLP_GBI)
                 gfx_sp_tri1(C1(16, 8) / 2, C1(8, 8) / 2, C1(0, 8) / 2);
@@ -4364,8 +4869,17 @@ static void gfx_run_dl(Gfx* cmd) {
              * way. It had no case, so every quad was silently skipped (found by tools/gbi_audit.py). */
             case (uint8_t)G_QUAD:
 #endif
+#ifdef __3DS__
+                if (!raw_tri_fast(C0(16, 8) / 2, C0(8, 8) / 2, C0(0, 8) / 2)) {
+                    gfx_sp_tri1(C0(16, 8) / 2, C0(8, 8) / 2, C0(0, 8) / 2);
+                }
+                if (!raw_tri_fast(C1(16, 8) / 2, C1(8, 8) / 2, C1(0, 8) / 2)) {
+                    gfx_sp_tri1(C1(16, 8) / 2, C1(8, 8) / 2, C1(0, 8) / 2);
+                }
+#else
                 gfx_sp_tri1(C0(16, 8) / 2, C0(8, 8) / 2, C0(0, 8) / 2);
                 gfx_sp_tri1(C1(16, 8) / 2, C1(8, 8) / 2, C1(0, 8) / 2);
+#endif
                 break;
 #endif
             case (uint8_t)G_SETOTHERMODE_L:
@@ -4486,7 +5000,7 @@ static void gfx_run_dl(Gfx* cmd) {
                 gfx_dp_set_color_image(C0(21, 3), C0(19, 2), C0(0, 11), seg_addr(cmd->words.w1));
                 break;
         }
-#ifdef __3DS__
+#if defined(__3DS__) && defined(PORT_PERF_STAGES)
         if (gPortPerfStagesOn && opcode != G_DL) {
             extern u64 gPortPerfOpTicks[256];
             gPortPerfOpTicks[opcode & 0xFF] += PERF_T() - tOp;
@@ -4515,7 +5029,23 @@ void gfx_init(struct GfxWindowManagerAPI *wapi, struct GfxRenderingAPI *rapi) {
     // Used in the 120 star TAS
 }
 
+int gPortEventsExternal; /* 3ds_main.c render thread: the game thread runs the HOME/sleep events itself */
+void gfx_handle_events(void) {
+    gfx_wapi->handle_events();
+}
+
 void gfx_start_frame(void) {
+#ifdef __3DS__
+    gfx_texture_cache_apply_queued(); /* data the game loaded since the last frame (render thread) */
+    gfx_citro3d_raw_mode(0); /* frames start on the GPU path's program */
+    /* latched per frame: the A/B switch flips gPortRawVtxWant from the game thread (render thread) */
+    gPortRawVtx = gPortRawVtxWant && gPortGpuVtx && gfx_citro3d_raw_ready();
+    sRawDraw = 0;
+    sRawLitCur = -1;
+    sRawLightsN = 0;
+    sInRoomDl = 0;
+    sDlBranches = 0;
+#endif
     sTriStateOk = false;
     /* the LookAt does not carry over to the next frame (kept, the last actor hilite's LookAt env-mapped
      * the next frame's room geometry: Chamber of the Sages pedestal worst; see gfx_sp_vertex) */
@@ -4534,8 +5064,11 @@ void gfx_start_frame(void) {
     sPrerenderedRecent = (sBgThisFrame || sStereoRoomThisFrame) ? 20 : sPrerenderedRecent > 0 ? sPrerenderedRecent - 1 : 0;
     sBgLastFrame = sBgThisFrame; gPortPrerenderedFrame = sBgLastFrame || sStereoRoomThisFrame; sStereoRoomThisFrame = 0;
     sBgThisFrame = 0;
-    gfx_wapi->handle_events();
+    if (!gPortEventsExternal) {
+        gfx_wapi->handle_events();
+    }
     sDrawTarget = NULL; /* the backend starts each frame on the screen */
+    sTargetDirty = true;
     gfx_wapi->get_dimensions(&gfx_current_dimensions.width, &gfx_current_dimensions.height);
     if (gfx_current_dimensions.height == 0) {
         // Avoid division by zero
@@ -4589,8 +5122,13 @@ void gfx_run(Gfx *commands) {
 #ifdef __3DS__
     if (gPortReplayRec) {
         extern void gfx_citro3d_rec_begin(void);
+        extern int gfx_citro3d_rec_direct(int k);
         int k, top;
         gfx_citro3d_rec_begin();
+        /* GPU path: the walk draws the update's first shown frame itself (gfx_citro3d.c replay by copy) */
+        if (gPortGpuVtx) {
+            gfx_citro3d_rec_direct(gPortReplayFirstK);
+        }
         for (k = 0; k < 2; k++) { /* the t = 1/3, 2/3 stacks start like the real one */
             for (top = 0; top < 11; top++) {
                 memcpy(sAltMV[k][top], rsp.modelview_matrix_stack[top], sizeof(sAltMV[k][top]));
@@ -4608,6 +5146,7 @@ void gfx_run(Gfx *commands) {
         sDrawTarget = NULL; /* (the frame ends on the screen) */
         gPortFrameWide = WIDE_ACTIVE();
         sDrawTarget = target;
+        sTargetDirty = true;
     }
     if (sTjOn) {
         FILE* f = fopen("sdmc:/3ds/oot/tjdump.bin", "wb");
@@ -4627,11 +5166,12 @@ void gfx_run(Gfx *commands) {
 #ifdef __3DS__
     if (gPortReplayRec) {
         /* the walk only recorded: draw its first shown frame (t = 1/3, 2/3, or the logic frame) */
-        extern void gfx_citro3d_rec_end(void);
+        extern int gfx_citro3d_rec_end(void);
         extern void gfx_citro3d_replay(void);
-        int k = gPortReplayBroken ? 2 : gPortReplayFirstK;
+        int k, drawn;
         gPortReplayRec = 0;
-        gfx_citro3d_rec_end();
+        drawn = gfx_citro3d_rec_end(); /* (may break the recording: before k is read) */
+        k = gPortReplayBroken ? 2 : gPortReplayFirstK;
         PROF_SET(PROF_REPLAY);
         if (gPortGpuVtx) {
             extern void gfx_citro3d_replay_variant(int k);
@@ -4639,7 +5179,9 @@ void gfx_run(Gfx *commands) {
         } else if (k != 2) {
             gfx_replay_positions(k, gfx_rapi->z_is_from_0_to_1());
         }
-        gfx_citro3d_replay();
+        if (!drawn) {
+            gfx_citro3d_replay();
+        }
         if (gPortGpuVtx) {
             extern void gfx_citro3d_replay_variant(int k);
             gfx_citro3d_replay_variant(2);

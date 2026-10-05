@@ -1,5 +1,9 @@
 # OoT → New 3DS Port — Status, Architecture & Roadmap (v2)
 
+> **Development history.** These are the bring-up notes up to the 2026-09-30 milestone, kept as history. The
+> current status is in the [README](README.md), [docs/RELEASE_1.0.md](docs/RELEASE_1.0.md) and
+> [CHANGELOG.md](CHANGELOG.md); performance work since then is in [docs/3ds-60fps-plan.md](docs/3ds-60fps-plan.md).
+
 ## ★ MILESTONE 2026-09-30 — "plays like a 3DS game" (git tag `milestone-2026-09-30`)
 
 Verified on a New 3DS (hardware photos) and in Azahar. The sections below this one are the history

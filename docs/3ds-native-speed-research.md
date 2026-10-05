@@ -99,3 +99,44 @@ frame.
 - Threading gains are invisible or negative in Azahar; they are measured only on hardware.
 - Every accuracy-relevant change is checked with the 101-scene tour and `fbdiff` (today: average
   error 5.40, 96 of 101 scenes with identical game state).
+
+## Measured: where an Old 3DS frame goes, and the first cuts (2026-10-03)
+
+Hardware v47 at Old 3DS speed: game logic + audio + input ~13 ms per update, ~38 ms of renderer CPU per drawn frame
+(~1,150 triangles), so frame skip drew every other update (10 frames per second at full game speed). The GPU needed
+5-7 ms per frame: the limit is the CPU translating display lists, not the GPU.
+
+`tools/pcprof.py` samples the emulated CPU through Azahar's GDB stub and maps the samples to functions and source lines
+(Azahar's time follows the instruction count). On the Old 3DS path the renderer spends ~7,000 instructions per input
+triangle, spread over the triangle path (21%), vertex loads (14%), the display-list interpreter (10%) and citro3d's
+per-draw work (11%); room geometry is only about a third of the triangles and of the time (title demo), so caching
+rooms alone would not be enough.
+
+Removed in v48 (same output as before: 7-scene N64 comparison unchanged): the sm64 PC port's `get_time()` around every
+flush and texture import (64-bit software divisions in `clock_gettime`, 6%), per-command opcode statistics, a second
+opcode switch, byte-by-byte palette loads, per-triangle target and draw-state checks while nothing changed, float
+bounding boxes, per-vertex texture-coordinate arithmetic (now per-batch coefficients), and in citro3d (modified copies of
+`uniforms.c` and `drawElements.c` in `port/src/gfx3ds/c3d_fast.c`) the per-draw byte scan of 2 x 96 uniform flags and 14
+`GPUCMD_Add` calls. Renderer CPU per frame: -16% to -22% on the same demo sequence. Expected on the Old 3DS: drawing
+every update most of the time (20 frames per second, the N64's rate).
+
+Next, in order of expected gain: a render thread (the N64's CPU/RCP split: the game logic of update N+1 runs while
+update N is drawn, on core 1 of the Old 3DS / core 2 of the New 3DS); lighting and texture-coordinate generation in
+the vertex shader; then a leaner triangle path.
+
+## Measured: memory writes, and the raw vertex path (2026-10-04)
+
+Two corrections to the numbers above. The report's per-frame times are averaged over all updates, skipped ones
+included: with frame skip drawing every other update, a drawn Old 3DS frame cost ~75-80 ms, not ~38. And the hardware
+profile (v49, Old 3DS speed, one core) shows a cost Azahar cannot: writing GPU-path vertices into the vertex buffer
+took 12-17% of all time at Old 3DS speed against ~1% at New 3DS speed (Azahar: 2.5%). The vertex buffer and the GPU
+command buffer are linear memory; without an L2 cache their writes are far dearer than their instruction count. Bytes
+written there now count as much as instructions.
+
+v53 turns the raw vertex path (the Super Mario 64 port's Emu64 design, plan item 3) on by default: 16 bytes per vertex
+copied from the game instead of 56 prepared by the CPU, lighting / texture coordinates / fog in the shader. Loads near
+the camera or deeper than 3:1 keep the CPU path, so the N64's screen-linear shading is kept where it shows (101-scene
+average error 5.84, before 5.92). Azahar, identical workload: Old 3DS path 13.05 -> 11.10 ms per frame; 60 fps path
+~2% per update (each lit limb needs its own light uniforms, so more draws to replay). Every perf report now also logs
+a memory probe (ticks per 32-byte line for stores, block stores, loads and flushes, linear memory vs heap) and finer
+profiler stages, and `raw_vtx_ab=1` alternates the path, so the next hardware log measures both directly.

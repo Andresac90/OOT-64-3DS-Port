@@ -8,6 +8,27 @@
 #include <citro3d.h>
 #include "gfx_3ds.h"
 
+/* PORT PERF (2026-10-04): CPU cache maintenance through the kernel directly. GSPGPU_FlushDataCache / DSP_FlushDataCache
+ * are requests to the GPU and DSP system services, which run on the system core (1); the kernel call they end up making
+ * is available to the title itself (port/oot.rsf FlushProcessDataCache / InvalidateProcessDataCache). Hardware v54: with
+ * a large share of that core reserved for the audio mixer, those requests slowed everything (the audio engine 3-4x). The
+ * per-frame flushes go straight to the kernel; the service request remains the fallback if the kernel call fails. */
+u32 gPortPerfCacheFallbacks;
+void Port3ds_CacheFlush(const void* p, u32 size) {
+    if (size == 0) return;
+    if (R_FAILED(svcFlushProcessDataCache(CUR_PROCESS_HANDLE, (u32)p, size))) {
+        gPortPerfCacheFallbacks++;
+        GSPGPU_FlushDataCache(p, size);
+    }
+}
+void Port3ds_CacheInvalidate(const void* p, u32 size) {
+    if (size == 0) return;
+    if (R_FAILED(svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32)p, size))) {
+        gPortPerfCacheFallbacks++;
+        GSPGPU_InvalidateDataCache(p, size);
+    }
+}
+
 // #define DISPLAY_TRANSFER_FLAGS_NORMAL \
 // 	(GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) | \
 // 	GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) | \
@@ -52,6 +73,17 @@ float gPortStereoSep;
  * cuts and Link's movement don't make the depth jump. */
 float gPortStereoFocusW;
 int gPortStereoFlatScene; /* set by menu gamestates (file select) each frame; cleared after the frame */
+/* PORT (2026-10-03): the renderer's copies of the game's per-frame requests, taken when the frame is handed over
+ * (Port3ds_ApplyFrameRequests): with the render thread (3ds_main.c) the game already builds the next frame and sets
+ * them again while this one is drawn */
+float gPortStereoFocusWR;
+int gPortStereoFlatSceneR;
+int gPortRenderThreaded; /* 3ds_main.c: frames are drawn by the render thread (the game thread never touches the GPU) */
+/* the render watchdog's markers (3ds_main.c Port3ds_RenderWaitIdle logs the last one if a frame takes over 2 s) */
+extern void Port3ds_RenderPhase(int phase);
+extern int Port3ds_RenderPhaseGet(void);
+#define PHASE_IN(n) const int _phasePrev = Port3ds_RenderPhaseGet(); Port3ds_RenderPhase(n)
+#define PHASE_OUT() Port3ds_RenderPhase(_phasePrev)
 float gPortStereoConv = 150.0f;
 static Gfx3DSMode sMonoMode;
 static bool sMonoAA;
@@ -194,7 +226,7 @@ static void gfx_3ds_update_stereo(void) {
      * fixed convergence: "not deep enough" on hardware) */
     gPortStereoSep = want ? slider * 0.04f : 0.0f;
     {
-        float target = gPortStereoFocusW;
+        float target = gPortStereoFocusWR;
         float border = 0.0f;
         { /* the nearest 3D surface at the screen borders (gfx_pc.c stereo_probe_tri): the 3rd-nearest
            * of the 13 border probes, so one particle near the lens doesn't drag the screen plane */
@@ -360,7 +392,12 @@ void Port3ds_RequestDepth(void) {
     sDepthWantFrames = 60;
 }
 
+static const u32* depth_read_threaded(int* width, int* height);
+static int sColorWantFrames; /* (defined with the color readback below) */
 const u32* Port3ds_GetDepth(int* width, int* height) {
+    if (gPortRenderThreaded && sColorWantFrames == 0) { /* (tools: every frame is copied and waited for) */
+        return depth_read_threaded(width, height);
+    }
     sDepthReadAt = sFramesDone;
     depth_async_wait();
     gfx_3ds_depth_lazy();
@@ -487,8 +524,25 @@ static void gfx_3ds_read_back_color(void) {
  * 16-bit pixel k at native index k ^ 3), so the game's own restore draws it like any texture. */
 static void* sCaptureDst;
 
+static void* sCaptureReq; /* requested by the game for the frame it is building (latched at hand-over) */
 void Port3ds_CaptureFrame5551(void* dst) {
-    sCaptureDst = dst;
+    sCaptureReq = dst;
+}
+
+/* game thread, when a frame is handed over: its requests, cleared for the next frame the game builds */
+void Port3ds_TakeFrameRequests(void** capture, int* flat, float* focusW) {
+    *capture = sCaptureReq;
+    *flat = gPortStereoFlatScene;
+    *focusW = gPortStereoFocusW;
+    sCaptureReq = NULL;
+    gPortStereoFlatScene = 0; /* the next frame's gamestate sets it again if it is a menu */
+}
+
+/* renderer, before drawing that frame */
+void Port3ds_ApplyFrameRequests(void* capture, int flat, float focusW) {
+    sCaptureDst = capture;
+    gPortStereoFlatSceneR = flat;
+    gPortStereoFocusWR = focusW;
 }
 
 /* PORT (2026-10-03): in widescreen the frame captured for the pause background is 400 pixels wide but the game's
@@ -503,7 +557,7 @@ const void* Port3ds_WideCapFor(const void* gameBuf) {
 
 /* 60 fps interpolation: no in-between frames while a capture/readback is pending for this frame */
 int Port3ds_InterpBlocked(void) {
-    return sCaptureDst != NULL || sColorWantFrames > 0;
+    return sCaptureReq != NULL || sCaptureDst != NULL || sColorWantFrames > 0;
 }
 
 /* buffers sized for the previous target: dropped on a stereo switch, reallocated at the new size */
@@ -601,6 +655,24 @@ static int sOffCur = -1; /* current target, -1 = screen */
 
 int Port3ds_IsOffscreen(void) {
     return sOffCur >= 0;
+}
+
+/* gfx_citro3d.c, at the start of each replayed frame: the viewport C3D_FrameDrawOn gives a frame */
+void Port3ds_ResetFrameViewport(void) {
+    if (sOffCur < 0 && sTarget != NULL) {
+        /* (a scissor rectangle first: C3D_SetViewport turns the scissor off but keeps its last rectangle, which would
+         * differ with whatever frame came before) */
+        C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, 0, sTarget->frameBuf.width, sTarget->frameBuf.height);
+        C3D_SetViewport(0, 0, sTarget->frameBuf.width, sTarget->frameBuf.height);
+    }
+}
+
+/* the frame buffer draws go to (gfx_citro3d.c replay by copy: a captured frame only replays onto the same one) */
+const void* Port3ds_DrawTargetId(void) {
+    if (sOffCur >= 0) {
+        return NULL;
+    }
+    return sTarget != NULL ? sTarget->frameBuf.colorBuf : NULL;
 }
 
 void Port3ds_SetDrawTarget(void* addr, int width, int height) {
@@ -726,6 +798,8 @@ static void gfx_3ds_debug_dump_stereo(void) {
 /* verification aid for the 60 fps interpolation: with sdmc:/3ds/oot/capture_interp present, every 200th
  * logic frame's passes (in-between ones, then the exact one) go to sdmc:/3ds/oot/interp_fb_<n>_<pass>.bin */
 static int sInterpDumpOn = -1; /* sdmc:/3ds/oot/capture_interp exists (checked once) */
+int gPortInterpDumpSpan = 2;   /* settings interp_dump_span: consecutive logic frames dumped per 200 */
+int gPortInterpDumpAt = -1;    /* settings interp_dump_at: dump logic frames at..at+span-1 instead (once) */
 static bool interp_dump_on(void) {
     if (sInterpDumpOn < 0) {
         FILE* f = fopen("sdmc:/3ds/oot/capture_interp", "rb");
@@ -743,7 +817,8 @@ static void gfx_3ds_debug_dump_interp(void) {
     if (!interp_dump_on()) {
         return;
     }
-    if ((sLogic % 200) >= 198) {
+    if (gPortInterpDumpAt >= 0 ? (sLogic >= gPortInterpDumpAt && sLogic < gPortInterpDumpAt + gPortInterpDumpSpan)
+                               : (sLogic % 200) >= 200 - gPortInterpDumpSpan) {
         W = sTarget->frameBuf.width, H = sTarget->frameBuf.height;
         if (sLin != NULL && linearGetSize(sLin) < (u32)W * H * 4 * 2) { /* the target grew */
             linearFree(sLin);
@@ -788,7 +863,7 @@ static void gfx_3ds_debug_dump_interp(void) {
  * (3ds_main.c Port3ds_VBlankSeen). The same model counts frames replaced before any vblank showed them. */
 #define VB_TICKS ((double)SYSCLOCK_ARM11 / 59.831)
 #define MS_TICKS ((double)SYSCLOCK_ARM11 / 1000.0)
-static u64 sVbAnchor;   /* tick of a recent top-screen vblank */
+static volatile u64 sVbAnchor; /* tick of a recent top-screen vblank (written by the game thread) */
 static u64 sSubmitTick; /* the previous frame: when C3D_FrameEnd handed it to the GPU (0 = accounted for) */
 static u64 sShownVb;    /* the previous frame: the vblank at which it becomes visible (0 = unknown) */
 int gPortPresentGate = 1;
@@ -806,10 +881,16 @@ void Port3ds_VBlankSeen(void) {
 /* 3ds_main.c pacing: the latest vblank at or before tMs (milliseconds of svcGetSystemTick); tMs itself
  * without an anchor */
 double Port3ds_VBlankAtOrBefore(double tMs) {
-    const double a = (double)sVbAnchor / MS_TICKS, p = VB_TICKS / MS_TICKS;
-    if (sVbAnchor == 0) {
+    u64 anchor, again;
+    double a, p = VB_TICKS / MS_TICKS;
+    do { /* written by the game thread, read by the render thread: a consistent 64-bit copy */
+        anchor = sVbAnchor;
+        again = sVbAnchor;
+    } while (anchor != again);
+    if (anchor == 0) {
         return tMs;
     }
+    a = (double)anchor / MS_TICKS;
     return a + floor((tMs - a) / p) * p;
 }
 
@@ -921,7 +1002,7 @@ static void flip_thread(void* arg) {
         }
         {
             u32 done, last, top, id, chosen = 0;
-            GSPGPU_InvalidateDataCache((void*)sFlipStamp, 16); /* written by the GPU */
+            Port3ds_CacheInvalidate((void*)sFlipStamp, 16); /* written by the GPU */
             done = *sFlipStamp, last = sFlipQueued, top = done < last ? done : last;
             for (id = top; id > presented && id + FLIP_N > last; id--) {
                 if (sFlipSlot[id % FLIP_N] <= vb + (u64)(0.5 * MS_TICKS)) {
@@ -982,7 +1063,9 @@ static void flip_init(void) {
     GSPGPU_FlushDataCache(sFlipStampSrc, FLIP_N * 16);
     svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
     sFlipRun = 1;
-    sFlipThread = threadCreate(flip_thread, NULL, 8 * 1024, prio - 2, -2, false);
+    /* core 0 always: with the Old 3DS layout (3ds_main.c) graphics start on the game thread on core 1, whose time is
+     * capped by the system; the presenter must wake on time for every vblank */
+    sFlipThread = threadCreate(flip_thread, NULL, 8 * 1024, prio - 2, 0, false);
     if (sFlipThread == NULL) {
         sFlipRun = 0;
         return;
@@ -1005,8 +1088,12 @@ static void flip_stop(void) {
 static void flip_submit(u8 splitFlags) {
     u32 id = sFlipQueued + 1;
     int b = id % FLIP_N, e;
-    while (sFlipShown + FLIP_N <= id && sFlipRun) { /* that buffer may still be on screen: wait for a flip */
-        svcSleepThread(1000000LL);
+    {
+        PHASE_IN(30); /* the presenter ring is full */
+        while (sFlipShown + FLIP_N <= id && sFlipRun) { /* that buffer may still be on screen: wait for a flip */
+            svcSleepThread(1000000LL);
+        }
+        PHASE_OUT();
     }
     C3D_FrameSplit(splitFlags); /* the frame's commands go into the queue first */
     if (gGfx3DSMode == GFX_3DS_MODE_STEREO) {
@@ -1026,7 +1113,7 @@ static void flip_submit(u8 splitFlags) {
         sFlipMode[b] = sMonoWide ? 1 : 0;
     }
     sFlipStampSrc[b * 4] = id;
-    GSPGPU_FlushDataCache(&sFlipStampSrc[b * 4], 16);
+    Port3ds_CacheFlush(&sFlipStampSrc[b * 4], 16);
     GX_TextureCopy(&sFlipStampSrc[b * 4], 0, (u32*)sFlipStamp, 0, 16, 8); /* after the frame's copy: it is done */
     sFlipSlot[b] = sFlipNextSlot;
     sFlipNextSlot = 0;
@@ -1101,6 +1188,14 @@ static inline volatile gxCmdQueue_s* c3d_queue(void) {
     return (volatile gxCmdQueue_s*)(void*)__C3D_Context;
 }
 
+typedef struct {
+    int idx, slot, w, h; /* GX queue entry not yet waited for (-1: done), readback slot (-1: none), size */
+} DepthPub;
+static DepthPub sDepthPub = { -1, -1, 0, 0 };
+static LightLock sDepthLock = 1; /* libctru: 1 = unlocked (LightLock_Init) */
+u64 gPortPerfDepthWait; /* perf: ticks the game waited for a queued depth copy */
+u32 gPortPerfDepthAsync; /* perf: queued depth copies read */
+
 /* the early depth copy, queued behind the frame just split off (overlap: the next frame's clear comes after it) */
 static void depth_copy_async(void) {
     size_t size = (size_t)ViewW() * ViewH() * 4;
@@ -1115,11 +1210,42 @@ static void depth_copy_async(void) {
     sDepthAsyncIdx = c3d_queue()->numEntries - 1;
     sDepthSlot = sFrameSlot;
     sDepthValid = true;
+    LightLock_Lock(&sDepthLock);
+    sDepthPub.idx = sDepthAsyncIdx, sDepthPub.slot = sDepthSlot, sDepthPub.w = ViewW(), sDepthPub.h = ViewH();
+    LightLock_Unlock(&sDepthLock);
+}
+
+/* render thread mode (gPortRenderThreaded): the game thread reads only copies the renderer queued and published */
+static const u32* depth_read_threaded(int* width, int* height) {
+    volatile gxCmdQueue_s* q = c3d_queue();
+    DepthPub p;
+    LightLock_Lock(&sDepthLock);
+    p = sDepthPub;
+    LightLock_Unlock(&sDepthLock);
+    sDepthReadAt = sFramesDone;
+    if (p.slot < 0 || sDepthLinear[p.slot] == NULL) {
+        return NULL;
+    }
+    if (p.idx >= 0) { /* not read since it was queued: wait for it, then drop the CPU's stale cache lines */
+        u64 t0 = svcGetSystemTick();
+        while (q->numEntries > p.idx && q->lastEntry <= p.idx) {
+            svcSleepThread(100000LL);
+        }
+        GSPGPU_InvalidateDataCache(sDepthLinear[p.slot], (size_t)p.w * p.h * 4);
+        gPortPerfDepthWait += svcGetSystemTick() - t0;
+        gPortPerfDepthAsync++;
+        LightLock_Lock(&sDepthLock);
+        if (sDepthPub.idx == p.idx && sDepthPub.slot == p.slot) {
+            sDepthPub.idx = -1;
+        }
+        LightLock_Unlock(&sDepthLock);
+    }
+    *width = p.w;
+    *height = p.h;
+    return sDepthLinear[p.slot];
 }
 
 /* before the CPU reads a queued depth copy: wait for its queue entry (a cleared queue had finished it) */
-u64 gPortPerfDepthWait; /* perf: ticks the game waited for a queued depth copy */
-u32 gPortPerfDepthAsync; /* perf: queued depth copies read */
 static void depth_async_wait(void) {
     volatile gxCmdQueue_s* q = c3d_queue();
     u64 t0;
@@ -1178,7 +1304,11 @@ static bool gfx_3ds_start_frame(void)
             sDepthOfFrame = sFramesDone + 1; /* stands for the logic frame ending in this update */
         }
     }
-    gfx_3ds_update_stereo(); /* outside a frame: citro3d refuses to delete targets inside one */
+    {
+        PHASE_IN(32); /* 3D on/off: render targets deleted and created */
+        gfx_3ds_update_stereo(); /* outside a frame: citro3d refuses to delete targets inside one */
+        PHASE_OUT();
+    }
     gfx_3ds_update_aa();
     t0 = svcGetSystemTick();
     {
@@ -1190,7 +1320,11 @@ static bool gfx_3ds_start_frame(void)
          * waits. Every frame lost up to a whole retrace there (hardware v21: "gpu wait" 9-15 ms per frame,
          * each 60 fps replay frame ~16.7 ms = exactly one retrace). Without it FrameBegin only waits for
          * the GPU to finish the previous frame; presentation stays retrace-paced by 3ds_main.c. */
-        C3D_FrameBegin(0);
+        {
+            PHASE_IN(31); /* C3D_FrameBegin: waiting for the GPU */
+            C3D_FrameBegin(0);
+            PHASE_OUT();
+        }
         sInFrame = true;
         gPortProf = prev;
     }
@@ -1246,7 +1380,7 @@ static void gfx_3ds_swap_buffers_begin(void)
             gPortPerfCmdBufMax = use > gPortPerfCmdBufMax ? use : gPortPerfCmdBufMax;
         }
         if (keep) {
-            if (sLogicStarted && sFramesDone - sDepthReadAt <= 1 && sTarget != NULL) {
+            if (sLogicStarted && sFramesDone - sDepthReadAt <= (gPortRenderThreaded ? 2u : 1u) && sTarget != NULL) {
                 depth_copy_async(); /* the walk's in-between frame: see sDepthReadAt */
                 sDepthOfFrame = sFramesDone + 1;
             }
@@ -1254,7 +1388,7 @@ static void gfx_3ds_swap_buffers_begin(void)
                 /* what C3D_FrameEnd(0) did for every frame: everything the CPU wrote (earlier splits of this frame
                  * included) reaches RAM before the GPU starts */
                 extern u32 __ctru_linear_heap, __ctru_linear_heap_size;
-                GSPGPU_FlushDataCache((void*)__ctru_linear_heap, __ctru_linear_heap_size);
+                Port3ds_CacheFlush((void*)__ctru_linear_heap, __ctru_linear_heap_size);
             }
             gxCmdQueueRun((gxCmdQueue_s*)c3d_queue()); /* the GPU starts on this frame now */
             sFrameOpen = true;
@@ -1262,6 +1396,7 @@ static void gfx_3ds_swap_buffers_begin(void)
             gPortPerfOverlapFrames++;
         } else {
             t0 = svcGetSystemTick();
+            Port3ds_RenderPhase(33); /* C3D_FrameEnd */
             C3D_FrameEnd(gPortCmdlistFlush ? GX_CMDLIST_FLUSH : 0);
             sSubmitTick = svcGetSystemTick(); /* the queue starts at the end of C3D_FrameEnd */
             gPortPerfFrameEnd += sSubmitTick - t0;
@@ -1277,7 +1412,13 @@ static void gfx_3ds_swap_buffers_begin(void)
     }
     {
         extern int gPortInterpExtra;
-        if (gPortInterpExtra && sLogicStarted && !sFrameOpen) {
+        if (gPortRenderThreaded) {
+            /* the game thread must not touch the GPU: the update's first frame is always copied here, queued */
+            if (sLogicStarted && !sFrameOpen && sTarget != NULL && sColorWantFrames == 0 &&
+                sFramesDone - sDepthReadAt <= 2u) {
+                depth_copy_async();
+            }
+        } else if (gPortInterpExtra && sLogicStarted && !sFrameOpen) {
             sDepthEarlyPending = true; /* the walk's in-between frame: see sDepthReadAt */
         }
         sLogicStarted = !gPortInterpExtra;
@@ -1301,7 +1442,7 @@ static void gfx_3ds_swap_buffers_begin(void)
         }
         gfx_3ds_debug_dump_interp();
     }
-    gPortStereoFlatScene = 0; /* the next frame's gamestate sets it again if it is a menu */
+    /* (gPortStereoFlatScene: cleared when the game hands the frame over, Port3ds_TakeFrameRequests) */
     /* Depth readback right after this frame's render (C3D_SyncDisplayTransfer outside a frame waits
      * for the queued render first). The game samples it from Environment_GraphCallback, which the N64
      * runs once the previous frame's RDP work is done: reading it back here gives the same frame N-1

@@ -76,7 +76,10 @@ void Port3ds_AudioSubmit(const s16* samples, int nsamples) {
     memset(wb, 0, sizeof(ndspWaveBuf));
     wb->data_vaddr = sWaveData[sNextBuf];
     wb->nsamples = (u32)nsamples;
-    DSP_FlushDataCache(sWaveData[sNextBuf], (size_t)nsamples * 2 * sizeof(s16));
+    {
+        extern void Port3ds_CacheFlush(const void* p, u32 size); /* gfx_3ds.c: the kernel, not the DSP service */
+        Port3ds_CacheFlush(sWaveData[sNextBuf], (u32)((size_t)nsamples * 2 * sizeof(s16)));
+    }
     ndspChnWaveBufAdd(0, wb);
     sNextBuf = (sNextBuf + 1) % PORT_AUDIO_NBUFS;
 }
@@ -172,6 +175,7 @@ extern void PortAudio_RunTask(void* task);
 
 static Thread sAudioWorker;
 static LightEvent sAudioJobStart, sAudioJobDone;
+
 static PortOSTask sAudioJob __attribute__((aligned(8)));
 static volatile bool sAudioJobBusy;
 static int sAudioAsync = -1; /* -1 = not tried yet */
@@ -193,6 +197,43 @@ static void Port3ds_AudioWorkerMain(void* arg) {
     }
 }
 
+int gPortAudioCore = -1; /* -1: by model (New 3DS core 2, Old 3DS core 1) */
+unsigned gPortAudioCore1Limit; /* the system core share granted (perf report), 0 when not on core 1 */
+int gPortAudioCoreNow = -1;    /* the core running the current tasks (perf report) */
+/* audio_share_ab (3ds_main.c): a new system-core share between perf reports */
+void Port3ds_AudioSetShare(int percent) {
+    if (gPortAudioCore1Limit != 0 && R_SUCCEEDED(APT_SetAppCpuTimeLimit((u32)percent))) {
+        gPortAudioCore1Limit = (unsigned)percent;
+    }
+}
+
+/* Old 3DS: the audio microcode needs a task every retrace, 2-4 ms each at 268 MHz (hardware v49 on core 2). The
+ * system core gives an application only the share it asked for with APT_SetAppCpuTimeLimit, up to the exheader's
+ * limit (port/oot.rsf MaxCpu, 89%). Measured at Old 3DS speed (PORT 2026-10-04):
+ *   30% (v52; the default exheader limit refused more): 12-18 ms per task, the game waited for it - low frame rate,
+ *       crackling audio;
+ *   80% (v54): 5-6.7 ms per task, but every request to the system services that live on that core (the DSP's cache
+ *       flush per audio pump, the GPU's) got slower - the audio engine on the game thread went from ~3 to 10-14 ms
+ *       per update, on a New 3DS too, where the mixer was not even on core 1 (the share was reserved for perf_ab).
+ * So: never on a New 3DS (core 2 is free), and a middle share on an Old 3DS until hardware decides
+ * (settings audio_share=N, audio_share_ab=1 cycles 30/55/80 for a measurement). */
+int gPortAudioShare = 55;
+static void Port3ds_AudioAskSystemCore(void) {
+    u32 want = (u32)(gPortAudioShare < 10 ? 10 : gPortAudioShare > 89 ? 89 : gPortAudioShare);
+    u32 limits[4] = { want, 55, 30, 0 }, granted = 0;
+    int i;
+    for (i = 0; i < 3; i++) {
+        if (R_SUCCEEDED(APT_SetAppCpuTimeLimit(limits[i]))) {
+            break;
+        }
+    }
+    APT_GetAppCpuTimeLimit(&granted);
+    gPortAudioCore1Limit = granted;
+    {
+        extern void PortDbgX(const char* label, unsigned val);
+        PortDbgX("[audio] system core share for the mixer (%)", granted);
+    }
+}
 static void Port3ds_AudioWorkerStart(void) {
     extern void PortDbg(const char*);
     bool n3ds = false;
@@ -205,13 +246,16 @@ static void Port3ds_AudioWorkerStart(void) {
     APT_CheckNew3DS(&n3ds);
     svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
     core = n3ds ? 2 : 1;
-    if (!n3ds) {
-        /* Old 3DS: the audio microcode needs ~33% of the system core (measured: 5.3-6.0 ms per task at
-         * 268 MHz, 60 tasks/s). Stock firmware allows at most 30%; Luma3DS allows up to 89%, but 80%
-         * has been reported to hard-lock when opening the Rosalina menu. Ask for 55%, else 30%. */
-        if (R_FAILED(APT_SetAppCpuTimeLimit(55))) {
-            APT_SetAppCpuTimeLimit(30);
+    {
+        /* 3ds_main.c: the Old 3DS layout runs the game on core 1 and the drawing on core 0: the mixer goes to core 0,
+         * beside the drawing, at a higher priority (it must keep up, as the N64's RSP did) */
+        extern int gPortAudioCore;
+        if (gPortAudioCore >= 0) {
+            core = gPortAudioCore;
         }
+    }
+    if (core == 1) {
+        Port3ds_AudioAskSystemCore();
     }
     sAudioWorker = threadCreate(Port3ds_AudioWorkerMain, NULL, 16 * 1024, prio > 0x18 ? prio - 1 : prio, core, true);
     if (sAudioWorker == NULL && n3ds) {
@@ -219,9 +263,11 @@ static void Port3ds_AudioWorkerStart(void) {
         core = 1;
         sAudioWorker = threadCreate(Port3ds_AudioWorkerMain, NULL, 16 * 1024, prio > 0x18 ? prio - 1 : prio, core, true);
     }
+    gPortAudioCoreNow = sAudioWorker != NULL ? core : 0;
     if (sAudioWorker != NULL) {
         sAudioAsync = 1;
-        PortDbg(core == 2 ? "[audio] microcode worker on core 2" : "[audio] microcode worker on core 1");
+        PortDbg(core == 2 ? "[audio] microcode worker on core 2" : core == 1 ? "[audio] microcode worker on core 1" :
+                                                                             "[audio] microcode worker on core 0");
     } else {
         PortDbg("[audio] no microcode worker thread - running audio tasks synchronously");
     }

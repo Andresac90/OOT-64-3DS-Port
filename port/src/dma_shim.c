@@ -273,19 +273,29 @@ static void SramLoad(void) {
  * removed SD card during a save leaves the previous save (save.bin, or save.bak between the renames), never a
  * truncated file. Rewriting save.bin in place destroyed it in that case. */
 static void SramFlush(void) {
+    extern void PortDbgX(const char* label, unsigned val);
+    extern u64 svcGetSystemTick(void);
+    u64 t0 = svcGetSystemTick();
     void* f = fopen(SRAM_TMP, "wb");
     u32 n;
     if (f == NULL) {
+        PortDbgX("[save] FAILED to create save.tmp", 0);
         return;
     }
     n = fwrite(sSram, 1, PORT_SRAM_SIZE, f);
     if (fclose(f) != 0 || n != PORT_SRAM_SIZE) {
         remove(SRAM_TMP);
+        PortDbgX("[save] FAILED to write save.tmp, bytes", n);
         return;
     }
     remove(SRAM_BAK);
     rename(SRAM_FILE, SRAM_BAK); /* fails harmlessly when there is no save yet */
-    rename(SRAM_TMP, SRAM_FILE);
+    if (rename(SRAM_TMP, SRAM_FILE) != 0) {
+        PortDbgX("[save] FAILED to rename save.tmp to save.bin", 0);
+        return;
+    }
+    /* (one line per save, always: release checklist "saving is quick" is timed from it) */
+    PortDbgX("[save] written, ms", (unsigned)((svcGetSystemTick() - t0) / 268112u)); /* (ticks at 268.11 MHz) */
 }
 
 /* PORT (2026-10-02): one file write per save. The game writes a save as several SRAM DMAs (the slot, its

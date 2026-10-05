@@ -116,7 +116,7 @@ PORT_GAME_SRCS := \
 # PORT platform backends compile in the DEVKIT world.
 DEVKIT_SRCS := \
   port/src/3ds_main.c port/src/3ds_compat.c port/src/audio_3ds.c port/src/jpeg_port.c port/src/statedump.c port/src/zbuffer_port.c port/src/overlay_statics.c \
-  port/src/gfx/gfx_pc.c port/src/gfx3ds/gfx_3ds.c port/src/gfx3ds/gfx_citro3d.c
+  port/src/gfx/gfx_pc.c port/src/gfx3ds/gfx_3ds.c port/src/gfx3ds/gfx_citro3d.c port/src/gfx3ds/c3d_fast.c
 
 # native little-endian assets (generated; from port/asset_srcs.mk -> $(ASSET_SRCS))
 # ASSET_BUILDDIR = generated audio (soundfonts/…); ASSET_EXTRACTED = machine-extracted
@@ -169,7 +169,7 @@ $(DEVKIT_OBJS):             CC_FLAGS := $(PORT_CFLAGS)
 # sm64 3DS port's Old-3DS speed-up (RetroGamer02/sm64 "Speed boost"). Game logic keeps -O2 without
 # fast-math so its float results stay those of the N64 code.
 HOT_OBJS := $(BUILD)/port/src/gfx/gfx_pc.o $(BUILD)/port/src/gfx3ds/gfx_citro3d.o \
-            $(BUILD)/port/src/gfx3ds/gfx_3ds.o $(BUILD)/port/src/audio_microcode.o
+            $(BUILD)/port/src/gfx3ds/gfx_3ds.o $(BUILD)/port/src/audio_microcode.o $(BUILD)/port/src/gfx3ds/c3d_fast.o
 $(HOT_OBJS): CC_FLAGS += -O3 -ffast-math
 # gameplay_keep blob must be a VROM-exact contiguous native LE blob (see its header):
 # -O0 keeps order, -fno-toplevel-reorder keeps declaration order, -Dconst= forces data
@@ -184,9 +184,9 @@ $(BUILD)/%.o: %.c
 		$(OBJCOPY) --rename-section .data=ovld_$$ovl --rename-section .bss=ovlb_$$ovl $@ ;; esac
 
 # PICA200 vertex shader -> shader_shbin[] object
-$(BUILD)/shader.shbin: port/src/gfx3ds/shader.v.pica port/src/gfx3ds/shader_gpu.v.pica
+$(BUILD)/shader.shbin: port/src/gfx3ds/shader.v.pica port/src/gfx3ds/shader_gpu.v.pica port/src/gfx3ds/shader_raw.v.pica
 	@mkdir -p $(dir $@)
-	$(PICASSO) -o $@ port/src/gfx3ds/shader.v.pica port/src/gfx3ds/shader_gpu.v.pica
+	$(PICASSO) -o $@ port/src/gfx3ds/shader.v.pica port/src/gfx3ds/shader_gpu.v.pica port/src/gfx3ds/shader_raw.v.pica
 # objcopy -I binary names symbols from the input FILENAME; we cd in first so the input is
 # "shader.shbin" -> _binary_shader_shbin_{start,end,size}. Rename to what the code expects.
 $(SHADER_OBJ): $(BUILD)/shader.shbin
@@ -222,11 +222,17 @@ $(BUILD)/$(TARGET).smdh: $(ICON_PNG)
 # HOME Menu banner: port/banner_local.bnr when present (Link, tools/make_link_banner.py, never committed), else the
 # committed original artwork port/banner.bnr (tools/make_banner.sh; bannertool not needed to build)
 BANNER := $(if $(wildcard port/banner_local.bnr),port/banner_local.bnr,port/banner.bnr)
+# Title version in the CIA (1.0.0): a new version makes FBI install it as an update and the HOME Menu re-read the
+# icon and banner (it keeps them cached per title version)
+TITLE_VER_MAJOR := 1
+TITLE_VER_MINOR := 0
+TITLE_VER_MICRO := 0
 
 $(BUILD)/$(TARGET).3ds:  $(ELF) port/oot.rsf $(BUILD)/$(TARGET).smdh $(BANNER)
 	$(MAKEROM) -f cci -o $@ -rsf port/oot.rsf -target t -exefslogo -elf $< -icon $(BUILD)/$(TARGET).smdh -banner $(BANNER)
 $(BUILD)/$(TARGET).cia:  $(ELF) port/oot.rsf $(BUILD)/$(TARGET).smdh $(BANNER)
-	$(MAKEROM) -f cia -o $@ -rsf port/oot.rsf -target t -exefslogo -elf $< -icon $(BUILD)/$(TARGET).smdh -banner $(BANNER)
+	$(MAKEROM) -f cia -o $@ -rsf port/oot.rsf -target t -exefslogo -elf $< -icon $(BUILD)/$(TARGET).smdh -banner $(BANNER) \
+		-major $(TITLE_VER_MAJOR) -minor $(TITLE_VER_MINOR) -micro $(TITLE_VER_MICRO)
 
 clean: ; rm -rf $(BUILD)
 

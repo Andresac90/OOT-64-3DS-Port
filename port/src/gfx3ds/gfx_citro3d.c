@@ -39,6 +39,8 @@
 
 #include <3ds.h>
 #include <citro3d.h>
+#include "c3d_fast.h"
+extern void Port3ds_CacheFlush(const void* p, u32 size); /* gfx_3ds.c */
 
 #include "gfx_cc.h"
 #include "gfx_rendering_api.h"
@@ -65,7 +67,7 @@ extern const u8 shader_shbin_end[];
  *   cycle-0 stage; PICA: stage s reads the buffer as updated by stages <= s-2).
  * Keys this can't express exactly are compiled approximately and reported once (PortDbgX). */
 
-enum { KC_NONE, KC_ZERO, KC_ONE, KC_PRIM, KC_PRIMA, KC_ENV, KC_ENVA, KC_LODF, KC_PRIMLODF, KC_FOG };
+enum { KC_NONE, KC_ZERO, KC_ONE, KC_PRIM, KC_PRIMA, KC_ENV, KC_ENVA, KC_LODF, KC_PRIMLODF, KC_FOG, KC_HALF };
 enum { OK_CONST, OK_TEX0, OK_TEX1, OK_SHADE, OK_PREV, OK_COMB };
 
 typedef struct {
@@ -75,6 +77,7 @@ typedef struct {
 typedef struct {
     u8 func; /* GPU_COMBINEFUNC */
     Opnd src[3];
+    u8 scale; /* 1: the stage's result times 2 (then clamped) */
 } ChanOp;
 
 typedef struct {
@@ -82,6 +85,7 @@ typedef struct {
     u8 src[2][3];   /* GPU_TEVSRC */
     u8 op[2][3];    /* GPU_TEVOP_RGB / GPU_TEVOP_A */
     u8 konst[2];    /* KC_* in this stage's CONSTANT, per channel */
+    u8 scale[2];    /* [channel] 1 = GPU_TEVSCALE_2 */
 } TevStage;
 
 #define TEV_STAGES 6
@@ -148,7 +152,7 @@ static int sBufIdx = 0;
  * are needed by the walk); gfx_citro3d_replay re-issues the log for each shown frame, after gfx_pc.c
  * rewrote the VBO positions. Texture uploads are not logged - the textures stay in their slots. */
 enum { OP_SHADER, OP_CONSTS, OP_TEX, OP_SAMPLER, OP_DTEST, OP_DMASK, OP_DECAL, OP_VIEWPORT, OP_SCISSOR,
-       OP_ALPHA, OP_DRAWID, OP_STEREO, OP_DRAWIDX, OP_GPUPAL, OP_GPUPARAM, OP_CULL };
+       OP_ALPHA, OP_DRAWID, OP_STEREO, OP_DRAWIDX, OP_GPUPAL, OP_GPUPARAM, OP_CULL, OP_RAWMODE, OP_RAWPARAM, OP_TEXPARAM };
 typedef struct {
     u8 op;
     int v[4];
@@ -158,6 +162,7 @@ typedef struct {
 static RecOp* sOps;
 static struct GfxCombineConsts* sOpConsts;
 static int sOpN, sConstN, sRec, sRecOverflow;
+static int sRecDirect; /* the walk draws the update's first shown frame itself (replay by copy: captured as it goes) */
 static void recOp(u8 op, int a, int b, int c, int d) {
     if (sOpN >= REC_OPS) {
         sRecOverflow = 1;
@@ -209,6 +214,7 @@ static Opnd ccsOpnd(u8 s, int ch) {
 
 static int emit(ChanOp* out, int n, u8 func, Opnd a, Opnd b, Opnd c) {
     out[n].func = func;
+    out[n].scale = 0;
     out[n].src[0] = a;
     out[n].src[1] = b;
     out[n].src[2] = c;
@@ -260,6 +266,18 @@ static int lowerChannel(Opnd a, Opnd b, Opnd c, Opnd d, int ch, int cycle, ChanO
     if (isK(c, KC_ONE)) {
         n = emit(out, n, GPU_ADD, a, d, z);
         return emit(out, n, GPU_SUBTRACT, prev, b, z);
+    }
+    if (opndEq(a, d) && a.kind != OK_PREV && b.kind != OK_PREV && c.kind != OK_PREV) {
+        /* PORT (2026-10-05): (A-B)*C + A = 2A - (B*C + A*(1-C)) = 2 * (A - lerp(A, B, C) / 2): every intermediate stays in
+         * 0..1 and the only clamp is the last stage's - the N64's own. The order below computed A*C + max(A - B*C, 0),
+         * too bright wherever A < B*C: the blue warp's crystal, (TEXEL0 - PRIM) * PRIM_LOD_FRAC + TEXEL0 with the
+         * fraction at 1 (= 2T - P on the N64), came out white instead of blue and hid Link (Chamber of the Sages,
+         * tools/statediff fbdiff: 10% of the pixels off, user report). */
+        n = emit(out, n, GPU_INTERPOLATE, b, a, c);                      /* B*C + A*(1-C) */
+        n = emit(out, n, GPU_MODULATE, prev, opnd(OK_CONST, ch, KC_HALF), z); /* ... / 2 */
+        n = emit(out, n, GPU_SUBTRACT, a, prev, z);                      /* A - ..., times 2 */
+        out[n - 1].scale = 1;
+        return n;
     }
     if (a.kind != OK_PREV && b.kind != OK_PREV && c.kind != OK_PREV && d.kind != OK_PREV) {
         /* PORT (2026-09-30): A*C + (D - B*C). Every PICA stage clamps to 0..1; the previous order
@@ -382,6 +400,7 @@ static bool placeOp(TevCompile* tc, TevStage* st, int s, int ch, int cycle, cons
     }
     st->konst[ch] = konst;
     st->func[ch] = op->func;
+    st->scale[ch] = op->scale;
     for (int i = 0; i < 3; i++) {
         st->src[ch][i] = src[i];
         st->op[ch][i] = ops[i];
@@ -392,6 +411,7 @@ static bool placeOp(TevCompile* tc, TevStage* st, int s, int ch, int cycle, cons
 static ChanOp passOp(int ch) {
     ChanOp op;
     op.func = GPU_REPLACE;
+    op.scale = 0;
     op.src[0] = opnd(OK_PREV, ch, 0);
     op.src[1] = op.src[2] = opnd(OK_CONST, ch, KC_ZERO);
     return op;
@@ -446,6 +466,7 @@ static bool compileTev(struct ShaderProgram* prg) {
                     }
                     ChanOp pre;
                     pre.func = GPU_REPLACE;
+                    pre.scale = 0;
                     pre.src[0] = opnd(OK_CONST, ch, needK);
                     pre.src[1] = pre.src[2] = pre.src[0];
                     if (!usesPrev && placeOp(&tc, st, ns, ch, cycle, &pre, &needK)) {
@@ -523,6 +544,7 @@ static u8 konstVal(u8 k, int ch, int comp) {
         case KC_LODF: return c->lod_frac;
         case KC_PRIMLODF: return c->prim_lod_frac;
         case KC_FOG: return c->fog[ch ? 3 : comp];
+        case KC_HALF: return 128;
     }
     return 0;
 }
@@ -554,6 +576,10 @@ static void updateShader(void)
         C3D_TexEnvOpAlpha(e, st->op[1][0], st->op[1][1], st->op[1][2]);
         C3D_TexEnvFunc(e, C3D_RGB, st->func[0]);
         C3D_TexEnvFunc(e, C3D_Alpha, st->func[1]);
+        if (st->scale[0] | st->scale[1]) {
+            C3D_TexEnvScale(e, C3D_RGB, st->scale[0] ? GPU_TEVSCALE_2 : GPU_TEVSCALE_1);
+            C3D_TexEnvScale(e, C3D_Alpha, st->scale[1] ? GPU_TEVSCALE_2 : GPU_TEVSCALE_1);
+        }
         C3D_TexEnvColor(e, konstColor(st->konst[0], st->konst[1]));
     }
     C3D_TexEnvBufUpdate(C3D_RGB, prg->buf_update[0]);
@@ -955,11 +981,11 @@ static void setEye(float shift) {
     if (sEyeLoc < 0) {
         return;
     }
-    extern int gPortStereoFlatScene; /* gfx_3ds.c: menus (file select) - flat, backgrounds at half depth */
-    if (shift == 0.0f || sStereoMode == 3 || (gPortStereoFlatScene && sStereoMode == 0)) {
+    extern int gPortStereoFlatSceneR; /* gfx_3ds.c: menus (file select) - flat, backgrounds at half depth */
+    if (shift == 0.0f || sStereoMode == 3 || (gPortStereoFlatSceneR && sStereoMode == 0)) {
         /* mono, a flat screen-depth layer (the HUD), or a menu's panels */
         u[0] = u[1] = u[2] = u[3] = 0.0f;
-    } else if (gPortStereoFlatScene) { /* a menu's sky / room background: behind the panels */
+    } else if (gPortStereoFlatSceneR) { /* a menu's sky / room background: behind the panels */
         u[0] = 0.0f, u[1] = 0.0f, u[2] = fabsf(shift * 0.5f), u[3] = shift * 0.5f;
     } else if (sStereoMode == 1) { /* sky: the full shift, independent of the skybox box's own w */
         u[0] = 0.0f, u[1] = 0.0f, u[2] = 0.0f, u[3] = shift;
@@ -1039,11 +1065,13 @@ int gPortGpuVtx = 1;              /* settings gpu_vtx=0/1, fixed at init. PORT P
                                    * default - as accurate as the CPU path (fbdiff) and faster on both consoles
                                    * (hardware v27: New 3DS walk 9-16 vs 15-22 ms, Old 3DS speed 9.9-10.4 vs 9.6
                                    * updates/s before frame skip) */
-#define GPU_PAL 20
+#define GPU_PAL 18
 #define GPU_STRIDE 56             /* sizeof(GpuVtx) in gfx_pc.c */
 #define GPU_VERTS (VBO_BYTES / GPU_STRIDE)
 static int sPalLoc = -1, sFogpLoc = -1, sStpLoc = -1;
 static int sReplayK = 2;          /* the replay being drawn: 0 = t 1/3, 1 = t 2/3, 2 = the logic frame */
+static uint16_t sPalSlotNow[GPU_PAL]; /* the slot whose rows each palette entry holds (replay by copy) */
+static u32 sPalTouched; /* written in this replay: palette entry e = bit e, stp = bit 31 (older ones are stale) */
 static float sGpuConv, sGpuFog[3];
 #define REC_PALS 4096
 static uint16_t (*sOpPal)[GPU_PAL]; /* recorded palettes (slot ids), OP_GPUPAL v[0] = index, v[1] = count */
@@ -1162,10 +1190,12 @@ void gfx_citro3d_draw_indexed(void) {
     if (n == 0) {
         return;
     }
-    if (sRec) { /* drawn by the replays */
+    if (sRec) { /* drawn by the replays (direct capture: also now) */
         recOp(OP_DRAWIDX, (int)sIdxStart, (int)n, 0, 0);
-        sIdxStart = sIdxPos;
-        return;
+        if (!sRecDirect) {
+            sIdxStart = sIdxPos;
+            return;
+        }
     }
     submitDraw(n, 0, sIdxBuf + sIdxStart);
     sIdxStart = sIdxPos;
@@ -1186,6 +1216,8 @@ static void gpuUploadPalette(const uint16_t* slots, int start, int n) {
     }
     for (i = 0; i < n; i++) {
         float* u = (float*)C3D_FVUnifWritePtr(GPU_VERTEX_SHADER, sPalLoc + (start + i) * 4, 4);
+        sPalSlotNow[start + i] = slots[i];
+        sPalTouched |= 1u << (start + i);
         gfx_gpu_slot_rows(slots[i], sReplayK, rows);
         /* citro3d uniforms are stored (w, z, y, x) per vec4 */
         int r;
@@ -1207,6 +1239,7 @@ static void gpuUploadParams(const float p[5]) {
         /* y = 1 - t of the replay being drawn (skinned vertices' delta toward the previous frame) */
         float back = sReplayK == 0 ? (2.0f / 3.0f) : sReplayK == 1 ? (1.0f / 3.0f) : 0.0f;
         C3D_FVUnifSet(GPU_VERTEX_SHADER, sStpLoc, p[3], back, p[4], 0.0005f);
+        sPalTouched |= 1u << 31;
     }
 }
 
@@ -1239,8 +1272,10 @@ void gfx_citro3d_gpu_params(float fogMul, float fogOff, float fogOn, float conv,
 }
 
 /* N64 cull mode (G_CULL_BACK etc. >> 9: 0 none, 1 front, 2 back, 3 both) */
+static int sCullMode;
 void gfx_citro3d_gpu_cull(int mode) {
     if (sRec) recOp(OP_CULL, mode, 0, 0, 0);
+    sCullMode = mode;
     /* The portrait mapping (y, -x) is a rotation (keeps the winding); the N64 front face is
      * counter-clockwise on screen. Both = everything culled: the CPU path drew nothing either. */
     C3D_CullFace(mode == 1 ? GPU_CULL_FRONT_CCW : mode == 2 ? GPU_CULL_BACK_CCW : GPU_CULL_NONE);
@@ -1257,10 +1292,169 @@ void* gfx_citro3d_gpu_vbo(int** pos, u32* cap, float scale[4]) {
     return sVboBuffer;
 }
 
-/* the vertex path's shader program, vertex format and uniforms. PORT (2026-10-01): switchable between
- * frames (gpu_ab=1 alternates the CPU and GPU vertex paths for a hardware A/B in one session) */
+/* ---- PORT PERF (2026-10-04): raw vertex path (gfx_pc.c gPortRawVtx, shader_raw.v.pica) ----
+ * The game's 16-byte N64 vertices go to the GPU as they are; the shader does the matrix, lights, texture coordinate
+ * scale and fog. Same binary as the GPU path (uniforms shared by name, so the palette and eye/fog values carry over
+ * a switch); its own vertex buffer and format. Draws switch between the two programs (rectangles, texgen and skinned
+ * loads stay on the GPU path). */
+#define RAW_VBO_BYTES (768 * 1024)
+#define RAW_STRIDE 16
+#define REC_RAWP 2048
+typedef struct {
+    float uvc0[4], uvc1[4], lit, lamb[3], ldir[4][3], lcol[4][3];
+} RawParams;
+static shaderProgram_s sProgRaw;
+static bool sProgRawInit;
+static void* sRawVbo;
+static int sRawIdx;
+static int sRawMode;              /* the raw program is bound */
+static int sUvc0Loc = -1, sUvc1Loc = -1, sLitLoc = -1, sLambLoc = -1, sLdirLoc = -1, sLcolLoc = -1;
+static C3D_AttrInfo sAttrGpu, sAttrRaw;
+static C3D_BufInfo sBufGpu, sBufRaw;
+static RawParams* sOpRawP;
+static int sOpRawPN;
 static shaderProgram_s sProg[2];
 static bool sProgInit[2];
+
+u32 gPortPerfRawSwitches; /* perf report: program + vertex format switches between the raw and GPU paths */
+static C3Df_Config sCfgGpu, sCfgRaw;
+static void rawBind(int raw) {
+    gPortPerfRawSwitches++;
+    /* only the registers that differ between the two configurations are sent (c3d_fast.c) */
+    C3Df_SelectConfig(raw);
+    sRawMode = raw;
+}
+
+/* gfx_pc.c, between draws: switch the program and vertex format (the caller flushed) */
+void gfx_citro3d_raw_mode(int raw) {
+    raw = raw != 0;
+    if (raw == sRawMode || !sProgRawInit) {
+        return;
+    }
+    if (sRec) recOp(OP_RAWMODE, raw, 0, 0, 0);
+    rawBind(raw);
+}
+
+int gfx_citro3d_raw_ready(void) {
+    return sProgRawInit && sRawVbo != NULL && sOpRawP != NULL;
+}
+
+/* PORT PERF (2026-10-04): only the values that changed are set: each set uniform is re-sent with the next draw, and
+ * the command buffer is linear memory, whose writes cost the most on an Old 3DS. These uniforms are the raw program's
+ * own (nothing else sets them), so the last values sent stay valid across program switches and frames. */
+static RawParams sRawSent;
+static int sRawSentOk; /* 0: nothing sent yet; bit 1: uvc0/uvc1/lit, bit 2: the lights */
+static void rawUpload(const RawParams* p) {
+    int i;
+    if (sUvc0Loc < 0) return;
+    if (!(sRawSentOk & 1) || memcmp(p->uvc0, sRawSent.uvc0, sizeof(p->uvc0)) != 0) {
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sUvc0Loc, p->uvc0[0], p->uvc0[1], p->uvc0[2], p->uvc0[3]);
+        memcpy(sRawSent.uvc0, p->uvc0, sizeof(p->uvc0));
+    }
+    if (!(sRawSentOk & 1) || memcmp(p->uvc1, sRawSent.uvc1, sizeof(p->uvc1)) != 0) {
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sUvc1Loc, p->uvc1[0], p->uvc1[1], p->uvc1[2], p->uvc1[3]);
+        memcpy(sRawSent.uvc1, p->uvc1, sizeof(p->uvc1));
+    }
+    if (!(sRawSentOk & 1) || p->lit != sRawSent.lit) {
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLitLoc, p->lit, 0.0f, 0.0f, 0.0f);
+        sRawSent.lit = p->lit;
+    }
+    sRawSentOk |= 1;
+    if (p->lit != 0.0f && (!(sRawSentOk & 2) || memcmp(p->lamb, sRawSent.lamb, sizeof(p->lamb)) != 0 ||
+                           memcmp(p->ldir, sRawSent.ldir, sizeof(p->ldir)) != 0 ||
+                           memcmp(p->lcol, sRawSent.lcol, sizeof(p->lcol)) != 0)) {
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLambLoc, p->lamb[0], p->lamb[1], p->lamb[2], 0.0f);
+        for (i = 0; i < 4; i++) {
+            C3D_FVUnifSet(GPU_VERTEX_SHADER, sLdirLoc + i, p->ldir[i][0], p->ldir[i][1], p->ldir[i][2], 0.0f);
+            C3D_FVUnifSet(GPU_VERTEX_SHADER, sLcolLoc + i, p->lcol[i][0], p->lcol[i][1], p->lcol[i][2], 0.0f);
+        }
+        memcpy(sRawSent.lamb, p->lamb, sizeof(p->lamb));
+        memcpy(sRawSent.ldir, p->ldir, sizeof(p->ldir));
+        memcpy(sRawSent.lcol, p->lcol, sizeof(p->lcol));
+        sRawSentOk |= 2;
+    }
+}
+
+/* (replay by copy, canonUniforms) the raw path's uniforms at fixed values, and the next raw draw sends its own */
+static void rawCanonUniforms(void) {
+    int i;
+    if (sUvc0Loc < 0) {
+        return;
+    }
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, sUvc0Loc, 0.0f, 0.0f, 0.0f, 0.0f);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, sUvc1Loc, 0.0f, 0.0f, 0.0f, 0.0f);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, sLitLoc, 0.0f, 0.0f, 0.0f, 0.0f);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, sLambLoc, 0.0f, 0.0f, 0.0f, 0.0f);
+    for (i = 0; i < 4; i++) {
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLdirLoc + i, 0.0f, 0.0f, 0.0f, 0.0f);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLcolLoc + i, 0.0f, 0.0f, 0.0f, 0.0f);
+    }
+    sRawSentOk = 0;
+}
+
+/* gfx_pc.c, before a raw draw: its texture coordinate coefficients and lights */
+void gfx_citro3d_raw_params(const float uvc0[4], const float uvc1[4], float lit, const float lamb[3],
+                            const float ldir[4][3], const float lcol[4][3]) {
+    RawParams p;
+    memcpy(p.uvc0, uvc0, sizeof(p.uvc0));
+    memcpy(p.uvc1, uvc1, sizeof(p.uvc1));
+    p.lit = lit;
+    if (lit != 0.0f) {
+        memcpy(p.lamb, lamb, sizeof(p.lamb));
+        memcpy(p.ldir, ldir, sizeof(p.ldir));
+        memcpy(p.lcol, lcol, sizeof(p.lcol));
+    }
+    if (sRec) {
+        if (sOpRawPN < REC_RAWP) {
+            sOpRawP[sOpRawPN] = p;
+            recOp(OP_RAWPARAM, sOpRawPN++, 0, 0, 0);
+        } else {
+            sRecOverflow = 1;
+        }
+    }
+    rawUpload(&p);
+}
+
+/* the raw vertex buffer: base, capacity (vertices) and the running index */
+void* gfx_citro3d_raw_vbo(int** pos, u32* cap) {
+    *pos = &sRawIdx;
+    *cap = RAW_VBO_BYTES / RAW_STRIDE;
+    return sRawVbo;
+}
+
+static void rawInit(void) {
+    if (sProgRawInit || sVShaderDvlb == NULL || sVShaderDvlb->numDVLE < 3) {
+        return;
+    }
+    sRawVbo = linearAlloc(RAW_VBO_BYTES);
+    sOpRawP = malloc(sizeof(RawParams) * REC_RAWP);
+    if (sRawVbo == NULL || sOpRawP == NULL) {
+        return;
+    }
+    shaderProgramInit(&sProgRaw);
+    shaderProgramSetVsh(&sProgRaw, &sVShaderDvlb->DVLE[2]);
+    sUvc0Loc = shaderInstanceGetUniformLocation(sProgRaw.vertexShader, "uvc0");
+    sUvc1Loc = shaderInstanceGetUniformLocation(sProgRaw.vertexShader, "uvc1");
+    sLitLoc = shaderInstanceGetUniformLocation(sProgRaw.vertexShader, "lit");
+    sLambLoc = shaderInstanceGetUniformLocation(sProgRaw.vertexShader, "lamb");
+    sLdirLoc = shaderInstanceGetUniformLocation(sProgRaw.vertexShader, "ldir");
+    sLcolLoc = shaderInstanceGetUniformLocation(sProgRaw.vertexShader, "lcol");
+    /* N64 Vtx: s16 ob[3], u16 flag (the palette index here), s16 tc[2], u8 cn[4] */
+    AttrInfo_Init(&sAttrRaw);
+    AttrInfo_AddLoader(&sAttrRaw, 0, GPU_SHORT, 4);         // v0 = x, y, z, palette index
+    AttrInfo_AddLoader(&sAttrRaw, 1, GPU_SHORT, 2);         // v1 = s, t
+    AttrInfo_AddLoader(&sAttrRaw, 2, GPU_UNSIGNED_BYTE, 4); // v2 = colour, or normal + alpha
+    BufInfo_Init(&sBufRaw);
+    BufInfo_Add(&sBufRaw, sRawVbo, RAW_STRIDE, 3, 0x210);
+    sCfgGpu.prog = &sProg[1], sCfgGpu.attr = &sAttrGpu, sCfgGpu.buf = &sBufGpu;
+    sCfgRaw.prog = &sProgRaw, sCfgRaw.attr = &sAttrRaw, sCfgRaw.buf = &sBufRaw;
+    C3Df_SetConfigs(&sCfgGpu, &sCfgRaw);
+    sProgRawInit = true;
+    {
+        extern void PortDbgX(const char*, unsigned);
+        PortDbgX("[gfx] raw vertex path ready", 1);
+    }
+}
 static void gfx_citro3d_setup_mode(int gpu) {
     extern void PortDbgX(const char*, unsigned);
     C3D_AttrInfo* attrInfo;
@@ -1284,6 +1478,12 @@ static void gfx_citro3d_setup_mode(int gpu) {
         }
     }
     PortDbgX(gpu ? "[gfx] vertex path: GPU (gpu_vtx)" : "[gfx] vertex path: CPU", 1);
+    PortDbgX("[gfx] uniforms pal<<24|fogp<<16|stp<<8|eye", ((unsigned)(sPalLoc & 0xFF) << 24) | ((unsigned)(sFogpLoc & 0xFF) << 16) |
+                                                            ((unsigned)(sStpLoc & 0xFF) << 8) | (unsigned)(sEyeLoc & 0xFF));
+    PortDbgX("[gfx] uniforms remap<<24|uvc0<<16|uvc1<<8|lit", ((unsigned)(sRemapLoc & 0xFF) << 24) | ((unsigned)(sUvc0Loc & 0xFF) << 16) |
+                                                               ((unsigned)(sUvc1Loc & 0xFF) << 8) | (unsigned)(sLitLoc & 0xFF));
+    PortDbgX("[gfx] uniforms lamb<<16|ldir<<8|lcol", ((unsigned)(sLambLoc & 0xFF) << 16) | ((unsigned)(sLdirLoc & 0xFF) << 8) |
+                                                      (unsigned)(sLcolLoc & 0xFF));
     /* a new program: its uniforms start unset */
     sEyeCur[0] = sEyeCur[1] = sEyeCur[2] = sEyeCur[3] = -1.0f;
     sRemapCur[0] = sRemapCur[1] = -1.0f;
@@ -1303,6 +1503,9 @@ static void gfx_citro3d_setup_mode(int gpu) {
         AttrInfo_AddLoader(attrInfo, 5, GPU_FLOAT, 4);         // v5 = skinned delta; w = 1: fog precomputed
         /* buffer order: pos(v0) uv0(v1) uv1(v3) dpos(v5) shade(v2) idx(v4); the stride covers the 3 spare bytes */
         BufInfo_Add(bufInfo, sVboBuffer, GPU_STRIDE, 6, 0x425310);
+        sAttrGpu = *attrInfo; /* (the raw path switches back to these) */
+        sBufGpu = *bufInfo;
+        sRawMode = 0;
     } else {
         AttrInfo_AddLoader(attrInfo, 0, GPU_FLOAT, 4); // v0=position
         AttrInfo_AddLoader(attrInfo, 1, GPU_FLOAT, 2); // v1=texcoord
@@ -1331,6 +1534,7 @@ static void gfx_citro3d_init(void)
     sVboBuffer = linearAlloc(VBO_BYTES);
     sIdxBuf = linearAlloc(IDX_CAP * sizeof(u16));
     gfx_citro3d_setup_mode(gPortGpuVtx != 0);
+    rawInit();
     C3D_DepthMap(true, -1.0f, 0);
     C3D_DepthTest(false, GPU_LEQUAL, GPU_WRITE_ALL);
     C3D_AlphaTest(true, GPU_GREATER, 0x00);
@@ -1338,6 +1542,7 @@ static void gfx_citro3d_init(void)
 
 static void gfx_citro3d_start_frame(void) {
     sBufIdx = 0;
+    sRawIdx = 0;
     sIdxPos = sIdxStart = 0;
 }
 
@@ -1348,11 +1553,253 @@ static void gfx_citro3d_start_frame(void) {
  * showed. Called by gfx_3ds.c right before C3D_FrameEnd submits the frame's commands. */
 void gfx_citro3d_flush_vbo(void) {
     if (sBufIdx > 0) {
-        GSPGPU_FlushDataCache(sVboBuffer, sBufIdx * (gPortGpuVtx ? GPU_STRIDE : VTX_FLOATS * sizeof(float)));
+        Port3ds_CacheFlush(sVboBuffer, sBufIdx * (gPortGpuVtx ? GPU_STRIDE : VTX_FLOATS * sizeof(float)));
     }
     if (sIdxPos > 0) {
-        GSPGPU_FlushDataCache(sIdxBuf, sIdxPos * sizeof(u16));
+        Port3ds_CacheFlush(sIdxBuf, sIdxPos * sizeof(u16));
     }
+    if (sRawIdx > 0) {
+        Port3ds_CacheFlush(sRawVbo, sRawIdx * RAW_STRIDE);
+    }
+}
+
+/* PORT PERF (2026-10-05): replay by copy. An update's shown frames differ only in the palette matrices
+ * (gfx_gpu_slot_rows of the frame's t) and the skinned-vertex blend (stp.y): the same draws, states, textures and
+ * vertices. So the walk draws the first of them itself (gfx_citro3d_rec_direct) as a self-contained command stream
+ * (c3d_fast.c C3Df_CaptureBegin re-sends all state at its start), the positions of every palette row and stp upload in
+ * it are noted, and each further frame is a copy of those words with only those patched - instead of re-running the
+ * draw log through citro3d (a third of a walk per frame). The log is still recorded: it is replayed whenever a copy
+ * could differ (another render target or mode - 3D switched -, a full command buffer, a capture that did not fit) and
+ * when the walk cannot draw directly (CPU vertex path). settings replay_copy=0 turns copies off. */
+int gPortReplayCopy = 1;
+int gPortReplayCopyCheck; /* settings replay_copy_check=1: the log is replayed (from a full state, as captured) and its
+                           * command words compared with the patched copy's - any difference is a bug */
+u32 gPortPerfReplayCopies, gPortPerfReplayCopyWords, gPortPerfCopyChecked, gPortPerfCopyBad;
+u32 gPortCopyBadInfo[6]; /* the first mismatch: offset, words (log, copy), stream lengths (log << 16 | copy, x/4) */
+typedef struct {
+    u32 off;    /* word 0 of the vec4, from the start of the stream */
+    u16 slot;   /* palette: the slot whose row it holds */
+    u8 row;     /* palette: row 0-3 */
+    u8 flags;   /* 1: the command header follows word 0 (first vec4 of a command), 2: stp (patch y = word 2),
+                 * 4: stale - sent with the frame's full state before the frame wrote it (no draw reads it) */
+} CapPatch;
+#define CAP_PATCHES 16384
+enum { CAP_NONE, CAP_ARMED, CAP_RUNNING, CAP_READY };
+static int sCapState, sCapOverflow, sCapPN, sCapMode;
+static CapPatch* sCapP;
+static u32 *sCapWords, *sCapBase, *sCapCmdBuf;
+static u32 sCapN, sCapCap, sCapTris, sCapDraws;
+static const void* sCapTarget;
+extern const void* Port3ds_DrawTargetId(void);
+extern const float* gfx_gpu_slot_row_ptr(uint16_t slot, int k);
+
+/* c3d_fast.c: a float-uniform run [first, first + count) was written at `data` */
+static void capUnifRun(const u32* data, int first, int count) {
+    int v, v0, v1;
+    if (sStpLoc >= first && sStpLoc < first + count) {
+        v0 = sStpLoc - first, v1 = v0 + 1; /* (stp sits apart from the palette: handled on its own below) */
+    } else {
+        v0 = v1 = 0;
+    }
+    for (v = v0; v < v1; v++) {
+        int w = v * 4, wi = w & 255;
+        if (sCapPN >= CAP_PATCHES) {
+            sCapOverflow = 1;
+            return;
+        }
+        sCapP[sCapPN].off = (u32)(data + (w >> 8) * 258 + (wi ? wi + 1 : 0) - sCapBase);
+        sCapP[sCapPN].slot = 0, sCapP[sCapPN].row = 0;
+        sCapP[sCapPN].flags = 2 | (wi == 0 ? 1 : 0) | ((sPalTouched >> 31) ? 0 : 4);
+        sCapPN++;
+    }
+    v0 = sPalLoc - first, v1 = sPalLoc + GPU_PAL * 4 - first;
+    v0 = v0 < 0 ? 0 : v0, v1 = v1 > count ? count : v1;
+    for (v = v0; v < v1; v++) {
+        int u = first + v - sPalLoc, w = v * 4, wi = w & 255;
+        if (sCapPN >= CAP_PATCHES) {
+            sCapOverflow = 1;
+            return;
+        }
+        /* a run goes out as commands of 256 words (64 vec4s): [w0][header][w1..w255][pad] = 258 words */
+        sCapP[sCapPN].off = (u32)(data + (w >> 8) * 258 + (wi ? wi + 1 : 0) - sCapBase);
+        sCapP[sCapPN].slot = sPalSlotNow[u >> 2];
+        sCapP[sCapPN].row = (u8)(u & 3);
+        sCapP[sCapPN].flags = (wi == 0 ? 1 : 0) | ((sPalTouched >> (u >> 2)) & 1 ? 0 : 4);
+        sCapPN++;
+    }
+}
+
+/* a captured or replayed frame starts from fixed values of the uniforms each frame sets before use (palette, fog/stp,
+ * raw-path coefficients and lights), not from what the previous frame left: the full-state upload at its start is then
+ * the same words whichever frame came before (the walk follows the previous update, a replay follows the walk) */
+static void canonUniforms(void) {
+    if (sPalLoc >= 0) {
+        memset(C3D_FVUnifWritePtr(GPU_VERTEX_SHADER, sPalLoc, GPU_PAL * 4), 0, sizeof(float) * 16 * GPU_PAL);
+    }
+    if (sFogpLoc >= 0) {
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sFogpLoc, 0.0f, 0.0f, 0.0f, 1.0f / 255.0f); /* (w: the shade byte scale) */
+    }
+    if (sStpLoc >= 0) {
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sStpLoc, 0.0f, 0.0f, 0.0f, 0.0f);
+    }
+    rawCanonUniforms();
+}
+
+static int capBegin(void) {
+    extern u32 gPortPerfTris, gPortPerfDraws;
+    if (sCapP == NULL) {
+        sCapP = malloc(sizeof(CapPatch) * CAP_PATCHES);
+        if (sCapP == NULL) {
+            return 0;
+        }
+    }
+    sCapPN = 0, sCapOverflow = 0;
+    sPalTouched = 0;
+    canonUniforms();
+    C3Df_CaptureBegin(capUnifRun);
+    sCapCmdBuf = gpuCmdBuf;
+    sCapBase = gpuCmdBuf + gpuCmdBufOffset;
+    sCapTris = gPortPerfTris, sCapDraws = gPortPerfDraws;
+    sCapState = CAP_RUNNING;
+    return 1;
+}
+
+static void capEnd(void) {
+    extern u32 gPortPerfTris, gPortPerfDraws;
+    u32 n = (u32)(gpuCmdBuf + gpuCmdBufOffset - sCapBase);
+    C3Df_CaptureEnd();
+    sCapState = CAP_NONE;
+    if (sCapOverflow || gpuCmdBuf != sCapCmdBuf) { /* (no split can happen inside a replay; checked anyway) */
+        return;
+    }
+    if (n > sCapCap) {
+        u32 cap = n + n / 4 + 1024;
+        u32* w = realloc(sCapWords, cap * sizeof(u32));
+        if (w == NULL) {
+            return;
+        }
+        sCapWords = w, sCapCap = cap;
+    }
+    memcpy(sCapWords, sCapBase, n * sizeof(u32));
+    sCapN = n;
+    sCapTris = gPortPerfTris - sCapTris, sCapDraws = gPortPerfDraws - sCapDraws;
+    sCapTarget = Port3ds_DrawTargetId();
+    sCapMode = gGfx3DSMode;
+    sCapState = CAP_READY;
+}
+
+/* the captured words at dst (copied there first unless they are the live stream itself), patched for frame k */
+static void capPatchK(u32* dst, int copy, int k) {
+    const CapPatch *p, *end;
+    union {
+        float f;
+        u32 u;
+    } back;
+    if (copy) {
+        memcpy(dst, sCapWords, sCapN * sizeof(u32));
+    }
+    back.f = k == 0 ? (2.0f / 3.0f) : k == 1 ? (1.0f / 3.0f) : 0.0f; /* as gpuUploadParams */
+    for (p = sCapP, end = sCapP + sCapPN; p < end; p++) {
+        u32* w = dst + p->off;
+        int g = p->flags & 1;
+        if (p->flags & 4) {
+            continue; /* stale: the canonical value (canonUniforms), the same for every frame */
+        } else if (p->flags & 2) {
+            w[2 + g] = back.u;
+        } else {
+            /* citro3d uniform words are (w, z, y, x): the row's coefficients 3, 2, 1, 0 */
+            u32 r[4];
+            memcpy(r, gfx_gpu_slot_row_ptr(p->slot, k) + p->row * 4, sizeof(r));
+            w[0] = r[3], w[1 + g] = r[2], w[2 + g] = r[1], w[3 + g] = r[0];
+        }
+    }
+}
+
+static void capPatch(u32* dst) {
+    capPatchK(dst, 1, sReplayK);
+}
+
+/* direct capture cut short (an off-screen render, a broken recording): the frame must show the logic frame after all.
+ * What was drawn is still in the command buffer, unsubmitted: patched in place to t = 1, and citro3d's copies of the
+ * palette and stp rewritten for t = 1, for the draws that follow. 0 if the words could not be patched. */
+static int capToLogicFrame(void) {
+    int ok = !sCapOverflow && gpuCmdBuf == sCapCmdBuf;
+    int e;
+    if (ok) {
+        u32 n = (u32)(gpuCmdBuf + gpuCmdBufOffset - sCapBase);
+        u32 keepN = sCapN;
+        sCapN = n; /* (the patch records all lie inside) */
+        capPatchK(sCapBase, 0, 2);
+        sCapN = keepN;
+    }
+    sReplayK = 2;
+    for (e = 0; e < GPU_PAL; e++) {
+        gpuUploadPalette(&sPalSlotNow[e], e, 1);
+    }
+    if (sStpLoc >= 0) {
+        float* u = (float*)C3D_FVUnifWritePtr(GPU_VERTEX_SHADER, sStpLoc, 1);
+        u[2] = 0.0f; /* (w, z, y, x): y = 1 - t */
+    }
+    return ok;
+}
+
+static int capUsable(void) {
+    return Port3ds_DrawTargetId() == sCapTarget && gGfx3DSMode == sCapMode && gpuCmdBuf != NULL &&
+           gpuCmdBufOffset + sCapN + 64 <= gpuCmdBufSize;
+}
+
+/* one in-between frame from the captured stream, patched for sReplayK; 0 = cannot (the caller replays the log) */
+static int capEmit(void) {
+    extern u32 gPortPerfTris, gPortPerfDraws;
+    if (!capUsable()) {
+        return 0;
+    }
+    capPatch(gpuCmdBuf + gpuCmdBufOffset);
+    gpuCmdBufOffset += sCapN;
+    C3Df_AfterCopy(sPalLoc, GPU_PAL * 4, sStpLoc);
+    gPortPerfTris += sCapTris, gPortPerfDraws += sCapDraws;
+    gPortPerfReplayCopies++;
+    gPortPerfReplayCopyWords += sCapN;
+    return 1;
+}
+
+/* the draw state the walk starts from, as the log's first entries: gfx_pc.c only sends what changed since the previous
+ * frame, so without them a replay started from the state the walk ENDED in (its first draws could get another alpha
+ * test, texture or cull mode than the walk's) */
+static void recInitialState(void) {
+    int t;
+    recOp(OP_SHADER, sCurShader, 0, 0, 0);
+    if (sConstN < REC_CONSTS) {
+        sOpConsts[sConstN] = sConsts;
+        recOp(OP_CONSTS, sConstN++, 0, 0, 0);
+    }
+    for (t = 0; t < 2; t++) { /* the bound textures with their sampler bits as they are now */
+        recOp(OP_TEXPARAM, t, sTexUnits[t], (int)sTexturePool[sTexUnits[t]].param, 0);
+    }
+    recOp(OP_DTEST, sDepthTestOn, 0, 0, 0);
+    recOp(OP_DMASK, sDepthUpdateOn, 0, 0, 0);
+    recOp(OP_DECAL, sDepthDecal, 0, 0, 0);
+    recOp(OP_ALPHA, sUseBlend, 0, 0, 0);
+    recOp(OP_DRAWID, sDrawId, 0, 0, 0);
+    recOp(OP_STEREO, sStereoMode, 0, 0, 0);
+    recOp(OP_CULL, sCullMode, 0, 0, 0);
+}
+
+/* gfx_pc.c, right after gfx_citro3d_rec_begin: the walk also draws, as the update's first shown frame k, and its command
+ * words are captured for the frames after it - no replay of the log for that frame (Old 3DS: about a third of the walk).
+ * 0 = not possible here (the walk only records, as before). */
+int gfx_citro3d_rec_direct(int k) {
+    extern void Port3ds_ResetFrameViewport(void);
+    if (!sRec || !gPortReplayCopy || !gPortGpuVtx || sPalLoc < 0) {
+        return 0;
+    }
+    Port3ds_ResetFrameViewport(); /* (as each replayed frame starts) */
+    if (!capBegin()) {
+        return 0;
+    }
+    sReplayK = k;
+    sRecDirect = 1;
+    return 1;
 }
 
 void gfx_citro3d_rec_begin(void) {
@@ -1362,16 +1809,38 @@ void gfx_citro3d_rec_begin(void) {
     }
     sOpN = sConstN = 0;
     sOpPalN = sOpParamN = 0;
+    sOpRawPN = 0;
     sRecOverflow = sOps == NULL || sOpConsts == NULL || (gPortGpuVtx && (sOpPal == NULL || sOpParam == NULL));
     sRec = !sRecOverflow;
+    sCapState = CAP_NONE;
+    sRecDirect = 0;
+    if (sRec) {
+        recInitialState();
+    }
 }
 
-void gfx_citro3d_rec_end(void) {
+/* returns 1 when the walk drew the update's first shown frame itself (direct capture): no replay for it */
+int gfx_citro3d_rec_end(void) {
     extern int gPortReplayBroken;
     sRec = 0;
     if (sRecOverflow) {
         gPortReplayBroken = 1;
     }
+    if (sRecDirect) {
+        sRecDirect = 0;
+        if (gPortReplayBroken) { /* no frames follow: this one shows the logic frame */
+            C3Df_CaptureEnd();
+            capToLogicFrame();
+            sCapState = CAP_NONE;
+        } else {
+            capEnd(); /* READY, or NONE if the capture did not fit (the frames after it replay the log) */
+        }
+        return 1;
+    }
+    /* the next replay is the update's first shown frame: capture it for the others (GPU path: the vertex buffer is
+     * the same for all of them) */
+    sCapState = gPortReplayCopy && gPortGpuVtx && !gPortReplayBroken && sPalLoc >= 0 ? CAP_ARMED : CAP_NONE;
+    return 0;
 }
 
 /* GPU path: which in-between frame the next replay draws (palette matrices, skinned deltas) */
@@ -1381,7 +1850,32 @@ void gfx_citro3d_replay_variant(int k) {
 
 /* re-issue the recorded state calls and draws (one shown frame) */
 void gfx_citro3d_replay(void) {
-    int i;
+    extern void Port3ds_ResetFrameViewport(void);
+    int i, cap = 0, check = 0;
+    u32* checkAt = NULL;
+    /* every shown frame starts from the frame's own viewport, as the walk did (C3D_FrameDrawOn): the first replay used
+     * to start from the walk's last one */
+    Port3ds_ResetFrameViewport();
+    sPalTouched = 0;
+    if (gPortReplayCopy && gPortGpuVtx) {
+        canonUniforms();
+    }
+    if (sCapState == CAP_READY) {
+        if (gPortReplayCopyCheck && capUsable()) {
+            check = 1;
+            C3Df_CaptureBegin(NULL);
+            checkAt = gpuCmdBuf + gpuCmdBufOffset;
+        } else if (capEmit()) {
+            return;
+        } else {
+            sCapState = CAP_NONE; /* the rest of this update replays the log */
+        }
+    } else if (sCapState == CAP_ARMED) {
+        cap = capBegin();
+    }
+    if (sRawMode) {
+        rawBind(0); /* the recording started on the GPU path's program (gfx_start_frame) */
+    }
     for (i = 0; i < sOpN; i++) {
         const RecOp* o = &sOps[i];
         switch (o->op) {
@@ -1430,6 +1924,18 @@ void gfx_citro3d_replay(void) {
             case OP_CULL:
                 gfx_citro3d_gpu_cull(o->v[0]);
                 break;
+            case OP_RAWMODE:
+                rawBind(o->v[0]);
+                break;
+            case OP_RAWPARAM:
+                rawUpload(&sOpRawP[o->v[0]]);
+                break;
+            case OP_TEXPARAM:
+                sTexturePool[o->v[1]].param = (u32)o->v[2];
+                texBindUnit(o->v[0], &sTexturePool[o->v[1]]);
+                sTexUnits[o->v[0]] = o->v[1];
+                sTexBoundOk[o->v[0]] = true;
+                break;
             case OP_DRAWIDX:
                 submitDraw((u32)o->v[1], 0, sIdxBuf + o->v[0]);
                 {
@@ -1438,6 +1944,54 @@ void gfx_citro3d_replay(void) {
                     gPortPerfDraws++;
                 }
                 break;
+        }
+    }
+    if (cap) {
+        capEnd();
+    }
+    if (check) {
+        static u32* sCheck;
+        static u32 sCheckCap;
+        u32 n = (u32)(gpuCmdBuf + gpuCmdBufOffset - checkAt), j;
+        C3Df_CaptureEnd();
+        if (sCheckCap < sCapN) {
+            free(sCheck);
+            sCheckCap = sCapN + sCapN / 4;
+            sCheck = malloc(sCheckCap * sizeof(u32));
+            if (sCheck == NULL) {
+                sCheckCap = 0;
+                return;
+            }
+        }
+        capPatch(sCheck);
+        gPortPerfCopyChecked++;
+        for (j = 0; j < n && j < sCapN && checkAt[j] == sCheck[j]; j++) {
+        }
+        if (j < n || n != sCapN) {
+            if (gPortPerfCopyBad++ == 0) {
+                /* the command holding word j: register << 16 | parameter index, and the uniform index last configured */
+                u32 i2 = 0, reg = 0xFFFF, par = 0, unif = 0xFFFF;
+                while (i2 + 1 < n) {
+                    u32 hdr = checkAt[i2 + 1], extra = (hdr >> 20) & 0xFF, r = hdr & 0xFFFF, inc = hdr >> 31, q;
+                    u32 len = 2 + extra + (extra & 1);
+                    if (r == GPUREG_VSH_FLOATUNIFORM_CONFIG && i2 < j) {
+                        unif = checkAt[i2] & 0xFF;
+                    }
+                    if (j < i2 + len) {
+                        q = j == i2 ? 0 : j == i2 + 1 ? 0xFF : j - i2 - 1;
+                        reg = r + (inc && q != 0xFF ? q : 0), par = q;
+                        break;
+                    }
+                    i2 += len;
+                }
+                gPortCopyBadInfo[4] = (reg << 16) | (par & 0xFFFF);
+
+                gPortCopyBadInfo[5] = unif;
+                gPortCopyBadInfo[0] = j;
+                gPortCopyBadInfo[1] = j < n ? checkAt[j] : 0xFFFFFFFFu;
+                gPortCopyBadInfo[2] = j < sCapN ? sCheck[j] : 0xFFFFFFFFu;
+                gPortCopyBadInfo[3] = (n << 16) | (sCapN & 0xFFFF);
+            }
         }
     }
 }
@@ -1449,9 +2003,21 @@ void gfx_citro3d_rec_abort(void) {
         return;
     }
     sRec = 0;
+    if (sRecDirect) { /* already drawn, as an in-between frame: becomes the logic frame */
+        sRecDirect = 0;
+        C3Df_CaptureEnd();
+        capToLogicFrame();
+        sCapState = CAP_NONE;
+        sOpN = sConstN = 0;
+        sOpPalN = sOpParamN = 0;
+        sOpRawPN = 0;
+        return;
+    }
+    sCapState = CAP_NONE;
     gfx_citro3d_replay();
     sOpN = sConstN = 0;
     sOpPalN = sOpParamN = 0;
+    sOpRawPN = 0;
 }
 
 struct GfxRenderingAPI gfx_citro3d_api = {

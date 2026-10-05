@@ -14,6 +14,7 @@ terms. It covers source code only; this repository contains no Nintendo data (se
 | [libultraship](https://github.com/Kenix3/libultraship) | Parts of the display-list interpreter in `port/src/gfx/gfx_pc.c` follow or adapt its interpreter | MIT (notice below) |
 | [Ship of Harkinian](https://github.com/HarbourMasters/Shipwright) | Reference for the audio microcode math in `port/src/audio_microcode.c` (itself derived from the sm64-port mixer) | No license file in the upstream repository |
 | [stb_image](https://github.com/nothings/stb) | `port/src/third_party/stb_image.h` | Public domain or MIT, at your choice (license text at the end of the file) |
+| [citro3d](https://github.com/devkitPro/citro3d) 1.7.1 | `port/src/gfx3ds/c3d_fast.c`: altered copies of its `uniforms.c` and `drawElements.c` (faster uniform upload and draw call), marked as altered, with its license notice, in the file | zlib |
 
 ## Design references (no code copied)
 
@@ -22,8 +23,14 @@ terms. It covers source code only; this repository contains no Nintendo data (se
 | [Zelda64Recomp](https://github.com/Zelda64Recomp/Zelda64Recomp) | The idea of tagging transforms with stable ids for frame interpolation | GPL-3.0 |
 | [RT64](https://github.com/rt64/rt64) | Matrix groups and decomposed matrix interpolation | MIT |
 | [Ship of Harkinian](https://github.com/HarbourMasters/Shipwright) | Labelled frame-interpolation recording, the 90-degree snap rule | See above |
+| [Wyatt-James/sm64-3ds-port](https://github.com/Wyatt-James/sm64-3ds-port) | Its "Emu64" design: the game's own N64 vertices sent to the GPU and processed by the vertex shader (`port/src/gfx3ds/shader_raw.v.pica`); its use of the system core for audio on the Old 3DS | No license file in the upstream repository |
+| [gdx-3ds](https://github.com/cruxxxxxx/gdx-3ds) | Hardware findings: a render thread on the New 3DS's core 2, re-applying the CPU settings after the HOME menu | See its repository |
 
 ## Libraries used at build time
+
+Banner tools (only to regenerate `port/banner.bnr`, not part of the build): [pycgfx](https://github.com/skyfloogle/pycgfx)
+converts the banner's glTF scene to CGFX (not included in this repository: no license file upstream; clone it into
+`tools/pycgfx/`) and [bannertool](https://github.com/diasurgical/bannertool) packs the banner (MIT).
 
 [devkitPro](https://devkitpro.org/) toolchain with libctru and citro3d (zlib license). They are linked into
 a build that each user makes locally; no builds are distributed.

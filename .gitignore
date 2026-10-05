@@ -38,3 +38,6 @@ port/banner_local*
 *.dmp
 tools/shots/
 tools/captures/
+
+# pycgfx (tools/make_banner3d.py) is cloned here, not committed: no license file upstream
+tools/pycgfx/

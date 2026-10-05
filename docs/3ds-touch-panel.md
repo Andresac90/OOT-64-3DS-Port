@@ -38,7 +38,7 @@ ZL/ZR or the C-stick. The New 3DS extras are shortcuts only.
 
 | Pad | Behaviour |
 |---|---|
-| VIEW | Holds C-up (first person, or talk to Navi). |
+| VIEW | Holds C-up (first person, or talk to Navi). When Navi wants to talk, the eye becomes a fairy labelled NAVI that pulses blue and green, so her call is seen with the top-screen HUD off too. |
 | Y / I / X | Hold the matching C button. The pad shows the equipped icon (live from `interfaceCtx->iconItemSegment`), the ammo count (red at 0), and is greyed when the game disables that button. The middle pad is labelled "I" like *OoT3D*'s touch item slot on every model (D-pad down presses it too); a New 3DS adds a small "ZL" tag. |
 | OCARINA | Tap to play the owned ocarina without putting it on a C button. It works like a virtual fifth item button (`Port_VirtualOcarinaItem`), so the game's normal rules still apply. It is refused where the ocarina is restricted, where every C button is disabled, and in bombchu bowling. |
 | BOOTS | Tap (or ZR on a New 3DS) to cycle through owned boots: Kokiri → Iron → Hover (Iron and Hover need adult Link). It uses the same path as the pause menu (`Inventory_ChangeEquipment` + `Player_SetEquipmentData`) and plays the "decide" sound. |

@@ -8,8 +8,8 @@
 ; what pack_vertex wrote on the CPU path. Fog and the stereo offset, which need the transformed z/w, are
 ; computed here as gfx_sp_vertex / stereo_offset did.
 
-; 20 matrices x 4 rows
-.fvec pal[80]
+; 18 matrices x 4 rows (shared with shader_raw.v.pica, which needs the rest of the 96 registers)
+.fvec pal[72]
 ; eye, remap: as shader.v.pica
 .fvec eye
 .fvec remap
@@ -23,7 +23,9 @@
 
 .entry gpu_main
 .constf cst(4.0, 1.0, 0.0, 255.0)
-.constf cst2(0.001, 0.0, 0.0, 0.0)
+; (y, z unused here: the same values as shader_raw.v.pica's rc2, so both programs' constants are identical and stay
+; on the GPU when the renderer switches between them - c3d_fast.c)
+.constf cst2(0.001, 128.0, 256.0, 0.0)
 
 .out outpos position
 .out outtc0 texcoord0.xy
