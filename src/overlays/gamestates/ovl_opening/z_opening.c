@@ -13,6 +13,10 @@
 #include "save.h"
 #include "sram.h"
 #include "view.h"
+#ifdef PORT_START_FRESH
+#include "array_count.h"
+#include "inventory.h"
+#endif
 /* #include "file_select_state.h"  // restore for PORT_FS_TEST */
 
 void TitleSetup_SetupTitleScreen(TitleSetupState* this) {
@@ -40,6 +44,35 @@ void TitleSetup_SetupTitleScreen(TitleSetupState* this) {
 #endif
 #ifdef PORT_START_AGE
     gSaveContext.save.linkAge = PORT_START_AGE; // tools/statediff scene tour: LINK_AGE_ADULT (0) / CHILD (1)
+#endif
+#ifdef PORT_START_FRESH
+    {
+        // tools/make_showcase.py: a new file's inventory (3 hearts, no items, no magic) with only the Kokiri Sword
+        // and the Deku Shield, as early in the game; the debug save's story flags and name stay (no first-visit
+        // cutscenes in the shots)
+        static SaveInfo sDebugInfo;
+        int i;
+
+        sDebugInfo = gSaveContext.save.info;
+        Sram_InitNewSave();
+        for (i = 0; i < ARRAY_COUNT(sDebugInfo.eventChkInf); i++) {
+            gSaveContext.save.info.eventChkInf[i] = sDebugInfo.eventChkInf[i];
+        }
+        for (i = 0; i < ARRAY_COUNT(sDebugInfo.itemGetInf); i++) {
+            gSaveContext.save.info.itemGetInf[i] = sDebugInfo.itemGetInf[i];
+        }
+        for (i = 0; i < ARRAY_COUNT(sDebugInfo.infTable); i++) {
+            gSaveContext.save.info.infTable[i] = sDebugInfo.infTable[i];
+        }
+        for (i = 0; i < ARRAY_COUNT(sDebugInfo.playerData.playerName); i++) {
+            gSaveContext.save.info.playerData.playerName[i] = sDebugInfo.playerData.playerName[i];
+        }
+        gSaveContext.save.info.inventory.equipment |= OWNED_EQUIP_FLAG(EQUIP_TYPE_SWORD, EQUIP_INV_SWORD_KOKIRI) |
+                                                      OWNED_EQUIP_FLAG(EQUIP_TYPE_SHIELD, EQUIP_INV_SHIELD_DEKU);
+        gSaveContext.save.info.equips.buttonItems[0] = ITEM_SWORD_KOKIRI;
+        Inventory_ChangeEquipment(EQUIP_TYPE_SWORD, EQUIP_VALUE_SWORD_KOKIRI);
+        Inventory_ChangeEquipment(EQUIP_TYPE_SHIELD, EQUIP_VALUE_SHIELD_DEKU);
+    }
 #endif
     SET_NEXT_GAMESTATE(&this->state, Play_Init, PlayState);
 #else

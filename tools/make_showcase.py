@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """make_showcase.py - README screenshots (both screens) taken from the running port in Azahar.
 
-For each shot: builds the port booting straight into an entrance (GAME_EXTRA=-DPORT_START_ENTRANCE, the debug save),
+For each shot: builds the port booting straight into an entrance (GAME_EXTRA=-DPORT_START_ENTRANCE, the debug save's
+story flags with a new file's inventory: -DPORT_START_FRESH, only the Kokiri Sword and the Deku Shield),
 runs it in Azahar with the top screen's shown buffer (settings flipdump=1) and the bottom screen (sdmc:/3ds/oot/
 capture_bottom) dumped, and composes both screens in a console-style frame. The normal build is restored at the end.
 
@@ -34,7 +35,8 @@ def sh(cmd, **kw):
 
 def build(entrance, age):
     # (noon: the debug save starts at midnight)
-    extra = ("-DPORT_START_ENTRANCE=0x%03X -DPORT_START_AGE=%d -DPORT_START_DAYTIME=0x8000" % (entrance, age)
+    extra = ("-DPORT_START_ENTRANCE=0x%03X -DPORT_START_AGE=%d -DPORT_START_DAYTIME=0x8000 -DPORT_START_FRESH"
+             % (entrance, age)
              if entrance is not None else "")
     sh("touch src/overlays/gamestates/ovl_opening/z_opening.c")
     r = sh("make -f Makefile.3ds -j8 cci GAME_EXTRA='%s' > /dev/null" % extra)
@@ -65,6 +67,14 @@ def bottom_image(path):
         im = Image.frombytes("RGB", (w, h), px[:w * h * bpp], "raw", "BGR" if bpp == 3 else "BGRX")
     im = im.transpose(Image.Transpose.ROTATE_90)
     return im.resize((640, 480), Image.NEAREST)
+
+
+def dumps_ok(tp, bp):
+    """both dumps complete (the port rewrites them at every perf report; Azahar may be stopped mid-write)"""
+    if not (os.path.exists(tp) and os.path.exists(bp)) or os.path.getsize(tp) < 12 or os.path.getsize(bp) < 12:
+        return False
+    data = open(tp, "rb").read(12)
+    return os.path.getsize(tp) >= 12 + struct.unpack("<III", data)[2]
 
 
 def compose(top, bottom):
@@ -98,16 +108,19 @@ def main():
                 continue
             print("== %s (entrance 0x%03X)" % (name, entrance), flush=True)
             build(entrance, age)
-            for f in ("flip_shown.bin", "bottom_fb.bin"):
-                if os.path.exists(os.path.join(SD, f)):
-                    os.remove(os.path.join(SD, f))
-            open(settings, "w").write("widescreen=1\nhud=1\nprof=1\nflipdump=1\n")
-            open(os.path.join(SD, "capture_bottom"), "w").close()
-            sh("tools/emu.sh boot %d > /dev/null 2>&1" % args.secs)
-            os.remove(os.path.join(SD, "capture_bottom"))
             tp, bp = os.path.join(SD, "flip_shown.bin"), os.path.join(SD, "bottom_fb.bin")
-            if not (os.path.exists(tp) and os.path.exists(bp)):
-                print("   no dump (flip_shown.bin / bottom_fb.bin missing)")
+            for attempt in range(3):  # a run stopped while a dump was being rewritten: again, a little longer
+                for f in (tp, bp):
+                    if os.path.exists(f):
+                        os.remove(f)
+                open(settings, "w").write("widescreen=1\nhud=1\nprof=1\nflipdump=1\n")
+                open(os.path.join(SD, "capture_bottom"), "w").close()
+                sh("tools/emu.sh boot %d > /dev/null 2>&1" % (args.secs + 7 * attempt))
+                os.remove(os.path.join(SD, "capture_bottom"))
+                if dumps_ok(tp, bp):
+                    break
+            else:
+                print("   no complete dump (flip_shown.bin / bottom_fb.bin)")
                 continue
             out = os.path.join(OUT, name + ".png")
             compose(top_image(tp), bottom_image(bp)).save(out, optimize=True)
