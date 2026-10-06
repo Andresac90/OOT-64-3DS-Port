@@ -2622,7 +2622,7 @@ s32 Player_ItemIsItemAction(s32 item1, s32 itemAction) {
 
 #ifdef __3DS__
 #include "inventory.h"
-/* PORT: bottom-screen touch buttons (OoT3D style). The OCARINA button is a virtual fifth item button
+/* PORT: bottom-screen touch buttons. The OCARINA button is a virtual fifth item button
  * that always holds the owned ocarina; the BOOTS button cycles the owned boots. Both are requested by
  * the input layer (one-shot flags) and handled here, where the normal item rules apply. */
 #include "port_minimap.h"

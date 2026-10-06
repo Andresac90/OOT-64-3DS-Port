@@ -280,7 +280,7 @@ static void Port3ds_PumpAudio_impl(void) {
 s32 osMotorInit(OSMesgQueue* mq, OSPfs* pfs, s32 channel) { (void)mq; (void)pfs; (void)channel; return 1; }
 s32 __osMotorAccess(OSPfs* pfs, s32 flag) { (void)pfs; (void)flag; return 1; }
 
-/* PORT (2026-09-29): OoT3D-style touch panel state (3ds_main.c draws it; see port_minimap.h and
+/* PORT (2026-09-29): touch panel state (3ds_main.c draws it; see port_minimap.h and
  * docs/3ds-touch-panel.md). The game side fills gPortMinimap / gPortHud*; the input side sets the
  * gPortTouch* one-shot requests that z_player.c consumes. */
 #include "save.h"

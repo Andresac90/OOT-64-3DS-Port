@@ -2,6 +2,23 @@
 
 No game builds are published; each version is a source release. See the [README](README.md) to build.
 
+## Unreleased
+
+### Fixed
+- The HOME Menu crashed when it showed a banner with Link's 3D model (`tools/make_link_banner.py`; hardware, two
+  crash dumps: a null-pointer read in the HOME Menu). pycgfx writes a mesh without an index list as a primitive
+  with no index stream at all, and the model parts had none; every part now has one, and `tools/make_banner3d.py`
+  refuses to write a banner with a missing index stream. The default banner (the ocarina) always had index lists.
+- Touch screen: the rupee and key counts sat on the top row of their icons; the number is now centered on the
+  icon's height, and icon and number are centered in the left column like the buttons above them.
+
+### Changed
+- README: build instructions for Linux, Windows (WSL) and macOS, with the commands for devkitPro and `makerom`.
+- README screenshots show an early game (3 hearts, no items, only the Kokiri Sword and the Deku Shield) instead
+  of the debug save's full inventory: `tools/make_showcase.py` builds with the new `PORT_START_FRESH` option.
+- No more references to another game's touch screen or to a Discord server (this project has none; the mentions
+  came from the decompilation's README, kept in `docs/DECOMP_README.md`).
+
 ## 1.0.0 (2026-10-06)
 
 Highlights of 1.0:
@@ -14,7 +31,7 @@ Highlights of 1.0:
   per second everywhere on the Old 3DS continues after 1.0 (docs/3ds-60fps-plan.md: the cross-frame display-list
   cache).
 - A stereoscopic HOME Menu banner; built from your game data, Link stands in it as his own 3D model.
-- An OoT3D-style touch screen: C items, ocarina, boots, pause pages, minimap, HUD and screen options.
+- A touch screen: C items, ocarina, boots, pause pages, minimap, HUD and screen options.
 - Saves are written atomically to the SD card; the HOME menu and sleep (closing the lid) work.
 
 The title ID changed to `0xF0C64`: uninstall the previous version with FBI once. Saves are not affected.
@@ -123,7 +140,7 @@ Plan and criteria: [docs/RELEASE_1.0.md](docs/RELEASE_1.0.md).
   presenter, `flip=0` to disable): the game never waits for the screen, frames are never lost or torn, and a late
   frame repeats the previous one for a refresh instead of slowing the game.
 
-- Touch screen: the third item pad is labelled "I" as in *Ocarina of Time 3D* on every model (D-pad down and, on New
+- Touch screen: the third item pad is labelled "I" on every model (D-pad down and, on New
   3DS, ZL press it too; a small "ZL"/"ZR" tag shows on New 3DS only). ZR no longer doubles C-up (VIEW and D-pad up).
 - Log lines are written to the SD card by a background thread: the measurement report (`prof=1`) used to pause the
   game for up to half a second each time it was written.
@@ -193,5 +210,5 @@ First version that plays like a 3DS game, verified on a New 3DS and in the Azaha
 - Renderer verified against the N64 frame by frame (`tools/statediff`).
 - Music and sound effects matching the N64.
 - Widescreen, with 4:3 kept for pre-rendered backgrounds.
-- Touch panel in the style of *Ocarina of Time 3D*, with a live minimap.
+- Touch panel on the bottom screen, with a live minimap.
 - HOME button, saves on the SD card, Old 3DS support.

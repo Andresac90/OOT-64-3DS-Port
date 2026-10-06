@@ -1,7 +1,7 @@
 # 3DS controls, touch panel and on-screen minimap
 
 This page describes how the 3DS port maps controls, what the bottom-screen touch panel does, and how
-it is built. The design follows *Ocarina of Time 3D*. The Old 3DS layout is complete without
+it is built. The Old 3DS layout is complete without
 ZL/ZR or the C-stick. The New 3DS extras are shortcuts only.
 
 ## Button mapping (`port/src/3ds_main.c`, `Port3ds_PollInput`)
@@ -39,7 +39,7 @@ ZL/ZR or the C-stick. The New 3DS extras are shortcuts only.
 | Pad | Behaviour |
 |---|---|
 | VIEW | Holds C-up (first person, or talk to Navi). When Navi wants to talk, the eye becomes a fairy labelled NAVI that pulses blue and green, so her call is seen with the top-screen HUD off too. |
-| Y / I / X | Hold the matching C button. The pad shows the equipped icon (live from `interfaceCtx->iconItemSegment`), the ammo count (red at 0), and is greyed when the game disables that button. The middle pad is labelled "I" like *OoT3D*'s touch item slot on every model (D-pad down presses it too); a New 3DS adds a small "ZL" tag. |
+| Y / I / X | Hold the matching C button. The pad shows the equipped icon (live from `interfaceCtx->iconItemSegment`), the ammo count (red at 0), and is greyed when the game disables that button. The middle pad is labelled "I" on every model (D-pad down presses it too); a New 3DS adds a small "ZL" tag. |
 | OCARINA | Tap to play the owned ocarina without putting it on a C button. It works like a virtual fifth item button (`Port_VirtualOcarinaItem`), so the game's normal rules still apply. It is refused where the ocarina is restricted, where every C button is disabled, and in bombchu bowling. |
 | BOOTS | Tap (or ZR on a New 3DS) to cycle through owned boots: Kokiri → Iron → Hover (Iron and Hover need adult Link). It uses the same path as the pause menu (`Inventory_ChangeEquipment` + `Player_SetEquipmentData`) and plays the "decide" sound. |
 | SCREEN | Tap to toggle 4:3 and widescreen. Saved to `sdmc:/3ds/oot/settings.txt`. |
@@ -104,8 +104,7 @@ bounding box and scaled to fit (at most 3×), because the N64 textures place the
 ## Not done yet / ideas
 
 - Tabs don't switch pages while paused; they close the menu, like START.
-- Map textures only; no fog-of-war rooms or floor selector as in OoT3D.
-- No B-button (sword) display. The I/II item slots of OoT3D are not added; the three N64 C slots are
-  kept.
+- Map textures only; no fog-of-war rooms or floor selector.
+- No B-button (sword) display. Only the three N64 C slots are shown.
 - The arrow direction follows `shape.rot.y` with world +x to the right and +z down. This has been
   checked against the arrow position, but not against a side-by-side N64 capture.

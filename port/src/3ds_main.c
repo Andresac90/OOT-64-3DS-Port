@@ -287,7 +287,7 @@ static void Port3ds_LoadSettings(void) {
     fclose(f);
 }
 
-/* PORT (2026-09-30): OoT3D-style touch panel on the bottom screen, drawn straight into its RGB565
+/* PORT (2026-09-30): touch panel on the bottom screen, drawn straight into its RGB565
  * framebuffer (single-buffered by consoleInit; stdout/stderr are silenced once the panel is up).
  *   left:   VIEW (C-up: first person / Navi), rupees, small keys, SCREEN (4:3 / wide), OCARINA
  *   centre: hearts + magic, the minimap (software-drawn from gPortMinimap, port_minimap.h),
@@ -327,7 +327,7 @@ static const PanelPad sPads[P_COUNT] = {
     { 4, 148, 56, 32, "HUD", 0, -1, 0, 0, 0 },
     { 4, 184, 56, 52, "OCARINA", 0, -1, 0, 0, 0 },
     { 260, 4, 56, 56, "Y", BTN_CLEFT_, -1, 0, 0, 0 },
-    { 260, 64, 56, 56, "I", BTN_CDOWN_, -1, 0, 0, 0 }, /* OoT3D's touch item slot I (+ ZL / D-pad down) */
+    { 260, 64, 56, 56, "I", BTN_CDOWN_, -1, 0, 0, 0 }, /* touch item slot I (+ ZL / D-pad down) */
     { 260, 124, 56, 56, "X", BTN_CRIGHT_, -1, 0, 0, 0 },
     { 260, 184, 56, 52, "BOOTS", 0, -1, 0, 0, 0 },
     { 66, 208, 60, 30, "GEAR", BTN_START_, 3, 52, 116, 60 },
@@ -377,7 +377,7 @@ static u16 Blend565(u16 bg, int r, int g, int b, int a) { /* a 0..255 */
     int br = (bg >> 11) << 3, bgc = ((bg >> 5) & 63) << 2, bb = (bg & 31) << 3;
     return PRGB(br + (r - br) * a / 255, bgc + (g - bgc) * a / 255, bb + (b - bb) * a / 255);
 }
-/* bevelled stone button: light stone rim, face inside (OoT3D look) */
+/* bevelled stone button: light stone rim, face inside */
 static void DrawPlate(const PanelPad* p, int pressed) {
     int x = p->x, y = p->y, w = p->w, h = p->h;
     int rim = pressed ? 150 : 196;
@@ -515,7 +515,7 @@ static void DrawPad(int i) {
                          sShown.cAmmo[c] == 0 ? PRGB(255, 90, 60) : PRGB(120, 250, 120));
             }
         }
-        /* the 3DS button that also presses it; the middle slot is OoT3D's touch slot "I" on every model (D-pad
+        /* the 3DS button that also presses it; the middle slot is the touch slot "I" on every model (D-pad
          * down presses it too), and the New 3DS adds a "ZL" tag (2026-10-03: ZL alone meant nothing on an Old 3DS) */
         DrawText(p->x + 4, p->y + 4, p->label, PRGB(255, 230, 120));
         if (c == 1 && sTouchUiN3ds) DrawText(p->x + p->w - 4 - 16, p->y + 4, "ZL", PRGB(200, 204, 214));
@@ -530,7 +530,7 @@ static void DrawPad(int i) {
         if (have) DrawIcon(cx - 20, p->y + 3, Port_GetItemIcon(sShown.ocarina), 40, 0);
         DrawTextC(cx, p->y + p->h - 12, "OCARINA", have ? COL_TEXT : COL_DIM);
     } else if (i == P_VIEW && sShownNavi) {
-        /* Navi wants to talk (OoT3D swaps the VIEW eye for her): a glowing fairy, "NAVI". PORT (2026-10-05): it pulses
+        /* Navi wants to talk (the VIEW eye gives way to her): a glowing fairy, "NAVI". PORT (2026-10-05): it pulses
          * - blue, then green with a bright frame (she turns green when she has something to say) - so it is noticed
          * with the top-screen HUD off, where the "Navi" label on C-up is not shown */
         int fy = p->y + 20, dx, dy, green = sNaviPulse;
@@ -559,7 +559,7 @@ static void DrawPad(int i) {
         }
         DrawTextC(cx, p->y + p->h - 13, "NAVI", green ? PRGB(160, 255, 160) : PRGB(150, 220, 255));
     } else if (i == P_VIEW) {
-        /* an eye, like OoT3D's VIEW button */
+        /* an eye: the VIEW button */
         int ey = p->y + 21, dx, dy;
         for (dy = -9; dy <= 9; dy++) {
             for (dx = -18; dx <= 18; dx++) {
@@ -616,26 +616,53 @@ static void DrawStatus(void) {
     sFbDirty = 1;
 }
 
+/* the pixels a console-font string draws: columns x0..x1 (8 per character) and rows y0..y1 */
+static void TextInk(const char* s, int* x0, int* x1, int* y0, int* y1) {
+    PrintConsole* con = consoleGetDefault();
+    int i, r, f, l;
+    *x0 = *y0 = 1 << 20, *x1 = *y1 = -1;
+    for (i = 0; s[i]; i++) {
+        unsigned ch = (unsigned char)s[i];
+        GlyphInk((unsigned char)ch, &f, &l);
+        if (f < 0) continue;
+        *x0 = i * 8 + f < *x0 ? i * 8 + f : *x0;
+        *x1 = i * 8 + l > *x1 ? i * 8 + l : *x1;
+        for (r = 0; r < 8; r++) {
+            if (con->font.gfx[(ch - con->font.asciiOffset) * 8 + r]) {
+                *y0 = r < *y0 ? r : *y0;
+                *y1 = r > *y1 ? r : *y1;
+            }
+        }
+    }
+}
+
+/* rupees and small keys: icon + number centered in the left column (its pads' centre, x 32), the number centered on
+ * the icon's height (it sat on the icon's top row, user report 2026-10-06) */
 static void DrawCounters(void) {
     char buf[16];
+    int x0, x1, y0, y1, left;
     FillStone(0, 60, 64, 52, 40, 42, 46, 6);
     if (sShown.rupees >= 0) {
         int dy;
-        for (dy = 0; dy < 14; dy++) { /* green rupee */
-            int half = dy < 4 ? dy + 2 : (dy < 10 ? 5 : 14 - dy + 1);
-            FillRect(14 - half, 66 + dy, half * 2, 1, dy < 7 ? PRGB(90, 230, 110) : PRGB(40, 170, 60));
-        }
         snprintf(buf, sizeof(buf), "%d", sShown.rupees);
-        DrawTextS(24, 66, buf, PRGB(150, 250, 150), sShown.rupees < 1000 ? 1 : 1);
+        TextInk(buf, &x0, &x1, &y0, &y1);
+        left = 32 - (10 + 4 + (x1 - x0 + 1)) / 2; /* the rupee is 10 pixels wide, then a 4-pixel gap */
+        for (dy = 0; dy < 14; dy++) {            /* green rupee, rows 66..79 */
+            int half = dy < 4 ? dy + 2 : (dy < 10 ? 5 : 14 - dy + 1);
+            FillRect(left + 5 - half, 66 + dy, half * 2, 1, dy < 7 ? PRGB(90, 230, 110) : PRGB(40, 170, 60));
+        }
+        DrawTextS(left + 14 - x0, 66 + (14 - (y1 - y0 + 1)) / 2 - y0, buf, PRGB(150, 250, 150), 1);
     }
     if (sShown.keys >= 0) {
-        FillRect(8, 88, 7, 7, PRGB(210, 210, 220)); /* small key */
-        FillRect(10, 90, 3, 3, PRGB(40, 42, 46));
-        FillRect(10, 95, 3, 9, PRGB(210, 210, 220));
-        FillRect(13, 99, 3, 2, PRGB(210, 210, 220));
-        FillRect(13, 102, 3, 2, PRGB(210, 210, 220));
         snprintf(buf, sizeof(buf), "%d", sShown.keys);
-        DrawText(24, 92, buf, COL_TEXT);
+        TextInk(buf, &x0, &x1, &y0, &y1);
+        left = 32 - (8 + 4 + (x1 - x0 + 1)) / 2; /* small key: 8 pixels wide, rows 88..103 */
+        FillRect(left, 88, 7, 7, PRGB(210, 210, 220));
+        FillRect(left + 2, 90, 3, 3, PRGB(40, 42, 46));
+        FillRect(left + 2, 95, 3, 9, PRGB(210, 210, 220));
+        FillRect(left + 5, 99, 3, 2, PRGB(210, 210, 220));
+        FillRect(left + 5, 102, 3, 2, PRGB(210, 210, 220));
+        DrawText(left + 12 - x0, 88 + (16 - (y1 - y0 + 1)) / 2 - y0, buf, COL_TEXT);
     }
     sFbDirty = 1;
 }
@@ -793,7 +820,7 @@ static void DrawMapBase(int have, float* ps, float* pox, float* poy) {
     sFbDirty = 1;
     if (!have || m->w <= 0 || m->h <= 0) return;
     /* fit the drawn part of the texture (plus the markers) to the frame: N64 maps sit in a corner of
-     * their texture, OoT3D shows them large and centred */
+     * their texture; shown large and centred */
     bx0 = m->w, by0 = m->h, bx1 = -1, by1 = -1;
     if (m->tex != NULL) {
         for (y = 0; y < m->h; y++) {
@@ -1039,7 +1066,7 @@ s8 gPortCamX, gPortCamY;     /* C-stick camera input for this update (z_camera.c
 static void Port3ds_PollInput(void) {
     hidScanInput();
     u32 k = hidKeysHeld();
-    /* PORT (2026-09-30): OoT3D-style layout, complete on the Old 3DS (no ZL/ZR, no C-stick):
+    /* PORT (2026-09-30): the button layout, complete on the Old 3DS (no ZL/ZR, no C-stick):
      *   A/B = A/B, L = Z-target, R = shield, Y/X = C-left/C-right, D-pad = C-up/C-down/C-left/C-right
      *   (the N64 D-pad is unused by OoT), SELECT = N64 L (minimap), START = START, touch panel =
      *   VIEW/C buttons/OCARINA/BOOTS/pause tabs/SCREEN + the minimap (docs/3ds-touch-panel.md).

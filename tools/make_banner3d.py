@@ -311,6 +311,14 @@ def build_glb(path, layers, parts=()):
         accessors.append(Accessor(bufferView=vc, componentType=ComponentType.FLOAT.value, count=n,
                                   type=AccessorType.VEC4.value))
         a_col = len(accessors) - 1
+        # an index list even for a plain triangle list: pycgfx writes a primitive without one with NO index stream,
+        # and the HOME Menu reads that missing stream through a null pointer (hardware crash, 2026-10-06)
+        if n > 0xFFFF:
+            sys.exit("model part %s: %d vertices, more than 16-bit indices reach" % (name, n))
+        vi = add_view(struct.pack("<%dH" % n, *range(n)), BufferTarget.ELEMENT_ARRAY_BUFFER.value)
+        accessors.append(Accessor(bufferView=vi, componentType=ComponentType.UNSIGNED_SHORT.value, count=n,
+                                  type=AccessorType.SCALAR.value))
+        a_idx = len(accessors) - 1
         png = io.BytesIO()
         img.save(png, "PNG")
         images.append(GImage(name=name, bufferView=add_view(png.getvalue()), mimeType="image/png"))
@@ -321,7 +329,7 @@ def build_glb(path, layers, parts=()):
                                       baseColorTexture=TextureInfo(index=len(textures) - 1),
                                       metallicFactor=0.0, roughnessFactor=1.0)))
         meshes.append(Mesh(name=name, primitives=[Primitive(
-            attributes=Attributes(POSITION=a_pos, NORMAL=a_nrm, TEXCOORD_0=a_uv, COLOR_0=a_col),
+            attributes=Attributes(POSITION=a_pos, NORMAL=a_nrm, TEXCOORD_0=a_uv, COLOR_0=a_col), indices=a_idx,
             material=len(materials) - 1)]))
         nodes.append(Node(name=name, mesh=len(meshes) - 1))
 
@@ -362,6 +370,11 @@ def glb_to_cgfx(glb, out):
                 tc[0].src_rgb, tc[0].combine_rgb = 0x003 | (0x0 << 4), 1
             for st in tc[1:]:
                 st.src_rgb, st.src_alpha, st.combine_rgb, st.combine_alpha = 0xFFF, 0xFFF, 0, 0
+        for shape in model.shapes.data.contents:  # (see build_glb: the HOME Menu needs an index stream everywhere)
+            for pset in shape.primitive_sets.data.contents:
+                for prim in pset.primitives.data.contents:
+                    if not prim.index_streams.data.contents:
+                        sys.exit("CGFX shape %s has no index stream: the HOME Menu would crash on it" % shape.name)
     data = pycgfx.write(cgfx)
     if len(data) > 0x80000:
         sys.exit("CGFX too big for the HOME Menu: %d bytes (max 524288)" % len(data))

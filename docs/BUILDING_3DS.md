@@ -18,8 +18,9 @@ instead of `gmake`.
 ### devkitPro
 Install devkitPro's pacman ([instructions](https://devkitpro.org/wiki/Getting_Started)), then the 3DS
 toolchain (devkitARM, libctru, citro3d, picasso, 3dsxtool). `makerom` (for the `.3ds` and `.cia` files) is not part
-of devkitPro: download it from [Project_CTR's releases](https://github.com/3DSGuy/Project_CTR/releases) (tested with
-v0.19.0) and put it on your `PATH`.
+of devkitPro: download it from [Project_CTR's releases](https://github.com/3DSGuy/Project_CTR/releases) (v0.18.4
+runs on every supported system; v0.19.0's Linux build needs glibc 2.38) and put it on your `PATH`. The
+README's [Building](../README.md#building) section has the commands for Linux, Windows (WSL) and macOS.
 ```bash
 sudo dkp-pacman -S 3ds-dev
 # in ~/.zprofile:

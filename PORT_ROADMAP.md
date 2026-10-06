@@ -17,7 +17,7 @@ this section is the current status.
 - Music and sound effects match the N64. The audio microcode is a C port of the SoH mixer, running on
   its own core.
 - Widescreen, with 4:3 kept automatically for pre-rendered backgrounds.
-- An OoT3D-style touch panel with the minimap on the bottom screen.
+- A touch panel with the minimap on the bottom screen.
 - Stereoscopic 3D on the slider.
 - HOME button, saves, Old 3DS support (adaptive heaps).
 - Performance is much better. Measured before this milestone: 19–22 updates/s on New 3DS hardware.

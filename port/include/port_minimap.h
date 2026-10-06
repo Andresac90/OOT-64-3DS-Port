@@ -1,7 +1,7 @@
 #ifndef PORT_MINIMAP_H
 #define PORT_MINIMAP_H
 
-/* PORT: the minimap as data, so the 3DS can draw it on the touch screen (OoT3D style) instead of
+/* PORT: the minimap as data, so the 3DS can draw it on the touch screen instead of
  * over the top screen. Minimap_Draw fills this each frame it would have drawn the map; positions are
  * in N64 screen pixels (320x240), exactly where the N64 would have drawn them. */
 

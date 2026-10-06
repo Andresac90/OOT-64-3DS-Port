@@ -26,7 +26,7 @@ This project is not affiliated with, endorsed by, or sponsored by Nintendo.
   (see [Status](#status)).
 - **Top screen:** 400×240 gameplay, original 4:3 or widescreen (toggle on the touch screen, saved).
 - **Stereoscopic 3D** with the 3D slider: automatic convergence on Link, HUD and menus at screen depth.
-- **Bottom screen, in the style of *Ocarina of Time 3D*:** live minimap with Link's position and chest
+- **Bottom screen:** live minimap with Link's position and chest
   markers, hearts and magic, rupees and keys, touch buttons for the C items (with ammo), first person / Navi
   (the button pulses when Navi wants to talk, also with the top-screen HUD off),
   a dedicated **Ocarina** button, a **Boots** button that cycles the boots you own, and shortcuts to the
@@ -62,23 +62,69 @@ Measurements and the work behind them: [docs/3ds-60fps-plan.md](docs/3ds-60fps-p
   (MD5 `5bd1fe107bf8106b2ab6650abecd54d6`).
 - The 3DS DSP firmware dump for sound: `sdmc:/3ds/dspfirm.cdc`. Luma3DS creates it from your own console:
   Rosalina menu (L + D-pad down + SELECT) → Miscellaneous options → **Dump DSP firmware**.
-- A computer to build on (macOS or Linux; WSL on Windows) with [devkitPro](https://devkitpro.org/wiki/Getting_Started)
+- A computer to build on (Linux, macOS, or Windows with WSL; see [Building](#building)) with [devkitPro](https://devkitpro.org/wiki/Getting_Started)
   (`3ds-dev`: devkitARM, libctru, citro3d, picasso) and `makerom` from
   [Project_CTR](https://github.com/3DSGuy/Project_CTR/releases) on your `PATH` (not part of devkitPro).
 
 ## Building
 
+The build runs on Linux, macOS and Windows (in WSL). Step 1 installs the tools and differs per system; steps 2-5
+are the same everywhere.
+
+### 1. Install the tools
+
+You need devkitPro's 3DS toolchain, `makerom` (it makes the `.cia` and `.3ds` files; not part of devkitPro) and the
+decompilation's tools: Python 3.10 or newer, a MIPS binutils, a C compiler, `make`, `curl` and libxml2.
+
+**Linux** (Debian 12, Ubuntu 22.04 or newer):
 ```bash
-# 1. devkitPro
+sudo apt-get update
+sudo apt-get install git build-essential curl unzip python3 python3-venv python3-pip libxml2-dev \
+                     binutils-mips-linux-gnu
+# devkitPro and its 3DS toolchain
+curl -LO https://apt.devkitpro.org/install-devkitpro-pacman
+chmod +x install-devkitpro-pacman && sudo ./install-devkitpro-pacman
 sudo dkp-pacman -S 3ds-dev
+# makerom
+curl -LO https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.18.4/makerom-v0.18.4-ubuntu_x86_64.zip
+unzip makerom-v0.18.4-ubuntu_x86_64.zip && chmod +x makerom && sudo mv makerom /usr/local/bin/
+```
+
+**Windows 10 or 11:** the decompilation's tools are Linux programs, so the build runs in WSL (Windows Subsystem
+for Linux).
+1. Open PowerShell as administrator, run `wsl --install`, restart the PC, then open **Ubuntu** from the Start menu
+   and create your Linux user.
+2. In the Ubuntu window, run the **Linux** commands above, then steps 2-5 below. Clone the repository in your Linux
+   home folder (`cd ~` first), not under `/mnt/c`: building from the Windows drive is much slower and Windows line
+   endings break the build.
+3. Your Windows files are under `/mnt/c`, e.g. the ROM: `cp "/mnt/c/Users/<you>/Downloads/<rom>.z64" ...`
+   (step 2). When the build is done, copy the CIA out: `cp build/3ds/oot.cia /mnt/c/Users/<you>/Desktop/`.
+
+**macOS** (Apple Silicon or Intel, with [Homebrew](https://brew.sh)):
+```bash
+xcode-select --install          # Apple's compilers, if not installed yet
+brew install coreutils make gsed bash libxml2 libiconv python@3.12 mips-linux-gnu-binutils
+# devkitPro: install devkitpro-pacman-installer.pkg from https://github.com/devkitPro/pacman/releases/latest, then
+sudo dkp-pacman -S 3ds-dev
+# makerom (macos_arm64 for Apple Silicon, macos_x86_64 for Intel)
+curl -LO https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.18.4/makerom-v0.18.4-macos_arm64.zip
+unzip makerom-v0.18.4-macos_arm64.zip && chmod +x makerom && mv makerom "$(brew --prefix)/bin/"
+```
+On macOS, use `gmake` (Homebrew's make) instead of `make` in steps 3 and 4: the system's make is too old. The
+system's `python3` is too old too (3.9): before step 3, create the build's Python environment with Homebrew's
+(`python3.12 -m venv .venv`, in the repository).
+
+### 2-5. Build (all systems)
+
+```bash
+# 2. The code and your ROM (never commit the ROM; *.z64 is ignored by git)
+git clone https://github.com/Andresac90/OOT-64-3DS-Port.git
+cd OOT-64-3DS-Port
+cp /path/to/your/oot-us-1.0.z64 baseroms/ntsc-1.0/baserom.z64
 export DEVKITPRO=/opt/devkitpro DEVKITARM=/opt/devkitpro/devkitARM
 
-# 2. Your ROM (never commit it; *.z64 is ignored by git)
-cp /path/to/your/oot-us-1.0.z64 baseroms/ntsc-1.0/baserom.z64
-
-# 3. Extract the assets from your ROM (the decompilation's setup step; needs Python 3.10 or newer -
-#    macOS's own python3 is 3.9: first `python3.12 -m venv .venv` with Homebrew's python@3.12)
-make setup VERSION=ntsc-1.0          # macOS: use gmake (Homebrew make) for steps 3 and 4
+# 3. Extract the assets from your ROM (the decompilation's setup step)
+make setup VERSION=ntsc-1.0
 
 # 4. Generate the sources the 3DS build includes (textures, soundfonts, text). COMPARE=0: the N64 ROM it also
 #    builds differs from the retail one (the port changes shared sources), which is expected
@@ -172,7 +218,9 @@ For bug reports and measurements only; the defaults are the fastest and most acc
 | `o3ds_sim`, `o3ds_layout` | 0 | on a New 3DS: 1 = Old 3DS speed (268 MHz, no L2 cache) / the Old 3DS thread layout |
 | `perf_ab`, `raw_vtx_ab`, `render_thread_ab`, `audio_share_ab`, `replay_copy_ab`, `speed_rules_ab`, ... | 0 | 1 = alternate one option during a session to compare both in `boot.log` |
 
-Holding L while the game starts reads `settings_b.txt` instead (when it exists): a second set of settings for tests.
+For testing, a second set of settings can sit next to the first: if `sdmc:/3ds/oot/settings_b.txt` exists, holding
+L while the game starts uses it instead of `settings.txt` (read from it and saved to it), so two setups can be
+switched on the console. Without that file, holding L at start does nothing.
 
 ## Bug reports
 
