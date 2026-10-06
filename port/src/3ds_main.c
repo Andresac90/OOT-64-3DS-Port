@@ -81,10 +81,11 @@ static int sRenderThreadSetting = 1; /* settings render_thread=0/1: draw on anot
 static int sRenderThreadAB;      /* settings render_thread_ab=1: jobs alternate thread / inline every 2 reports */
 static int sAudioShareAB;         /* settings audio_share_ab=1: the Old 3DS mixer's system-core share cycles 30/55/80 */
 static int sRawAB;                /* settings raw_vtx_ab=1: the raw vertex path alternates every 2 perf reports */
-static int sRawRelaxSetting; /* settings raw_relax=1: Old 3DS raw-path rules relaxed (gfx_pc.c gPortRawRelax). Off: -8% drawing
-                              * in Kokiri Forest, but 19% more error against the N64 over 20 tour scenes (Royal Family's
-                              * Tomb 1.3% -> 4.3% of pixels off) */
-static int sReplayCopyAB;         /* settings replay_copy_ab=1: replay by copy (gfx_citro3d.c) alternates every 2 reports */
+static int sSpeedRules = 1; /* settings speed_rules (raw_relax): 0 off, 1 while frame skip is on (Old 3DS), 2 always (tests).
+                        * Active: gfx_pc.c gPortRawRelax (near-camera geometry stays raw) and no screen-linear shading
+                        * splits - the per-triangle CPU work that dominates Old 3DS drawing on hardware (v58 profile) */
+static int sReplayCopyAB;
+static int sSpeedRulesAB;         /* settings speed_rules_ab=1: speed rules 1 / 0 alternate every 2 reports (Old 3DS A/B) */         /* settings replay_copy_ab=1: replay by copy (gfx_citro3d.c) alternates every 2 reports */
 static int sO3dsLayout;          /* settings o3ds_layout=1: the Old 3DS thread layout on a New 3DS (with o3ds_sim=1) */
 int Port3ds_OnRenderThread(void);
 static int sCstickCamera = 1; /* settings cstick=0: the New 3DS C-stick presses the C buttons, not the camera */
@@ -158,7 +159,9 @@ static void Port3ds_SaveSettings(void) {
             if (sRawAB) fprintf(f, "raw_vtx_ab=1\n");
             { extern int gPortReplayCopy; if (!gPortReplayCopy && !sReplayCopyAB) fprintf(f, "replay_copy=0\n"); }
             if (sReplayCopyAB) fprintf(f, "replay_copy_ab=1\n");
-            if (sRawRelaxSetting) fprintf(f, "raw_relax=1\n");
+            if (sSpeedRulesAB) fprintf(f, "speed_rules_ab=1\n");
+            if (sSpeedRules) fprintf(f, "speed_rules=%d\n", sSpeedRules);
+            { extern int gPortAudioMargin; if (gPortAudioMargin >= 0) fprintf(f, "audio_margin=%d\n", gPortAudioMargin); }
             { extern int gPortAudioShare; if (gPortAudioShare != 55) fprintf(f, "audio_share=%d\n", gPortAudioShare); }
             if (sAudioShareAB) fprintf(f, "audio_share_ab=1\n");
             if (!sCstickCamera) fprintf(f, "cstick=0\n");
@@ -222,7 +225,9 @@ static void Port3ds_LoadSettings(void) {
         if (sscanf(line, "raw_vtx=%d", &v) == 1) { extern int gPortRawVtxWant; gPortRawVtxWant = v != 0; }
         if (sscanf(line, "raw_vtx_ab=%d", &v) == 1) { sRawAB = v != 0; }
         if (sscanf(line, "replay_copy_ab=%d", &v) == 1) { sReplayCopyAB = v != 0; }
-        if (sscanf(line, "raw_relax=%d", &v) == 1) { sRawRelaxSetting = v != 0; }
+        if (sscanf(line, "speed_rules_ab=%d", &v) == 1) { sSpeedRulesAB = v != 0; }
+        if (sscanf(line, "raw_relax=%d", &v) == 1 || sscanf(line, "speed_rules=%d", &v) == 1) { sSpeedRules = v < 0 ? 0 : v > 2 ? 2 : v; }
+        if (sscanf(line, "audio_margin=%d", &v) == 1 && v >= 0 && v <= 2048) { extern int gPortAudioMargin; gPortAudioMargin = v; }
         if (sscanf(line, "interp_dump_span=%d", &v) == 1 && v >= 1 && v <= 400) { extern int gPortInterpDumpSpan; gPortInterpDumpSpan = v; }
         if (sscanf(line, "interp_dump_at=%d", &v) == 1 && v >= 0) { extern int gPortInterpDumpAt; gPortInterpDumpAt = v; }
         if (sscanf(line, "fastswitch=%d", &v) == 1) { extern int gPortFastSwitch; gPortFastSwitch = v != 0; }
@@ -1359,6 +1364,32 @@ static void Port3ds_PerfReport(unsigned frames) {
       { extern u32 gPortPerfRawSwitches; PortDbgX("perf raw program switches/frame", gPortPerfRawSwitches / frames);
         gPortPerfRawSwitches = 0; } }
     { extern u32 gPortPerfRoomTris; PortDbgX("perf room tris in/frame", gPortPerfRoomTris / frames); gPortPerfRoomTris = 0; }
+#ifdef PORT_ACTOR_PROF
+    { /* the 10 actor types whose drawing took longest (us per update), with their draw calls per update */
+        extern u64 gPortActorTicks[512];
+        extern u32 gPortActorCalls[512];
+        int n, i;
+        for (n = 0; n < 10; n++) {
+            int best = -1;
+            for (i = 0; i < 512; i++) if (gPortActorTicks[i] && (best < 0 || gPortActorTicks[i] > gPortActorTicks[best])) best = i;
+            if (best < 0) break;
+            PortDbgX("perf actor id<<16|us per update", ((unsigned)best << 16) |
+                     (unsigned)(gPortActorTicks[best] / (SYSCLOCK_ARM11 / 1000000) / frames));
+            PortDbgX("perf actor id<<16|calls x10 per update", ((unsigned)best << 16) | (gPortActorCalls[best] * 10 / frames));
+            gPortActorTicks[best] = 0;
+        }
+        memset(gPortActorTicks, 0, sizeof(gPortActorTicks));
+        memset(gPortActorCalls, 0, sizeof(gPortActorCalls));
+    }
+#endif
+    { extern u64 gPortPerfRoomTicks; PortDbgX("perf us/frame in room geometry", (unsigned)(gPortPerfRoomTicks / (SYSCLOCK_ARM11 / 1000000) / frames));
+      gPortPerfRoomTicks = 0; }
+    { extern u32 gPortPerfAudioUnderruns, gPortPerfAudioDrops; extern int gPortAudioMargin, gPortAudioCoreNow;
+      PortDbgX("perf audio underruns (DSP ran dry)", gPortPerfAudioUnderruns);
+      PortDbgX("perf audio buffers dropped (queue full)", gPortPerfAudioDrops);
+      { extern int gPortRawRelax; PortDbgX("perf speed rules active (raw relax, no shade split)", (unsigned)gPortRawRelax); }
+      PortDbgX("perf audio margin samples", (unsigned)(gPortAudioMargin >= 0 ? gPortAudioMargin : gPortAudioCoreNow == 1 ? 512 : 0));
+      gPortPerfAudioUnderruns = gPortPerfAudioDrops = 0; }
 #ifdef PORT_PERF_STAGES
     { extern u32 gPortRawWhy[8]; static const char* const why[8] = { "perf raw-off vtx near/frame", "perf raw-off vtx deep/frame",
           "perf raw-off vtx lights/frame", "perf raw-off vtx skinned/frame", "perf raw-off vtx texgen/frame",
@@ -1749,7 +1780,7 @@ void PortGfx_RunTask(OSTask* task) {
                 sCoarse = coarse;
             }
             sCoarseUpdates += !sSplitSet && coarse;
-            { extern int gPortRawRelax; gPortRawRelax = sSkipOn && sRawRelaxSetting; } /* (gfx_pc.c) */
+            { extern int gPortRawRelax; gPortRawRelax = sSpeedRules == 2 || (sSpeedRules == 1 && sSkipOn); } /* (gfx_pc.c) */
         }
         skip = sSkipOn && !sSkippedLast && sBehindMs > 0.5 * Port3ds_UpdateRate() * (1000.0 / 59.83) &&
                !Port3ds_InterpBlocked();
@@ -1834,7 +1865,7 @@ void PortGfx_RunTask(OSTask* task) {
           /* PORT (2026-10-01): the report goes to boot.log only while a measurement switch is on (prof,
            * perf_ab, gpu_ab, aa_ab): ~50 lines every 15 s, each flushed to the SD card, otherwise */
           { extern int gPortPerfAB; sLogMute = !(sProfOn || gPortPerfAB || sGpuAB || sAaAB || sCmdflushAB || sPresentAB || sOverlapAB ||
-                                                     sRawAB || sRenderThreadAB || sAudioShareAB || sReplayCopyAB); }
+                                                     sRawAB || sRenderThreadAB || sAudioShareAB || sReplayCopyAB || sSpeedRulesAB); }
           PortDbgX("perf updates/s x10", (unsigned)(3000000ull / (t1 - t0 ? t1 - t0 : 1)));
           PortDbgX("perf frames shown/s x10 (60fps interp)",
                    (unsigned)((300ull - sSkipCount + sInterpFrames) * 10000ull / (t1 - t0 ? t1 - t0 : 1)));
@@ -2007,6 +2038,10 @@ void PortGfx_RunTask(OSTask* task) {
               if (sRawAB && (++sRawReports % 2) == 0) { /* gfx_start_frame latches it for the next frame */
                   extern int gPortRawVtxWant;
                   gPortRawVtxWant = !gPortRawVtxWant;
+              }
+              static unsigned sSpeedReports;
+              if (sSpeedRulesAB && (++sSpeedReports % 2) == 0) { /* latched per update (gPortRawRelax) */
+                  sSpeedRules = sSpeedRules ? 0 : 1;
               }
               static unsigned sCopyReports;
               if (sReplayCopyAB && (++sCopyReports % 2) == 0) { /* read when a recording ends: next update */
@@ -2343,7 +2378,7 @@ int main(int argc, char** argv) {
       if (f) { fputs("=== OoT 3DS boot log ===\n", f); fclose(f); } }
 
     { extern const char gPortVersion[]; /* Makefile.3ds: git describe, or port/VERSION */
-      char line[96] = "OoT 3DS-Port ";
+      char line[160] = "The Legend of Zelda: Ocarina of Time N64 3DS Port ";
       strncat(line, gPortVersion, 60);
       strcat(line, " booting...");
       Log(line); }

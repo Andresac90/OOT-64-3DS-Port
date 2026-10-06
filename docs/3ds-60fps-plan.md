@@ -525,3 +525,30 @@ depth copy nothing. statediff builds keep the eager per-frame copy. The asynchro
   Kokiri Forest), with no single hot spot; halving it needs the static geometry of rooms (and actors' static
   display lists) converted once and re-used across frames - the next step, since 60 fps on the Old 3DS is a 1.0
   goal. Interiors and smaller scenes get in-between frames now.
+
+### 2026-10-05 (night): Old 3DS speed rules on hardware, camera-space lighting, where the time goes (1.0)
+
+- **Speed rules (`speed_rules`, default while frame skip is on):** every triangle on the raw path, no screen-linear
+  shading splits, and the PICA clips at the near plane itself (shaders' `remap.z` lifts the NoN depth clamp). Hardware
+  v60, Old 3DS mode, Kokiri Forest in 2D: 15.7-17.1 frames shown against 12.5-13.3 without (43-49 against ~55 ms of
+  CPU per drawn frame). A first version (v59) kept the per-vertex depth clamp on raw triangles crossing the near
+  plane: their depth tilted and near-camera ground flickered and cracked; the GPU clip removed that.
+- **Hardware truth:** the GPU draws a Kokiri Forest frame in 6.6-7.2 ms; the CPU is the limit (N64 display lists
+  translated every frame, plus ~9 ms of game logic per update). Old 3DS hardware profile of a heavy update: triangle
+  setup/split/emit about a third of the drawing (floating-point work costs far more on the ARM11 than the emulator's
+  instruction count says), display-list interpretation 16%, vertex boxes 9%, matrices 8%.
+- **Who costs what** (opt-in `PORT_ACTOR_PROF` tags around each actor's drawing; Kokiri Forest at Old 3DS speed, ms per
+  update): Link 7.5, Saria 6.3, the forest's room geometry 7.1, Navi and fairies 3.5, the fairy particles 2.3, items,
+  signs, grass and the Kokiri ~4. Skeletal characters cost as much as the whole scene's geometry.
+- **Camera-space lighting:** lit raw draws light in camera space in the vertex shader, so one light set serves every
+  limb (the N64 transforms lights into each limb's space, which split draws and lit limb seams on the CPU). OoT's
+  modelview ends in world space and its view matrix sits in the projection: the projection's columns give the camera
+  axes, its column lengths the perspective scales. Link 7.5 -> 6.0 ms; 101-scene tour error 5.800 -> 5.801. A first
+  version that read the projection as a pure perspective lit the Graveyard and boss rooms wrongly (31% of pixels
+  off) - the tour caught it.
+- **Next for the Old 3DS (after 1.0):** a cross-frame display-list cache. Replaying the recorded backend log of a frame
+  costs about a quarter of translating it (the in-between frames already do this); recording each static display
+  list once - rooms first, then props, then skeleton limbs whose matrices come from segment 0x0D - and replaying it
+  in later frames with the matrices, lights and camera refreshed would bring Kokiri Forest's ~43 ms of translation
+  toward ~15 ms, the budget for 60 frames per second next to the game logic and audio. Other N64 ports on the 3DS
+  (Super Mario 64: 30 fps on an Old 3DS, a lighter game) do not reach 60 there either.

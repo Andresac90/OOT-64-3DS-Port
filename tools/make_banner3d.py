@@ -73,10 +73,10 @@ def draw_title():
         return ImageFont.load_default()
 
     big = fit("Ocarina of Time", 34, W - 8)
-    small = fit("Unofficial native 3DS port", 17, W - 8)
+    small = fit("The Legend of Zelda:", 17, W - 8)
     gold, blue = (255, 236, 160, 255), (200, 220, 255, 255)
-    for (y, text, font, col) in ((6, "Ocarina of Time", big, gold), (44, "64", big, gold),
-                                 (88, "Unofficial native", small, blue), (106, "3DS port", small, blue)):
+    for (y, text, font, col) in ((8, "The Legend of Zelda:", small, gold), (30, "Ocarina of Time", big, gold),
+                                 (76, "N64 3DS Port", small, blue)):
         # a soft dark outline keeps the text readable over the sky in both eyes
         for ox, oy in ((-2, 0), (2, 0), (0, -2), (0, 2)):
             d.text((4 * S + ox * S, y * S + oy * S), text, font=font, fill=(8, 12, 30, 140))
@@ -117,9 +117,131 @@ TITLE_PX = (168, 58, 392, 170)     # 224 x 112: the 256x128 text texture at 2:1
 FIGURE_PX = (14, 8, 140, 228)      # 126 x 220: the 128x224 part of the figure texture (v 0 .. 224/256)
 
 
+# ---- a captured 3D model (tools/make_link_banner.py --model: the game's own triangles) -----------------------------
+def load_mesh(path):
+    """sdmc:/3ds/oot/link_mesh.bin (gfx_pc.c mesh capture): triangles (combine, prim, env, texture id, flags, 3 x
+    position + uv, 3 x RGBA shade) and the textures they use (decoded RGBA)"""
+    data = open(path, "rb").read()
+    if data[:4] != b"OOTM":
+        sys.exit("%s: not a mesh capture" % path)
+    n = struct.unpack_from("<i", data, 4)[0]
+    off, tris = 8, []
+    for _ in range(n):
+        v = struct.unpack_from("<QIIII15f3I", data, off)
+        off += 96
+        tris.append({"combine": v[0], "prim": v[1], "env": v[2], "tex": v[3], "flags": v[4],
+                     "v": [v[5 + 5 * k:10 + 5 * k] for k in range(3)], "c": v[20:23]})
+    nt = struct.unpack_from("<I", data, off)[0]
+    off += 4
+    texs = {}
+    for _ in range(nt):
+        tid, w, h = struct.unpack_from("<3I", data, off)
+        off += 12
+        texs[tid] = Image.frombytes("RGBA", (w, h), data[off:off + w * h * 4])
+        off += w * h * 4
+    return tris, texs
+
+
+def _rgba(u32):
+    return [((u32 >> (8 * k)) & 0xFF) / 255.0 for k in range(4)]
+
+
+def bake_combiner(combine, flags, prim, env, tex):
+    """the N64 colour combiner over the texture with shade = 1 (1 or 2 cycles; TEXEL1 = TEXEL0): the material's
+    picture; returns (image, uses_shade) - where the combiner reads SHADE the vertex colour multiplies it"""
+    import numpy as np
+    w0, w1 = combine >> 32, combine & 0xFFFFFFFF
+    t = np.asarray(tex.convert("RGBA"), dtype=np.float32) / 255.0 if tex is not None else np.ones((8, 8, 4), np.float32)
+    P, E = np.array(_rgba(prim), np.float32), np.array(_rgba(env), np.float32)
+    one, zero = np.ones_like(t[..., :3]), np.zeros_like(t[..., :3])
+    cyc = [((w0 >> 20) & 0xF, (w1 >> 28) & 0xF, (w0 >> 15) & 0x1F, (w1 >> 15) & 7,
+            (w0 >> 12) & 7, (w1 >> 12) & 7, (w0 >> 9) & 7, (w1 >> 9) & 7),
+           ((w0 >> 5) & 0xF, (w1 >> 24) & 0xF, w0 & 0x1F, (w1 >> 6) & 7,
+            (w1 >> 21) & 7, (w1 >> 3) & 7, (w1 >> 18) & 7, w1 & 7)]
+    uses_shade = False
+    comb_rgb, comb_a = zero, np.zeros_like(t[..., 3])
+    for ci in range(2 if flags & 2 else 1):
+        a, b, c, d, aa, ab, ac, ad = cyc[ci]
+
+        def rgb(sel, slot):
+            nonlocal uses_shade
+            if sel == 0:
+                return comb_rgb
+            if sel in (1, 2):
+                return t[..., :3]
+            if sel == 3:
+                return one * P[:3]
+            if sel == 4:
+                uses_shade = True
+                return one
+            if sel == 5:
+                return one * E[:3]
+            if slot == "c":
+                return {7: comb_a[..., None] * one, 8: t[..., 3:4] * one, 9: t[..., 3:4] * one, 10: one * P[3],
+                        11: one, 12: one * E[3], 14: one}.get(sel, zero)  # (prim lod frac: 1)
+            if sel == 6 and slot in ("a", "d"):
+                return one
+            return zero
+
+        def alp(sel, slot):
+            if sel == 0:
+                return np.ones_like(comb_a) if slot == "c" else comb_a
+            if sel in (1, 2):
+                return t[..., 3]
+            if sel == 3:
+                return np.full_like(comb_a, P[3])
+            if sel == 4:
+                return np.ones_like(comb_a)
+            if sel == 5:
+                return np.full_like(comb_a, E[3])
+            if sel == 6:
+                return np.ones_like(comb_a)
+            return np.zeros_like(comb_a)
+
+        new_rgb = np.clip((rgb(a, "a") - rgb(b, "b")) * rgb(c, "c") + rgb(d, "d"), 0.0, 1.0)
+        new_a = np.clip((alp(aa, "a") - alp(ab, "b")) * alp(ac, "c") + alp(ad, "d"), 0.0, 1.0)
+        comb_rgb, comb_a = new_rgb, new_a
+    out = np.concatenate([comb_rgb, comb_a[..., None]], axis=-1)
+    if not (flags & (4 | 8)):
+        out[..., 3] = 1.0  # opaque material: alpha unused
+    return Image.fromarray((out * 255.0 + 0.5).astype(np.uint8), "RGBA"), uses_shade
+
+
+def model_parts(path, x0, x1, y_feet, height, z_mid):
+    """the captured model's triangles grouped by material, turned to face the HOME Menu camera (the pause preview
+    looks at Link from -z, the banner from +z: a half turn about y) and scaled into the figure's place"""
+    tris, texs = load_mesh(path)
+    if not tris:
+        sys.exit("%s: no triangles" % path)
+    xs = [v[0] for t in tris for v in t["v"]]
+    ys = [v[1] for t in tris for v in t["v"]]
+    zs = [v[2] for t in tris for v in t["v"]]
+    k = height / (max(ys) - min(ys))
+    cx, cz = (max(xs) + min(xs)) / 2, (max(zs) + min(zs)) / 2
+    xm = (x0 + x1) / 2
+    groups = {}
+    for t in tris:
+        key = (t["combine"], t["prim"], t["env"], t["tex"], t["flags"] & 0xFF0F)
+        groups.setdefault(key, []).append(t)
+    parts = []
+    for i, ((combine, prim, env, tid, flags), ts) in enumerate(sorted(groups.items(), key=lambda kv: -len(kv[1]))):
+        img, shaded = bake_combiner(combine, flags, prim, env, texs.get(tid) if flags & 1 else None)
+        pos, uv, col = [], [], []
+        for t in ts:
+            for v, c in zip(t["v"], t["c"]):
+                pos.append((xm - (v[0] - cx) * k, y_feet + (v[1] - min(ys)) * k, z_mid - (v[2] - cz) * k))
+                uv.append((v[3], v[4]) if flags & 1 else (0.5, 0.5))
+                rgba = _rgba(c)
+                col.append((rgba[0], rgba[1], rgba[2], 1.0) if shaded else (1.0, 1.0, 1.0, 1.0))
+        wrap = {0: 10497, 1: 33648, 2: 33071, 3: 33071}
+        parts.append(("lk%02d" % i, img, pos, uv, col, "MASK" if flags & 4 else ("BLEND" if flags & 8 else "OPAQUE"),
+                      (wrap[(flags >> 8) & 3], wrap[(flags >> 12) & 3])))
+    return parts
+
+
 # ---- glTF scene ----------------------------------------------------------------------------------------------------
-def build_glb(path, layers):
-    """layers: (name, image, (x0, y0, x1, y1) screen px, z, alpha mode, v_max)"""
+def build_glb(path, layers, parts=()):
+    """layers: (name, image, (x0, y0, x1, y1) screen px, z, alpha mode, v_max); parts: model_parts() meshes"""
     from gltflib import (GLTF, GLTFModel, Asset, Scene, Node, Mesh, Primitive, Attributes, Buffer, BufferView,
                          Accessor, AccessorType, ComponentType, BufferTarget, Material, PBRMetallicRoughness,
                          TextureInfo, Texture, Image as GImage, Sampler, GLBResource)
@@ -169,9 +291,43 @@ def build_glb(path, layers):
             material=len(materials) - 1)]))
         nodes.append(Node(name=name, mesh=len(meshes) - 1))
 
+    samplers = [Sampler(magFilter=9729, minFilter=9729, wrapS=33071, wrapT=33071)]
+    for name, img, pos, uv, col, alpha, wrap in parts:
+        n = len(pos)
+        vp = add_view(struct.pack("<%df" % (3 * n), *[c for p in pos for c in p]), BufferTarget.ARRAY_BUFFER.value)
+        accessors.append(Accessor(bufferView=vp, componentType=ComponentType.FLOAT.value, count=n,
+                                  type=AccessorType.VEC3.value, min=[min(p[k] for p in pos) for k in range(3)],
+                                  max=[max(p[k] for p in pos) for k in range(3)]))
+        a_pos = len(accessors) - 1
+        vn = add_view(struct.pack("<%df" % (3 * n), *([0.0, 0.0, 1.0] * n)), BufferTarget.ARRAY_BUFFER.value)
+        accessors.append(Accessor(bufferView=vn, componentType=ComponentType.FLOAT.value, count=n,
+                                  type=AccessorType.VEC3.value))
+        a_nrm = len(accessors) - 1
+        vt = add_view(struct.pack("<%df" % (2 * n), *[c for p in uv for c in p]), BufferTarget.ARRAY_BUFFER.value)
+        accessors.append(Accessor(bufferView=vt, componentType=ComponentType.FLOAT.value, count=n,
+                                  type=AccessorType.VEC2.value))
+        a_uv = len(accessors) - 1
+        vc = add_view(struct.pack("<%df" % (4 * n), *[c for p in col for c in p]), BufferTarget.ARRAY_BUFFER.value)
+        accessors.append(Accessor(bufferView=vc, componentType=ComponentType.FLOAT.value, count=n,
+                                  type=AccessorType.VEC4.value))
+        a_col = len(accessors) - 1
+        png = io.BytesIO()
+        img.save(png, "PNG")
+        images.append(GImage(name=name, bufferView=add_view(png.getvalue()), mimeType="image/png"))
+        samplers.append(Sampler(magFilter=9729, minFilter=9729, wrapS=wrap[0], wrapT=wrap[1]))
+        textures.append(Texture(source=len(images) - 1, sampler=len(samplers) - 1))
+        materials.append(Material(name="mt_" + name, alphaMode=alpha, alphaCutoff=0.5 if alpha == "MASK" else None,
+                                  pbrMetallicRoughness=PBRMetallicRoughness(
+                                      baseColorTexture=TextureInfo(index=len(textures) - 1),
+                                      metallicFactor=0.0, roughnessFactor=1.0)))
+        meshes.append(Mesh(name=name, primitives=[Primitive(
+            attributes=Attributes(POSITION=a_pos, NORMAL=a_nrm, TEXCOORD_0=a_uv, COLOR_0=a_col),
+            material=len(materials) - 1)]))
+        nodes.append(Node(name=name, mesh=len(meshes) - 1))
+
     model = GLTFModel(asset=Asset(version="2.0"), scenes=[Scene(nodes=list(range(len(nodes))))], scene=0,
                       nodes=nodes, meshes=meshes, materials=materials, textures=textures, images=images,
-                      samplers=[Sampler(magFilter=9729, minFilter=9729, wrapS=33071, wrapT=33071)],
+                      samplers=samplers,
                       buffers=[Buffer(byteLength=len(blob))], bufferViews=views, accessors=accessors)
     GLTF(model=model, resources=[GLBResource(bytes(blob))]).export(path)
 
@@ -202,6 +358,8 @@ def glb_to_cgfx(glb, out):
             mtob.flags &= ~(MTOBFlag.FragmentLight | MTOBFlag.VertexLight)
             tc = mtob.fragment_shader.texture_combiners
             tc[0].src_rgb, tc[0].src_alpha, tc[0].combine_rgb, tc[0].combine_alpha = 0x003, 0x003, 0, 0
+            if mtob.name.startswith("mt_lk"):  # a model part: texture x vertex colour (the game's baked shading)
+                tc[0].src_rgb, tc[0].combine_rgb = 0x003 | (0x0 << 4), 1
             for st in tc[1:]:
                 st.src_rgb, st.src_alpha, st.combine_rgb, st.combine_alpha = 0xFFF, 0xFFF, 0, 0
     data = pycgfx.write(cgfx)
@@ -229,7 +387,53 @@ def chime(path):
         w.writeframes(struct.pack("<%dh" % n, *samples))
 
 
-def preview(path, layers, sep=1.6):
+def render_parts(eye, parts, dx):
+    """software render of model parts into an eye image (z-buffered, textured x vertex colour, nearest texel), the
+    same pinhole camera as preview(): a check of the model's placement and materials without a console"""
+    import numpy as np
+    W, H = eye.size
+    img = np.asarray(eye.convert("RGB"), dtype=np.float32).copy()
+    zb = np.full((H, W), np.inf, np.float32)
+    f = (H / 2) / math.tan(math.radians(15.0))  # yfov 30 degrees
+    for name, tex, pos, uv, col, alpha, wrap in parts:
+        t = np.asarray(tex.convert("RGBA"), dtype=np.float32) / 255.0
+        th, tw = t.shape[:2]
+        for i in range(0, len(pos), 3):
+            P = np.array(pos[i:i + 3], np.float32)
+            d = CAM_Z - P[:, 2]
+            if np.any(d <= 0.1):
+                continue
+            sx = (P[:, 0] - dx) / d * f + W / 2 + dx * f / CAM_Z
+            sy = H / 2 - (P[:, 1] - CAM_Y) / d * f
+            x0, x1 = int(max(0, np.floor(sx.min()))), int(min(W - 1, np.ceil(sx.max())))
+            y0, y1 = int(max(0, np.floor(sy.min()))), int(min(H - 1, np.ceil(sy.max())))
+            if x0 > x1 or y0 > y1:
+                continue
+            area = (sx[1] - sx[0]) * (sy[2] - sy[0]) - (sx[2] - sx[0]) * (sy[1] - sy[0])
+            if abs(area) < 1e-6:
+                continue
+            gx, gy = np.meshgrid(np.arange(x0, x1 + 1) + 0.5, np.arange(y0, y1 + 1) + 0.5)
+            w0 = ((sx[1] - gx) * (sy[2] - gy) - (sx[2] - gx) * (sy[1] - gy)) / area
+            w1 = ((sx[2] - gx) * (sy[0] - gy) - (sx[0] - gx) * (sy[2] - gy)) / area
+            w2 = 1.0 - w0 - w1
+            inside = (w0 >= 0) & (w1 >= 0) & (w2 >= 0)
+            if not inside.any():
+                continue
+            z = w0 * d[0] + w1 * d[1] + w2 * d[2]
+            U = np.array(uv[i:i + 3], np.float32)
+            C = np.array(col[i:i + 3], np.float32)
+            u = (w0 * U[0, 0] + w1 * U[1, 0] + w2 * U[2, 0]) % 1.0
+            v = (w0 * U[0, 1] + w1 * U[1, 1] + w2 * U[2, 1]) % 1.0
+            texel = t[(v * th).astype(int).clip(0, th - 1), (u * tw).astype(int).clip(0, tw - 1)]
+            c = texel[..., :3] * (w0[..., None] * C[0, :3] + w1[..., None] * C[1, :3] + w2[..., None] * C[2, :3])
+            sub = zb[y0:y1 + 1, x0:x1 + 1]
+            ok = inside & (z < sub) & ((texel[..., 3] >= 0.5) if alpha == "MASK" else True)
+            sub[ok] = z[ok]
+            img[y0:y1 + 1, x0:x1 + 1][ok] = c[ok] * 255.0
+    return Image.fromarray(img.clip(0, 255).astype(np.uint8), "RGB")
+
+
+def preview(path, layers, sep=1.6, parts=()):
     """left and right eye side by side (a pinhole camera shifted by +-sep/2 units, parallel), for checking the layout
     and the depth order without a console"""
     out = Image.new("RGB", (800, 240))
@@ -244,7 +448,7 @@ def preview(path, layers, sep=1.6):
             part = part.resize((max(1, int(sx1 - sx0)), max(1, int(sy1 - sy0))), Image.LANCZOS)
             eye.alpha_composite(part, (int(sx0), int(sy0))) if sx0 >= 0 and sy0 >= 0 else eye.paste(
                 part, (int(sx0), int(sy0)), part)
-        out.paste(eye.convert("RGB"), (e * 400, 0))
+        out.paste(render_parts(eye, parts, dx) if parts else eye.convert("RGB"), (e * 400, 0))
     out.save(path)
 
 
@@ -261,6 +465,7 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--figure", help="PNG with a transparent background (default: the ocarina)")
     ap.add_argument("--preview", help="write a side-by-side stereo preview PNG")
+    ap.add_argument("--model", help="a captured model (link_mesh.bin) in front of the screen instead of a picture")
     a = ap.parse_args()
     tool = bannertool()
     if tool is None:
@@ -269,17 +474,23 @@ def main():
     layers = [("sky", draw_sky(), SKY_PX, SKY_Z, "OPAQUE", 1.0),
               ("title", draw_title(), TITLE_PX, TITLE_Z, "BLEND", 1.0),
               ("figure", figure_texture(fig), FIGURE_PX, FIGURE_Z, "BLEND", 224 / 256)]
+    parts = ()
+    if a.model:
+        l, t, r, b = screen_rect(*FIGURE_PX, FIGURE_Z)
+        parts = model_parts(a.model, l, r, b, t - b, FIGURE_Z)
+        layers = layers[:2]
     if a.preview:
-        preview(a.preview, layers)
+        preview(a.preview, layers, parts=parts)
     with tempfile.TemporaryDirectory() as tmp:
         glb, cgfx, wav = (os.path.join(tmp, n) for n in ("banner.glb", "banner.cgfx", "banner.wav"))
-        build_glb(glb, layers)
+        build_glb(glb, layers, parts)
         size = glb_to_cgfx(glb, cgfx)
         chime(wav)
         r = subprocess.run([tool, "makebanner", "-ci", cgfx, "-a", wav, "-o", a.out], capture_output=True, text=True)
         if r.returncode != 0 or not os.path.exists(a.out):
             sys.exit("bannertool failed:\n" + r.stdout + r.stderr)
-    print("%s: stereoscopic banner (CGFX %d bytes, 3 layers)" % (a.out, size))
+    print("%s: stereoscopic banner (CGFX %d bytes, %s)" % (a.out, size, "%d model parts" % len(parts) if parts else
+                                                                  "3 layers"))
 
 
 if __name__ == "__main__":

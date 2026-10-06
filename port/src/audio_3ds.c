@@ -16,13 +16,15 @@
 #include <math.h>
 
 #define PORT_AUDIO_RATE   32000
-#define PORT_AUDIO_NBUFS  4
+#define PORT_AUDIO_NBUFS  6 /* (4 before the Old 3DS margin below: room for one more frame queued) */
 #define PORT_AUDIO_MAXSAMPLES 1600 /* per submit; engine frames are ~544-736 */
 
 static bool sNdspOk = false;
 static ndspWaveBuf sWaveBufs[PORT_AUDIO_NBUFS];
 static s16* sWaveData[PORT_AUDIO_NBUFS];
 static int sNextBuf = 0;
+u32 gPortPerfAudioUnderruns, gPortPerfAudioDrops; /* perf report: the DSP ran dry before a buffer came / a buffer dropped */
+static int sAudioStarted;
 
 
 void Port3ds_AudioInit(void) {
@@ -70,7 +72,16 @@ void Port3ds_AudioSubmit(const s16* samples, int nsamples) {
     }
     ndspWaveBuf* wb = &sWaveBufs[sNextBuf];
     if (wb->status != NDSP_WBUF_DONE && wb->status != NDSP_WBUF_FREE) {
+        gPortPerfAudioDrops++;
         return; /* all buffers in flight; drop */
+    }
+    {
+        int i, live = 0;
+        for (i = 0; i < PORT_AUDIO_NBUFS; i++) {
+            live |= sWaveBufs[i].status == NDSP_WBUF_QUEUED || sWaveBufs[i].status == NDSP_WBUF_PLAYING;
+        }
+        gPortPerfAudioUnderruns += sAudioStarted && !live; /* a gap: the DSP had nothing left to play */
+        sAudioStarted = 1;
     }
     memcpy(sWaveData[sNextBuf], samples, (size_t)nsamples * 2 * sizeof(s16));
     memset(wb, 0, sizeof(ndspWaveBuf));
@@ -145,6 +156,14 @@ void Port3ds_AudioSubmitAi(const s16* stereo, int nframes) {
     Port3ds_AudioSubmit(stereo, nframes);
 }
 
+/* PORT (2026-10-05): samples the engine is told are NOT queued (osAiGetLength), so it keeps that much more queued.
+ * The engine aims at its frame plus 128 samples (4 ms) still queued when the next frame arrives - enough for the N64,
+ * whose audio task runs on time. On an Old 3DS the mixer shares the system core (7.5-10 ms per task in big scenes,
+ * hardware v58) and the game's update can hold the next task back: a frame more than 4 ms late found the DSP empty
+ * and played a gap (crackling, user report). With one more frame queued (~16 ms more latency) it tolerates ~20 ms.
+ * -1 = by model (Old 3DS mixer on the system core: 512, else 0); settings audio_margin=<samples>. */
+int gPortAudioMargin = -1;
+
 /* Stereo frames queued on ndsp and not yet played (the N64 osAiGetLength equivalent). */
 int Port3ds_AudioQueuedFrames(void) {
     int i, queued = 0;
@@ -158,6 +177,11 @@ int Port3ds_AudioQueuedFrames(void) {
     }
     if (queued > 0) {
         queued -= (int)ndspChnGetSamplePos(0); /* position within the buffer now playing */
+    }
+    {
+        extern int gPortAudioCoreNow;
+        int margin = gPortAudioMargin >= 0 ? gPortAudioMargin : gPortAudioCoreNow == 1 ? 512 : 0;
+        queued -= margin;
     }
     return queued > 0 ? queued : 0;
 }

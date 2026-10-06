@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
-"""make_link_banner.py - HOME Menu banner (and optionally icon) with Link's 3D model, rendered by the port from
+"""make_link_banner.py - HOME Menu banner (and optionally icon) with Link's 3D model, captured by the port from
 YOUR game data.
 
-Link's model is Nintendo's, so the images cannot be committed: this tool renders them locally and writes
-port/banner_local.bnr (and with --icon port/icon_local.png), both ignored by git. Makefile.3ds uses them when
-they exist, else the original artwork port/banner.bnr and port/icon.png (tools/make_banner.sh, tools/make_icon.py).
-The banner is stereoscopic (tools/make_banner3d.py: Link in front of the screen, the title at it, the sky behind) and
-needs bannertool (https://github.com/diasurgical/bannertool) on PATH, in $BANNERTOOL or in $DEVKITPRO/tools/bin,
-pycgfx (https://github.com/skyfloogle/pycgfx) in tools/pycgfx/ or $PYCGFX, and Python 3.10+ with gltflib.
+Link's model is Nintendo's, so these files cannot be committed: this tool makes them locally - port/banner_local.bnr,
+port/banner_local_mesh.bin (and with --icon port/icon_local.png), all ignored by git. Makefile.3ds uses them when they
+exist, else the original artwork port/banner.bnr and port/icon.png (tools/make_banner.sh, tools/make_icon.py).
 
-How: builds the port with GAME_EXTRA=-DPORT_ICONGEN (boots straight into Link's house, opens the pause
-menu, writes the Equipment page's Link preview, drawn at 2x = 128x224, to sdmc:/3ds/oot/link_icon.bin),
-runs it in Azahar, then rebuilds the normal ROM. The preview is cut out of its black background; the banner is
-tools/make_banner3d.py's stereoscopic banner with Link in place of the ocarina (in front of the screen), the icon Link's head and shoulders on the original
-icon's night sky.
+How: builds the port with GAME_EXTRA=PORT_EXTRA=-DPORT_ICONGEN (boots straight into Link's house and opens the pause
+menu). The Equipment page draws Link's preview (at 2x, 128x224); while it does, the renderer records every triangle
+it draws there - world positions, texture coordinates, the N64's lit vertex colours, the material (colour combiner,
+primitive and environment colours, texture) - and the decoded textures, to sdmc:/3ds/oot/link_mesh.bin, and the
+picture to link_icon.bin. tools/make_banner3d.py --model bakes each material's combiner into its texture and stands
+the model in front of the screen in the stereoscopic banner (the sky behind, the title at the screen); --picture uses
+the flat picture instead. The icon is Link's head and shoulders from the picture on the original icon's night sky.
 
-usage: make_link_banner.py [--age adult|child] [--icon] [--raw link_icon.bin]   (--raw: only redo the images)
-Needs: an extracted ROM (as for any build), Azahar, Python 3 + Pillow.
+usage: make_link_banner.py [--age adult|child] [--icon] [--picture] [--raw link_icon.bin [--mesh link_mesh.bin]]
+       (--raw: only redo the files from earlier captures)
+Needs: an extracted ROM (as for any build), Azahar, Python 3.10+ with Pillow, numpy and gltflib, bannertool
+(https://github.com/diasurgical/bannertool) on PATH, in $BANNERTOOL or in $DEVKITPRO/tools/bin, and pycgfx
+(https://github.com/skyfloogle/pycgfx) in tools/pycgfx/ or $PYCGFX.
 """
 import argparse, os, shutil, subprocess, sys, tempfile, time
 
@@ -32,25 +34,28 @@ def sh(cmd, **kw):
     return subprocess.run(cmd, shell=True, cwd=REPO, **kw)
 
 
-def build(extra):
-    # make doesn't track flags: drop the objects of every game file that reacts to the tool defines
-    hooked = sh("grep -rlE 'PORT_ICONGEN|PORT_NAVIGEN|PORT_START_ENTRANCE|PORT_START_AGE' src", capture_output=True,
-                text=True).stdout.split()
+def build(extra, port_extra=""):
+    # make doesn't track flags: drop the objects of every file that reacts to the tool defines
+    hooked = sh("grep -rlE 'PORT_ICONGEN|PORT_NAVIGEN|PORT_START_ENTRANCE|PORT_START_AGE' src port/src",
+                capture_output=True, text=True).stdout.split()
     for src in hooked:
         o = os.path.join(REPO, "build/3ds", os.path.splitext(src)[0] + ".o")
         if os.path.exists(o):
             os.remove(o)
-    r = sh("make -f Makefile.3ds cci GAME_EXTRA='%s' 2>&1 | grep -iE ' error|undefined reference' ; true" % extra,
-           capture_output=True, text=True)
+    r = sh("make -f Makefile.3ds cci GAME_EXTRA='%s' PORT_EXTRA='%s' 2>&1 | grep -iE ' error|undefined reference' ; true"
+           % (extra, port_extra), capture_output=True, text=True)
     if r.stdout.strip():
         sys.exit("3DS build failed:\n" + r.stdout)
 
 
 def render(age):
-    out = os.path.join(SD, "link_icon.bin")
-    if os.path.exists(out):
-        os.remove(out)
-    build("-DPORT_ICONGEN -DPORT_START_ENTRANCE=%s -DPORT_START_AGE=%d" % (ENTRANCE, 0 if age == "adult" else 1))
+    """runs the capture build: the preview picture (link_icon.bin) and the preview's triangles (link_mesh.bin)"""
+    out, mesh = os.path.join(SD, "link_icon.bin"), os.path.join(SD, "link_mesh.bin")
+    for f in (out, mesh):
+        if os.path.exists(f):
+            os.remove(f)
+    build("-DPORT_ICONGEN -DPORT_START_ENTRANCE=%s -DPORT_START_AGE=%d" % (ENTRANCE, 0 if age == "adult" else 1),
+          "-DPORT_ICONGEN")
     try:
         sh("pkill -9 -f MacOS/azahar")
         time.sleep(1)
@@ -60,11 +65,12 @@ def render(age):
             sys.exit("Azahar not found in /Applications")
         sh("open -n '%s' --args '%s'" % (app, os.path.join(REPO, "build/3ds/oot.3ds")))
         deadline = time.time() + 180
-        while not (os.path.exists(out) and os.path.getsize(out) == W * H * 2):
+        while not (os.path.exists(out) and os.path.getsize(out) == W * H * 2 and os.path.exists(mesh)):
             if time.time() > deadline:
-                sys.exit("the icon build never wrote %s (see boot.log there)" % out)
+                sys.exit("the icon build never wrote %s / %s (see boot.log there)" % (out, mesh))
             time.sleep(2)
-        time.sleep(1)
+        time.sleep(2)
+        shutil.copy(mesh, os.path.join(REPO, "port", "banner_local_mesh.bin"))
     finally:
         sh("pkill -9 -f MacOS/azahar")
         build("")  # leave the normal ROM in build/3ds
@@ -122,16 +128,19 @@ def bannertool():
     return None
 
 
-def make_banner(link, out):
-    """the stereoscopic banner (tools/make_banner3d.py) with Link in front of the screen. False: no bannertool."""
+def make_banner(link, out, mesh=None):
+    """the stereoscopic banner (tools/make_banner3d.py) with Link in front of the screen: his 3D model (mesh, the
+    game's own triangles) or the preview picture. False: no bannertool."""
     tool = bannertool()
     if tool is None:
         return False
     with tempfile.TemporaryDirectory() as tmp:
         link.save(os.path.join(tmp, "link.png"))
-        subprocess.run([sys.executable, os.path.join(REPO, "tools/make_banner3d.py"), out, "--figure",
-                        os.path.join(tmp, "link.png"), "--preview", os.path.splitext(out)[0] + "_preview.png"],
-                       check=True, env=dict(os.environ, BANNERTOOL=tool))
+        cmd = [sys.executable, os.path.join(REPO, "tools/make_banner3d.py"), out, "--figure",
+               os.path.join(tmp, "link.png"), "--preview", os.path.splitext(out)[0] + "_preview.png"]
+        if mesh is not None:
+            cmd += ["--model", mesh]
+        subprocess.run(cmd, check=True, env=dict(os.environ, BANNERTOOL=tool))
     return True
 
 
@@ -139,6 +148,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--age", choices=("adult", "child"), default="adult")
     ap.add_argument("--raw", help="reuse a link_icon.bin instead of running the game")
+    ap.add_argument("--mesh", help="reuse a link_mesh.bin (default with --raw: port/banner_local_mesh.bin if present)")
+    ap.add_argument("--picture", action="store_true", help="Link as a flat picture instead of his 3D model")
     ap.add_argument("--icon", action="store_true", help="also make the HOME Menu icon (default: the original one)")
     ap.add_argument("--icon-out", default=os.path.join(REPO, "port/icon_local.png"))
     ap.add_argument("--banner-out", default=os.path.join(REPO, "port/banner_local.bnr"))
@@ -150,7 +161,11 @@ def main():
     if link.getbbox() is None:
         sys.exit("the preview is empty")
     link.save(os.path.splitext(args.banner_out)[0] + "_source.png")
-    if make_banner(link, args.banner_out):
+    mesh = None if args.picture else (args.mesh or os.path.join(REPO, "port", "banner_local_mesh.bin"))
+    if mesh is not None and not os.path.exists(mesh):
+        print("no model capture (%s): Link as a picture" % mesh)
+        mesh = None
+    if make_banner(link, args.banner_out, mesh):
         print("wrote %s" % args.banner_out)
     else:
         print("no bannertool found: banner not made (the build keeps port/banner.bnr)")

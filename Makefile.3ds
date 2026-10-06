@@ -217,7 +217,7 @@ $(VERSION_OBJ): $(BUILD)/port_version.c ; @$(CC) $(PORT_CFLAGS) -c -o $@ $<
 ICON_PNG := $(if $(wildcard port/icon_local.png),port/icon_local.png,port/icon.png)
 $(BUILD)/$(TARGET).smdh: $(ICON_PNG)
 	@mkdir -p $(dir $@)
-	$(SMDHTOOL) --create "Ocarina of Time 64" "Unofficial native port of the N64 game" "Fan project" $< $@
+	$(SMDHTOOL) --create "The Legend of Zelda: Ocarina of Time N64 3DS Port" "The Legend of Zelda: Ocarina of Time N64 3DS Port" "Fan project" $< $@
 
 # HOME Menu banner: port/banner_local.bnr when present (Link, tools/make_link_banner.py, never committed), else the
 # committed original artwork port/banner.bnr (tools/make_banner.sh; bannertool not needed to build)

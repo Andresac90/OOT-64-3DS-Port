@@ -2,16 +2,18 @@
 
 No game builds are published; each version is a source release. See the [README](README.md) to build.
 
-## Unreleased (toward 1.0)
+## 1.0.0 (2026-10-06)
 
-Highlights so far (1.0 also needs 60 fps on the Old 3DS):
+Highlights of 1.0:
 - The whole game: every scene of both ages loads, and the game state matches the N64's in 96-98 of 101 scenes
   (101-scene tours compared field by field; the rest are small known differences), with the original audio.
 - New 3DS: 60 frames per second in 2D and in 3D (the game keeps the N64's 20 updates per second; the frames in
   between are interpolated), stereoscopic 3D, widescreen option, C-Stick camera.
-- Old 3DS: the game runs at its full speed; frames are skipped when the console cannot draw them all (about 10-13
+- Old 3DS: the game runs at its full speed; frames are skipped when the console cannot draw them all (about 15-17
   per second in the biggest scenes such as Kokiri Forest, around 45 in interiors such as Link's house). 60 frames
-  per second on the Old 3DS is the remaining 1.0 goal.
+  per second everywhere on the Old 3DS continues after 1.0 (docs/3ds-60fps-plan.md: the cross-frame display-list
+  cache).
+- A stereoscopic HOME Menu banner; built from your game data, Link stands in it as his own 3D model.
 - An OoT3D-style touch screen: C items, ocarina, boots, pause pages, minimap, HUD and screen options.
 - Saves are written atomically to the SD card; the HOME menu and sleep (closing the lid) work.
 
@@ -23,7 +25,8 @@ Plan and criteria: [docs/RELEASE_1.0.md](docs/RELEASE_1.0.md).
 - Frame skip on Old 3DS: when the game falls behind the N64's schedule, an update is not drawn (never
   two in a row), so the game keeps its full speed. `frameskip=0/1` in `settings.txt` overrides.
 - HOME Menu icon and banner (original artwork), version in `boot.log`.
-- `tools/make_link_banner.py`: optional HOME Menu banner (and icon with `--icon`) with Link's 3D model, rendered locally from your own game data (`port/banner_local.bnr`, `port/icon_local.png`, never committed).
+- `tools/make_link_banner.py`: optional HOME Menu banner (and icon with `--icon`) with Link's 3D model, captured locally from your own game data (`port/banner_local*`, `port/icon_local.png`, never committed).
+- `tools/make_showcase.py`: the README's screenshots, both screens, taken from the running game.
 - HOME Menu icon: a glowing fairy (original artwork, tools/make_icon.py); `tools/make_navi_icon.py` renders Navi
   from your own game data instead (`port/icon_local.png`, never committed).
 - The GPU vertex path is the default (`gpu_vtx=0` returns to the CPU one): as accurate, faster on both consoles.
@@ -47,10 +50,25 @@ Plan and criteria: [docs/RELEASE_1.0.md](docs/RELEASE_1.0.md).
   less render CPU per update; at Old 3DS speed Link's house went from 28 to 46 frames shown per second. Checked
   word for word against the draw log's replay (`replay_copy_check=1`) over thousands of frames, in 2D and 3D. The
   draw log's replay also starts from the walk's draw state now (it started from the state the walk ended in).
-- `raw_relax=1` (Old 3DS, off by default): geometry reaching the camera stays on the raw vertex path and only
-  triangles with a vertex at or behind the eye are clipped on the CPU; deep geometry is not split for the N64's
-  screen-linear shading. Kokiri Forest: 72% -> 85% of the triangles on the raw path, 8% less drawing time - but 19%
-  more error against the N64 over 20 tour scenes, so it stays an option.
+- `speed_rules` (alias `raw_relax`; 1 = while frame skip is on, i.e. on an Old 3DS - the default since hardware v60
+  measured 15.7-17 against 12.5-13.3 frames shown in Kokiri Forest; 0 = never; 2 = always): every vertex load stays on the raw path and every triangle goes to the GPU - no N64 NoN depth
+  clamp (the 3DS GPU clips at the near plane itself, as 3DS games do), no CPU clipping, no splits for the N64's
+  screen-linear shading. That per-triangle CPU work was a third of Old 3DS drawing on hardware (v58). The cost: shading
+  gradients like a PC port's and geometry closer to the camera than the near plane cut instead of flattened. A first
+  version kept the depth clamp: near-camera ground flickered and showed cracks (hardware v59). `speed_rules_ab=1`
+  alternates it for a hardware measurement.
+- Old 3DS audio: one more audio frame (~16 ms) is kept queued for the DSP (`audio_margin`, samples; automatic: 512
+  when the mixer shares the system core). The engine kept only 4 ms beyond the current frame, enough for the N64's
+  punctual audio task; a late task left the DSP empty and it played a gap (crackling). The report now counts DSP
+  underruns and dropped buffers.
+- Lit models on the raw vertex path are lit in camera space by the vertex shader: one light set serves every limb of
+  a character (the N64 transforms the lights into each limb's space, which split draws and lit the skin seams between
+  limbs on the CPU). The camera-space normal comes from the palette rows already uploaded (OoT's modelview ends in
+  world space and its view matrix sits in the projection: the projection's columns give the camera axes); matrices
+  with a non-uniform scale and orthographic projections keep the N64's model-space lighting. Kokiri Forest at Old 3DS
+  speed: Link's drawing 7.5 -> 6.0 ms; 101-scene tour error unchanged (5.800 -> 5.801).
+- Matrices: MV x P is computed only when vertices need it (a skeleton multiplies several matrices per limb first);
+  the display list's next cache line is prefetched (Old 3DS: no L2 cache, 50-190 cycles per missed line).
 - Anti-aliasing is off by default (`aa=1` turns it on): it more than doubled the GPU's work per frame; New 3DS in 2D
   went from about 38 to 53 frames shown per second without it (the 800-pixel-wide mode stays).
 - Render thread (`render_thread`, on by default): the game computes the next update while another CPU core draws the
@@ -76,8 +94,9 @@ Plan and criteria: [docs/RELEASE_1.0.md](docs/RELEASE_1.0.md).
 - Holding L while the game starts uses `settings_b.txt` instead of `settings.txt` (when present), and the previous
   session's log is kept as `boot_prev.log`: two test setups in one sitting.
 - Each save writes one line to `boot.log` with its duration (or the step that failed).
-- The HOME Menu banner is stereoscopic: three picture layers at different depths for the HOME Menu's camera (the sky
-  behind the screen, the title at it, the ocarina - or Link, with the optional local tool - in front).
+- The HOME Menu banner is stereoscopic: layers at different depths for the HOME Menu's camera (the sky behind the
+  screen, the title at it, the ocarina in front - or, with the optional local tool, Link's own 3D model captured from
+  the game: `tools/make_link_banner.py`).
   `tools/make_banner3d.py` builds it with pycgfx (glTF to CGFX) and bannertool.
 - The touch screen's NAVI button pulses (blue and green) while Navi wants to talk, so her call is noticed with the
   top-screen HUD off.
@@ -108,6 +127,9 @@ Plan and criteria: [docs/RELEASE_1.0.md](docs/RELEASE_1.0.md).
   3DS, ZL press it too; a small "ZL"/"ZR" tag shows on New 3DS only). ZR no longer doubles C-up (VIEW and D-pad up).
 - Log lines are written to the SD card by a background thread: the measurement report (`prof=1`) used to pause the
   game for up to half a second each time it was written.
+
+### Changed (names)
+- The app is "The Legend of Zelda: Ocarina of Time N64 3DS Port" (HOME Menu, banner caption, README).
 
 ### Fixed
 - Metallic and crystal surfaces with linear environment maps (`G_TEXTURE_GEN_LINEAR`): the map was squeezed 1.57x (the

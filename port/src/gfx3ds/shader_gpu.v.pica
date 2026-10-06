@@ -58,7 +58,9 @@
 	; PORT (2026-10-01): the N64 (NoN microcode) does not clip at the near plane; the PICA would. A vertex in
 	; front of it gets z on the plane (out.z = -(z + w) / 2 <= 0), as pvtx_clamp_near does on the CPU. Pieces of
 	; triangles cut on the CPU are drawn in model space too (gfx_pc.c gpu_pack_clip_tri) and need this.
-	min r2.z, cst.z, r2.z
+	; remap.z = that limit: 0 (N64), or huge (the Old 3DS speed rules: the PICA clips at the near plane itself)
+	mov r15, remap
+	min r2.z, r15.z, r2.z
 
 	; shade (0..255 bytes)
 	mov r6, fogp

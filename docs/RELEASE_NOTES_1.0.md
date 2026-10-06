@@ -1,4 +1,4 @@
-# Ocarina of Time 64 for Nintendo 3DS, version 1.0.0
+# The Legend of Zelda: Ocarina of Time N64 3DS Port, version 1.0.0
 
 A native port of *The Legend of Zelda: Ocarina of Time* (N64, NTSC-U 1.0) to the Nintendo 3DS, built from the
 [zeldaret decompilation](https://github.com/zeldaret/oot). It is not an emulator: the game's own code runs on the
@@ -20,14 +20,15 @@ A native port of *The Legend of Zelda: Ocarina of Time* (N64, NTSC-U 1.0) to the
 - Stereoscopic 3D with the 3D slider, a widescreen option, the C-Stick as camera (New 3DS).
 - A touch screen in the style of *Ocarina of Time 3D*: C items, ocarina, boots, pause pages, minimap, HUD and screen
   options; the NAVI button pulses when Navi wants to talk.
-- Saves on the SD card, written atomically; the HOME menu and sleep work; a stereoscopic HOME Menu banner.
+- Saves on the SD card, written atomically; the HOME menu and sleep work; a stereoscopic HOME Menu banner (with
+  Link's own 3D model when built from your game data: `tools/make_link_banner.py`).
 
 ## Known limitations
 
-- Old 3DS: the game keeps its full speed, but the frames shown per second depend on the scene: about 10-13 in the
-  biggest ones (Kokiri Forest), around 45 in interiors such as Link's house (emulator at Old 3DS speed), fewer in 3D.
-  Measured on a New 3DS running at Old 3DS speed and in the emulator; no Old 3DS was available. (Draft: to be
-  updated when 60 fps on the Old 3DS, a 1.0 goal, is done.)
+- Old 3DS: the game keeps its full speed, but the frames shown per second depend on the scene: about 15-17 in the
+  biggest ones (Kokiri Forest), around 45 in interiors such as Link's house, fewer in 3D. Measured on a New 3DS
+  running at Old 3DS speed and in the emulator; no Old 3DS was available. 60 everywhere on the Old 3DS is the next
+  goal.
 - A complete playthrough on hardware is still in progress; please report anything that differs from the N64.
 - See [docs/RELEASE_1.0.md](RELEASE_1.0.md) for what was verified and how.
 

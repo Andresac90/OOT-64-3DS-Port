@@ -958,13 +958,16 @@ void gfx_citro3d_set_stereo_mode(int mode) {
 }
 
 static int sRemapLoc = -1;
-static float sRemapCur[2] = { -1.0f, -1.0f };
+static float sRemapCur[3] = { -1.0f, -1.0f, -1.0f };
 
 static void setRemap(float a, float b) {
-    if (sRemapLoc >= 0 && (a != sRemapCur[0] || b != sRemapCur[1])) {
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, sRemapLoc, a, b, 0.0f, 0.0f);
+    extern int gPortRawRelax; /* gfx_pc.c speed rules: no NoN depth clamp, the PICA clips at the near plane */
+    float zlim = gPortRawRelax ? 1.0e10f : 0.0f;
+    if (sRemapLoc >= 0 && (a != sRemapCur[0] || b != sRemapCur[1] || zlim != sRemapCur[2])) {
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sRemapLoc, a, b, zlim, 0.0f);
         sRemapCur[0] = a;
         sRemapCur[1] = b;
+        sRemapCur[2] = zlim;
     }
 }
 
@@ -1301,7 +1304,7 @@ void* gfx_citro3d_gpu_vbo(int** pos, u32* cap, float scale[4]) {
 #define RAW_STRIDE 16
 #define REC_RAWP 2048
 typedef struct {
-    float uvc0[4], uvc1[4], lit, lamb[3], ldir[4][3], lcol[4][3];
+    float uvc0[4], uvc1[4], lit[4], lamb[3], ldir[4][3], lcol[4][3]; /* lit: shader_raw.v.pica's lit uniform */
 } RawParams;
 static shaderProgram_s sProgRaw;
 static bool sProgRawInit;
@@ -1355,12 +1358,12 @@ static void rawUpload(const RawParams* p) {
         C3D_FVUnifSet(GPU_VERTEX_SHADER, sUvc1Loc, p->uvc1[0], p->uvc1[1], p->uvc1[2], p->uvc1[3]);
         memcpy(sRawSent.uvc1, p->uvc1, sizeof(p->uvc1));
     }
-    if (!(sRawSentOk & 1) || p->lit != sRawSent.lit) {
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLitLoc, p->lit, 0.0f, 0.0f, 0.0f);
-        sRawSent.lit = p->lit;
+    if (!(sRawSentOk & 1) || memcmp(p->lit, sRawSent.lit, sizeof(p->lit)) != 0) {
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLitLoc, p->lit[0], p->lit[1], p->lit[2], p->lit[3]);
+        memcpy(sRawSent.lit, p->lit, sizeof(p->lit));
     }
     sRawSentOk |= 1;
-    if (p->lit != 0.0f && (!(sRawSentOk & 2) || memcmp(p->lamb, sRawSent.lamb, sizeof(p->lamb)) != 0 ||
+    if (p->lit[0] != 0.0f && (!(sRawSentOk & 2) || memcmp(p->lamb, sRawSent.lamb, sizeof(p->lamb)) != 0 ||
                            memcmp(p->ldir, sRawSent.ldir, sizeof(p->ldir)) != 0 ||
                            memcmp(p->lcol, sRawSent.lcol, sizeof(p->lcol)) != 0)) {
         C3D_FVUnifSet(GPU_VERTEX_SHADER, sLambLoc, p->lamb[0], p->lamb[1], p->lamb[2], 0.0f);
@@ -1393,13 +1396,13 @@ static void rawCanonUniforms(void) {
 }
 
 /* gfx_pc.c, before a raw draw: its texture coordinate coefficients and lights */
-void gfx_citro3d_raw_params(const float uvc0[4], const float uvc1[4], float lit, const float lamb[3],
+void gfx_citro3d_raw_params(const float uvc0[4], const float uvc1[4], const float lit[4], const float lamb[3],
                             const float ldir[4][3], const float lcol[4][3]) {
     RawParams p;
     memcpy(p.uvc0, uvc0, sizeof(p.uvc0));
     memcpy(p.uvc1, uvc1, sizeof(p.uvc1));
-    p.lit = lit;
-    if (lit != 0.0f) {
+    memcpy(p.lit, lit, sizeof(p.lit));
+    if (lit[0] != 0.0f) {
         memcpy(p.lamb, lamb, sizeof(p.lamb));
         memcpy(p.ldir, ldir, sizeof(p.ldir));
         memcpy(p.lcol, lcol, sizeof(p.lcol));
@@ -1486,7 +1489,7 @@ static void gfx_citro3d_setup_mode(int gpu) {
                                                       (unsigned)(sLcolLoc & 0xFF));
     /* a new program: its uniforms start unset */
     sEyeCur[0] = sEyeCur[1] = sEyeCur[2] = sEyeCur[3] = -1.0f;
-    sRemapCur[0] = sRemapCur[1] = -1.0f;
+    sRemapCur[0] = sRemapCur[1] = sRemapCur[2] = -1.0f;
     setEye(0.0f);
     setRemap(1.0f, 0.0f);
 

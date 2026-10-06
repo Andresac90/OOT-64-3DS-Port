@@ -268,7 +268,12 @@ static float gfx_adjust_x_for_aspect_ratio(float x);
 extern int gPortGpuVtx;
 extern void gfx_citro3d_draw_indexed(void);
 #ifdef __3DS__
-static int sInRoomDl;  /* walking the room's geometry (z_room.c G_NOOP tags 0x3D5E5200 / 0x3D5E5201) */
+static int sInRoomDl;
+u64 gPortPerfRoomTicks;
+#ifdef PORT_ACTOR_PROF
+u64 gPortActorTicks[512];
+u32 gPortActorCalls[512];
+#endif /* time inside room geometry display lists (z_room.c tags), per report */  /* walking the room's geometry (z_room.c G_NOOP tags 0x3D5E5200 / 0x3D5E5201) */
 u32 gPortPerfRoomTris; /* perf report */
 #endif
 #define GPU_PAL 18
@@ -703,7 +708,94 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
 //may have limited stack space
 static uint8_t rgba32_buf[65536] __attribute__((aligned(32)));
 
+#ifdef PORT_ICONGEN
+/* tools/make_link_banner.py --model: Link's pause-menu preview as a 3D model for the HOME Menu banner. While the
+ * preview's colour image is the target, every vertex is processed on the CPU (the N64's own lighting and texture
+ * coordinates) and every triangle recorded with its world-space positions and material; each texture is decoded again
+ * when a triangle first uses it (the tile state is that draw's). sdmc:/3ds/oot/link_mesh.bin is written once, after the
+ * preview's 10th frame (it is drawn while the menu is open). */
+extern u16 gPortIconGenBuf[];
+typedef struct {
+    uint64_t combine;
+    uint32_t prim, env, tex, flags; /* flags: 1 texture used, 2 two-cycle, 4 cutout, 8 blend, cms << 8, cmt << 12 */
+    float v[3][5];                  /* x y z u v */
+    uint32_t c[3];                  /* r g b a */
+} MeshTri;
+#define MESH_MAX 1500 /* Link's preview: ~750 */
+static MeshTri sMeshTris[MESH_MAX];
+static int sMeshN, sMeshFrameHasTris, sMeshDbgVtx, sMeshDbgTri, sMeshDbgTri1;
+static float sMeshPos[MAX_VERTICES + 4][3];
+typedef struct {
+    uint8_t* rgba;
+    uint16_t w, h;
+} MeshTex;
+static MeshTex sMeshTex[4096];
+static int mesh_capturing(void) {
+    return rdp.color_image_address == (void*)gPortIconGenBuf;
+}
+static uint16_t sMeshTexOrder[4096]; /* ids by upload, oldest first: freed first when the heap runs out */
+static int sMeshTexOrderN;
+static void mesh_keep_texture(uint32_t id, const uint8_t* buf, uint32_t w, uint32_t h) {
+    if (id < 4096 && w * h <= 16384) {
+        int i, k;
+        free(sMeshTex[id].rgba);
+        sMeshTex[id].rgba = NULL;
+        for (i = k = 0; i < sMeshTexOrderN; i++) { /* (re-uploaded: moves to the end) */
+            if (sMeshTexOrder[i] != id) sMeshTexOrder[k++] = sMeshTexOrder[i];
+        }
+        sMeshTexOrderN = k;
+        while ((sMeshTex[id].rgba = malloc(w * h * 4)) == NULL && sMeshTexOrderN > 0) {
+            uint16_t old = sMeshTexOrder[0];
+            free(sMeshTex[old].rgba);
+            sMeshTex[old].rgba = NULL;
+            memmove(sMeshTexOrder, sMeshTexOrder + 1, sizeof(uint16_t) * (size_t)--sMeshTexOrderN);
+        }
+        if (sMeshTex[id].rgba != NULL) {
+            memcpy(sMeshTex[id].rgba, buf, w * h * 4);
+            sMeshTex[id].w = (uint16_t)w, sMeshTex[id].h = (uint16_t)h;
+            sMeshTexOrder[sMeshTexOrderN++] = (uint16_t)id;
+        }
+    }
+}
+static void mesh_write(void) {
+    FILE* f = fopen("sdmc:/3ds/oot/link_mesh.tmp", "wb");
+    uint8_t used[4096];
+    uint32_t i, nt = 0;
+    if (f == NULL) {
+        return;
+    }
+    memset(used, 0, sizeof(used));
+    fwrite("OOTM", 1, 4, f);
+    fwrite(&sMeshN, 4, 1, f);
+    fwrite(sMeshTris, sizeof(MeshTri), (size_t)sMeshN, f);
+    for (i = 0; i < (uint32_t)sMeshN; i++) {
+        if (sMeshTris[i].tex < 4096 && sMeshTex[sMeshTris[i].tex].rgba != NULL && !used[sMeshTris[i].tex]) {
+            used[sMeshTris[i].tex] = 1, nt++;
+        }
+    }
+    fwrite(&nt, 4, 1, f);
+    for (i = 0; i < 4096; i++) {
+        if (used[i]) {
+            uint32_t hdr[3] = { i, sMeshTex[i].w, sMeshTex[i].h };
+            fwrite(hdr, 4, 3, f);
+            fwrite(sMeshTex[i].rgba, 4, (size_t)sMeshTex[i].w * sMeshTex[i].h, f);
+        }
+    }
+    fclose(f);
+    rename("sdmc:/3ds/oot/link_mesh.tmp", "sdmc:/3ds/oot/link_mesh.bin"); /* complete when it appears */
+}
+#endif
+
+#ifdef PORT_ICONGEN
+static int sMeshRedecode; /* import_texture_impl decodes for the capture only: no cache lookup, no upload */
+#endif
 static void gfx_upload_texture(uint8_t* buf, uint32_t width, uint32_t height) {
+#ifdef PORT_ICONGEN
+    if (sMeshRedecode) {
+        mesh_keep_texture(sImpNode->texture_id, buf, width, height);
+        return;
+    }
+#endif
     gfx_rapi->upload_texture(buf, width, height);
     sImpNode->width = width;
     sImpNode->height = height;
@@ -977,6 +1069,9 @@ static void import_texture_impl(int unit, int tile_index) {
     uint8_t fmt = sImpTile->fmt;
     uint8_t siz = sImpTile->siz;
 
+#ifdef PORT_ICONGEN
+    if (!sMeshRedecode)
+#endif
     if (gfx_texture_cache_lookup(unit, &rendering_state.textures[unit], rdp.loaded_texture[tile].addr, fmt, siz, rdp.loaded_texture[tile].size_bytes)) {
         return;
     }
@@ -1523,6 +1618,7 @@ static void rec_vbo_vertex(int first, const float* d, float px, float py, float 
 #define GPU_SLOT_IDENTITY 0xFFFF /* rectangles: their vertices are already in clip space */
 typedef struct {
     float rows[3][4][4]; /* [replay k][output row][x y z 1 coefficient] */
+    uint8_t camLit;      /* the modelview scales uniformly: camera-space raw lighting is the N64's (raw_light_set) */
 } GpuSlot;
 static GpuSlot* sGpuSlot;
 static int sGpuSlotN, sGpuSlotCur = -1;
@@ -1549,6 +1645,16 @@ static void gpu_rows_from_mp(float rows[4][4], const float mp[4][4], float hx, f
     }
 }
 
+/* PORT PERF (2026-10-05): MP = MV x P only when vertices need it - a skeleton loads and multiplies several matrices per
+ * limb before its vertices (Old 3DS hardware v58: matrices 8% of the drawing; a 4x4 product is 64 VFP multiply-adds) */
+static bool sMPDirty = true;
+static inline void mp_update(void) {
+    if (sMPDirty) {
+        sMPDirty = false;
+        gfx_matrix_mul(rsp.MP_matrix, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], rsp.P_matrix);
+    }
+}
+
 static int gpu_slot_get(void) {
     if (sGpuSlotCur < 0) {
         int k, top = rsp.modelview_matrix_stack_size - 1;
@@ -1566,6 +1672,20 @@ static int gpu_slot_get(void) {
             return sGpuSlotN - 1; /* table full (never seen): reuse the last slot */
         }
         g = &sGpuSlot[sGpuSlotN];
+        mp_update();
+        {
+            /* the N64 lights in model space, normalising the transformed light direction: in camera space that is
+             * n . MV / |MV row| only for a uniform scale (rows of equal length; a skew would show here too) */
+            const float(*mv)[4] = rsp.modelview_matrix_stack[top];
+            float l0 = mv[0][0] * mv[0][0] + mv[0][1] * mv[0][1] + mv[0][2] * mv[0][2];
+            float l1 = mv[1][0] * mv[1][0] + mv[1][1] * mv[1][1] + mv[1][2] * mv[1][2];
+            float l2 = mv[2][0] * mv[2][0] + mv[2][1] * mv[2][1] + mv[2][2] * mv[2][2];
+            float d01 = mv[0][0] * mv[1][0] + mv[0][1] * mv[1][1] + mv[0][2] * mv[1][2];
+            float d02 = mv[0][0] * mv[2][0] + mv[0][1] * mv[2][1] + mv[0][2] * mv[2][2];
+            /* lengths within 2% (squares within 4%), rows within ~1 degree of square */
+            g->camLit = l0 > 0.0f && fabsf(l1 - l0) < 0.04f * l0 && fabsf(l2 - l0) < 0.04f * l0 &&
+                        fabsf(d01) < 0.02f * l0 && fabsf(d02) < 0.02f * l0;
+        }
         gpu_rows_from_mp(g->rows[2], rsp.MP_matrix, rsp.half_px_x, rsp.half_px_y, A);
         for (k = 0; k < 2; k++) {
             if (gPortReplayRec && top >= 0) {
@@ -1760,7 +1880,7 @@ static void gfx_sp_matrix(uint8_t parameters, const int32_t *addr) {
         }
         rsp.lights_changed = 1;
     }
-    gfx_matrix_mul(rsp.MP_matrix, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], rsp.P_matrix);
+    sMPDirty = true;
     sGpuSlotCur = -1;
 }
 
@@ -1771,7 +1891,7 @@ static void gfx_sp_pop_matrix(uint32_t count) {
         if (rsp.modelview_matrix_stack_size > 0) {
             --rsp.modelview_matrix_stack_size;
             if (rsp.modelview_matrix_stack_size > 0) {
-                gfx_matrix_mul(rsp.MP_matrix, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], rsp.P_matrix);
+                sMPDirty = true;
             }
         }
     }
@@ -1908,17 +2028,17 @@ int gPortRawNear = 1; /* (measurement) */
 float gPortRawRatio = 3.0f; /* settings raw_ratio x10: loads deeper than this stay processed (see gfx_sp_vertex_gpu) */
 typedef struct {
     float amb[3], dir[4][3], col[4][3];
+    float lit[4]; /* shader_raw.v.pica lit: 1, camera space (dir in camera space), -1 / (aspect P00), 1 / P11 */
 } RawLights;
 #define RAW_LIGHT_SETS 64
 static const Vtx* sLoadRaw[MAX_VERTICES + 4];   /* the game's vertex behind a loaded slot (raw path), NULL: processed */
 static uint8_t sLoadLit[MAX_VERTICES + 4];       /* its light set + 1, 0 = unlit */
-static uint8_t sRawNear[MAX_VERTICES + 4];       /* raw, but at or behind the eye in a frame drawn from it (gPortRawRelax) */
-/* PORT PERF (2026-10-05): Old 3DS option (settings raw_relax=1, off by default), set by 3ds_main.c while frame skip is on. A load reaching the
- * camera stays raw and only the triangles with a vertex at or behind the eye go to the CPU (clipping there; the raw
- * shader already clamps depth at the near plane as the NoN microcode does), and deep loads are not split for the RDP's
- * screen-linear shading: the coarse shading splits of that mode, a step further. The New 3DS keeps the exact rules.
- * Measured: Kokiri Forest 72% -> 85% raw triangles, -8% drawing; 20 tour scenes' error against the N64 5.8 -> 6.9
- * (Royal Family's Tomb 1.3% -> 4.3% of pixels off) - not worth it by default. */
+/* PORT PERF (2026-10-05): the Old 3DS speed rules (settings speed_rules, 3ds_main.c). Every load stays raw and every
+ * triangle goes to the GPU: no N64 NoN depth clamp (the PICA clips at the near plane itself, as 3DS games do: shaders'
+ * remap.z, gfx_citro3d.c setRemap), no CPU clipping, no splits for the RDP's screen-linear shading. The per-triangle CPU
+ * work these rules save was a third of Old 3DS drawing (hardware v58). The cost: shading gradients like a PC port's and
+ * geometry within the near plane distance of the camera cut instead of flattened. A first version kept the depth clamp
+ * with fewer CPU triangles: the clamp tilted near-camera ground, which flickered and cracked (hardware v59). */
 int gPortRawRelax;
 static RawLights sRawLights[RAW_LIGHT_SETS];
 static int sRawLightsN;                          /* sets this frame */
@@ -1927,29 +2047,70 @@ static int sRawLitCur = -1;                      /* light set (+1) of the raw ba
 static uint32_t sRawParamBatch;                  /* batch whose raw parameters were sent */
 extern void gfx_citro3d_raw_mode(int raw);
 extern int gfx_citro3d_raw_ready(void);
-extern void gfx_citro3d_raw_params(const float uvc0[4], const float uvc1[4], float lit, const float lamb[3],
+extern void gfx_citro3d_raw_params(const float uvc0[4], const float uvc1[4], const float lit[4], const float lamb[3],
                                    const float ldir[4][3], const float lcol[4][3]);
 extern void* gfx_citro3d_raw_vbo(int** pos, u32* cap);
 
-/* the current lights as a raw light set (+1); 0 when they do not fit (the load stays on the processed path) */
-static int raw_light_set(void) {
+/* the current lights as a raw light set (+1); 0 when they do not fit (the load stays on the processed path).
+ * cam: in camera space (PORT PERF 2026-10-05) - the same set for every limb of a model, so its draws and limb seams stay
+ * on the GPU; else in the load's model space as the N64 transforms them (non-uniformly scaled matrices). */
+static int raw_light_set(int cam) {
     RawLights L;
     int i, k, n = rsp.current_num_lights - 1;
     if (n > 4 || n < 0) {
         return 0;
     }
-    if (rsp.lights_changed) {
+    if (!cam && rsp.lights_changed) {
         lights_refresh();
     }
     memset(&L, 0, sizeof(L));
     for (k = 0; k < 3; k++) {
         L.amb[k] = rsp.current_lights[n].col[k] * (1.0f / 255.0f);
     }
-    for (i = 0; i < n; i++) {
+    /* OoT's modelview ends in WORLD space (the camera's view matrix is in the projection, View_ApplyPerspective) and
+     * its lights are world directions. The projection P = view x perspective: its first, second and fourth columns
+     * are the camera's x, y and -z axes in world space, scaled by the perspective's x and y factors and 1. */
+    float ax[3][3], sx = 0.0f, sy = 0.0f, sw = 0.0f;
+    if (cam) {
+        const float(*P)[4] = rsp.P_matrix;
         for (k = 0; k < 3; k++) {
-            L.dir[i][k] = rsp.current_lights_coeffs[i][k] * (1.0f / 127.0f);
+            ax[0][k] = P[k][0], ax[1][k] = P[k][1], ax[2][k] = -P[k][3];
+            sx += P[k][0] * P[k][0], sy += P[k][1] * P[k][1], sw += P[k][3] * P[k][3];
+        }
+        if (sw < 0.81f || sw > 1.21f || sx <= 0.0f || sy <= 0.0f) {
+            cam = 0; /* not a perspective with w = -z (orthographic menus, unusual matrices): model space */
+            if (rsp.lights_changed) {
+                lights_refresh();
+            }
+        } else {
+            sx = sqrtf(sx), sy = sqrtf(sy), sw = sqrtf(sw);
+            for (k = 0; k < 3; k++) {
+                ax[0][k] /= sx, ax[1][k] /= sy, ax[2][k] /= sw;
+            }
+        }
+    }
+    for (i = 0; i < n; i++) {
+        if (cam) { /* the game's world direction, normalised as calculate_normal_dir does, turned into camera space */
+            float d[3] = { rsp.current_lights[i].dir[0], rsp.current_lights[i].dir[1], rsp.current_lights[i].dir[2] };
+            gfx_normalize_vector(d);
+            for (k = 0; k < 3; k++) {
+                L.dir[i][k] = (d[0] * ax[k][0] + d[1] * ax[k][1] + d[2] * ax[k][2]) * (1.0f / 127.0f);
+            }
+        }
+        for (k = 0; k < 3; k++) {
+            if (!cam) {
+                L.dir[i][k] = rsp.current_lights_coeffs[i][k] * (1.0f / 127.0f);
+            }
             L.col[i][k] = rsp.current_lights[i].col[k] * (1.0f / 255.0f);
         }
+    }
+    L.lit[0] = 1.0f;
+    if (cam) {
+        /* the shader reads x, y and z of the camera from the palette rows (y', -x' = -aspect * x, w = -z): x and y
+         * scaled back by the perspective's factors; |w row| is the modelview's scale times sw, folded into x and y */
+        L.lit[1] = 1.0f;
+        L.lit[2] = -sw / (gfx_adjust_x_for_aspect_ratio(1.0f) * sx);
+        L.lit[3] = sw / sy;
     }
     if (sRawLightsN > 0 && memcmp(&L, &sRawLights[sRawLightsN - 1], sizeof(L)) == 0) {
         return sRawLightsN;
@@ -1968,7 +2129,6 @@ static void gfx_sp_vertex_gpu(size_t n_vertices, size_t dest_index, const Vtx* v
     const uint16_t slot = (uint16_t)gpu_slot_get(); /* one matrix state for the whole load */
     uint8_t rej = 0;
     int nearEye = 0; /* the raw path: the load reaches the eye's neighbourhood */
-    int nearVtx = 0, nearVtxK0 = 2; /* gPortRawRelax: raw, its vertices tested one by one (frames nearVtxK0..2) */
     PROF_SET(PROF_VTX_BOX);
     {
         /* PORT PERF (2026-10-01): off-screen rejection for the whole load. The GPU path doesn't transform
@@ -2004,7 +2164,6 @@ static void gfx_sp_vertex_gpu(size_t n_vertices, size_t dest_index, const Vtx* v
          * camera alone, objects at the trailing edge of a fast camera turn vanished from the in-between frames
          * (whole sub-display lists too, through G_CULLDL; hardware v42). */
         int k0 = gPortReplayRec ? 0 : 2, t;
-        nearVtxK0 = k0;
         rej = (slot == GPU_SLOT_IDENTITY) ? 0 : (1 | 2 | 4 | 8 | 32);
         (void)m;
         (void)aspect;
@@ -2025,7 +2184,7 @@ static void gfx_sp_vertex_gpu(size_t n_vertices, size_t dest_index, const Vtx* v
                 rej &= cr;
             }
         }
-        if (gPortRawVtx && rej == 0 && slot != GPU_SLOT_IDENTITY) {
+        if (gPortRawVtx && rej == 0 && slot != GPU_SLOT_IDENTITY && !gPortRawRelax) {
             /* raw path: near the eye - a box corner behind it or in front of the near plane, in any of the frames drawn
              * from this load. Its triangles need the CPU's N64 handling (the NoN clamp, clipping behind the eye; the
              * screen-linear split matters most there too: the floor under the camera), so the load is processed. */
@@ -2041,11 +2200,7 @@ static void gfx_sp_vertex_gpu(size_t n_vertices, size_t dest_index, const Vtx* v
                     o2hi += e < f ? f : e;
                 }
                 if ((wlo <= 1.0f || o2hi > 0.0f) && gPortRawNear) {
-                    if (!gPortRawRelax) {
-                        nearEye = 1; /* a corner behind the eye or in front of the near plane */
-                    } else if (wlo <= 1.0f) {
-                        nearVtx = 1; /* (in front of the near plane only: the shader's clamp is the NoN clamp) */
-                    }
+                    nearEye = 1; /* a corner behind the eye or in front of the near plane */
                 }
 #ifdef PORT_PERF_STAGES
                 if (nearEye) gPortRawWhy[0] += n_vertices;
@@ -2053,7 +2208,7 @@ static void gfx_sp_vertex_gpu(size_t n_vertices, size_t dest_index, const Vtx* v
                 /* a deep load (its far side gPortRawRatio times farther than its near side): its shade and fog would
                  * be interpolated with perspective over a long gradient (House of Skulltula's floor: 7.4 -> 13.6 mean
                  * error against the N64) - the processed path splits it N64-style */
-                if (!nearEye && !gPortRawRelax && whi > gPortRawRatio * wlo) {
+                if (!nearEye && whi > gPortRawRatio * wlo) {
                     nearEye = 1;
 #ifdef PORT_PERF_STAGES
                     gPortRawWhy[1] += n_vertices;
@@ -2063,13 +2218,30 @@ static void gfx_sp_vertex_gpu(size_t n_vertices, size_t dest_index, const Vtx* v
         }
     }
     {
+#ifdef PORT_ICONGEN
+        if (mesh_capturing()) {
+            sMeshDbgVtx++;
+            const float(*mv)[4] = rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1];
+            for (size_t i = 0; i < n_vertices && dest_index + i < MAX_VERTICES + 4; i++) {
+                const short* ob = vertices[i].v.ob;
+                for (int k = 0; k < 3; k++) {
+                    sMeshPos[dest_index + i][k] = ob[0] * mv[0][k] + ob[1] * mv[1][k] + ob[2] * mv[2][k] + mv[3][k];
+                }
+            }
+        }
+#endif
         int lit = 0, raw = gPortRawVtx && sVtxPrev == NULL && !(rsp.geometry_mode & G_TEXTURE_GEN) &&
                            dest_index + n_vertices <= MAX_VERTICES && slot != GPU_SLOT_IDENTITY;
         if (nearEye) {
             raw = 0; /* (see nearEye) */
         }
+#ifdef PORT_ICONGEN
+        if (mesh_capturing()) {
+            raw = 0; /* (the mesh capture reads the CPU's colours and texture coordinates) */
+        }
+#endif
         if (raw && (rsp.geometry_mode & G_LIGHTING)) {
-            lit = raw_light_set();
+            lit = raw_light_set(sGpuSlot[slot].camLit);
             raw = lit != 0;
 #ifdef PORT_PERF_STAGES
             if (!raw) gPortRawWhy[2] += n_vertices;
@@ -2096,16 +2268,6 @@ static void gfx_sp_vertex_gpu(size_t n_vertices, size_t dest_index, const Vtx* v
                 sZWStale[dest_index] = 1;
                 sLoadRaw[dest_index] = &vertices[i];
                 sLoadLit[dest_index] = (uint8_t)lit;
-                sRawNear[dest_index] = 0;
-                if (nearVtx) {
-                    int t;
-                    for (t = nearVtxK0; t <= 2; t++) {
-                        const float(*r)[4] = (const float(*)[4])sGpuSlot[slot].rows[t];
-                        if (r[3][0] * v->ob[0] + r[3][1] * v->ob[1] + r[3][2] * v->ob[2] + r[3][3] <= 1.0f) {
-                            sRawNear[dest_index] = 1;
-                        }
-                    }
-                }
                 d->x = v->ob[0], d->y = v->ob[1], d->z = v->ob[2], d->w = 1.0f; /* (G_BRANCH_Z, rectangles' neighbours) */
                 d->clip_rej = rej;
             }
@@ -2142,6 +2304,7 @@ static void gfx_sp_vertex_gpu(size_t n_vertices, size_t dest_index, const Vtx* v
 #endif
 
 static void gfx_sp_vertex_impl(size_t n_vertices, size_t dest_index, const Vtx *vertices) {
+    mp_update(); /* (lazy, see gpu_slot_get) */
     /* PORT PERF (2026-10-01): loop invariants hoisted - the aspect squeeze was a float division per
      * vertex (gfx_adjust_x_for_aspect_ratio), the light intensities divided by 127 per light per vertex */
     const float aspect = gfx_adjust_x_for_aspect_ratio(1.0f);
@@ -3173,9 +3336,10 @@ static void gpu_emit_tri_raw(const uint8_t vidx[3]) {
         }
         if (lit > 0) {
             const RawLights* L = &sRawLights[lit - 1];
-            gfx_citro3d_raw_params(uvc[0], uvc[1], 1.0f, L->amb, L->dir, L->col);
+            gfx_citro3d_raw_params(uvc[0], uvc[1], L->lit, L->amb, L->dir, L->col);
         } else {
-            gfx_citro3d_raw_params(uvc[0], uvc[1], 0.0f, NULL, NULL, NULL);
+            static const float unlit[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            gfx_citro3d_raw_params(uvc[0], uvc[1], unlit, NULL, NULL, NULL);
         }
         sRawParamBatch = sBatchId;
         sRawLitCur = lit;
@@ -3231,13 +3395,22 @@ static void raw_materialize(int slot) {
     if (lit > 0) {
         const RawLights* L = &sRawLights[lit - 1];
         const signed char* n = vtx->n.n;
-        float c[3];
+        float c[3], nv[3] = { n[0], n[1], n[2] };
         int k, i;
+        if (L->lit[1] != 0.0f && sLoadSlot[slot] < sGpuSlotN) {
+            /* a camera-space set: the normal to camera space as shader_raw.v.pica does (the logic frame's rows) */
+            const float(*r)[4] = (const float(*)[4])sGpuSlot[sLoadSlot[slot]].rows[2];
+            float s = sqrtf(r[3][0] * r[3][0] + r[3][1] * r[3][1] + r[3][2] * r[3][2]);
+            float is = s > 0.0f ? 1.0f / s : 0.0f;
+            nv[0] = (r[1][0] * n[0] + r[1][1] * n[1] + r[1][2] * n[2]) * L->lit[2] * is;
+            nv[1] = (r[0][0] * n[0] + r[0][1] * n[1] + r[0][2] * n[2]) * L->lit[3] * is;
+            nv[2] = -(r[3][0] * n[0] + r[3][1] * n[1] + r[3][2] * n[2]) * is;
+        }
         for (k = 0; k < 3; k++) {
             c[k] = L->amb[k];
         }
         for (i = 0; i < 4; i++) {
-            float in = n[0] * L->dir[i][0] + n[1] * L->dir[i][1] + n[2] * L->dir[i][2];
+            float in = nv[0] * L->dir[i][0] + nv[1] * L->dir[i][1] + nv[2] * L->dir[i][2];
             if (in > 0.0f) {
                 for (k = 0; k < 3; k++) {
                     c[k] += in * L->col[i][k];
@@ -3268,7 +3441,6 @@ static int raw_tri_fast(int a, int b, int c) {
     if (!sTriStateOk || !sRawDraw || sRawParamBatch != sBatchId || a >= MAX_VERTICES || b >= MAX_VERTICES ||
         c >= MAX_VERTICES || sLoadRaw[a] == NULL || sLoadRaw[b] == NULL || sLoadRaw[c] == NULL ||
         sLoadLit[a] != sRawLitCur || sLoadLit[b] != sRawLitCur || sLoadLit[c] != sRawLitCur ||
-        (sRawNear[a] | sRawNear[b] | sRawNear[c]) ||
         buf_vbo_num_tris + 1 >= MAX_BUFFERED || sRawVboFrame != gfx_port_frame_index || sRawVboP == NULL) {
         return 0;
     }
@@ -3317,8 +3489,7 @@ static void gpu_emit_tri(const uint8_t vidx[3]) {
         int r0 = vidx[0] < MAX_VERTICES && sLoadRaw[vidx[0]] != NULL;
         int r1 = vidx[1] < MAX_VERTICES && sLoadRaw[vidx[1]] != NULL;
         int r2 = vidx[2] < MAX_VERTICES && sLoadRaw[vidx[2]] != NULL;
-        if (r0 && r1 && r2 && sLoadLit[vidx[0]] == sLoadLit[vidx[1]] && sLoadLit[vidx[0]] == sLoadLit[vidx[2]] &&
-            !(sRawNear[vidx[0]] | sRawNear[vidx[1]] | sRawNear[vidx[2]])) {
+        if (r0 && r1 && r2 && sLoadLit[vidx[0]] == sLoadLit[vidx[1]] && sLoadLit[vidx[0]] == sLoadLit[vidx[2]]) {
             gpu_emit_tri_raw(vidx);
             return;
         }
@@ -3332,7 +3503,7 @@ static void gpu_emit_tri(const uint8_t vidx[3]) {
         sRawDraw = 0;
     }
     {
-        int lin = gPortShadeLinear && gPortShadeSplit && !sTC.used_textures[1];
+        int lin = gPortShadeLinear && gPortShadeSplit && !gPortRawRelax && !sTC.used_textures[1];
         if (lin != sGpuLin) {
             gfx_flush();
             sGpuLin = lin;
@@ -3352,7 +3523,7 @@ static void gpu_emit_tri(const uint8_t vidx[3]) {
         float hi = a[1] > b[1] ? a[1] : b[1], lo = a[1] < b[1] ? a[1] : b[1];
         hi = c[1] > hi ? c[1] : hi;
         lo = c[1] < lo ? c[1] : lo;
-        int cpu = lo <= 0.0f || a[0] < -a[1] || b[0] < -b[1] || c[0] < -c[1];
+        int cpu = !gPortRawRelax && (lo <= 0.0f || a[0] < -a[1] || b[0] < -b[1] || c[0] < -c[1]); /* (speed rules: the GPU clips) */
         { extern u32 gPortGpuRoute[4]; gPortGpuRoute[0]++; if (lo <= 0.0f) gPortGpuRoute[1]++; else if (cpu) gPortGpuRoute[2]++; }
         if (!cpu && sGpuLin > 0) {
             /* screen-linear mode: the RSP clips triangles that leave the guard band (x, y beyond +-ratio * w)
@@ -3364,7 +3535,9 @@ static void gpu_emit_tri(const uint8_t vidx[3]) {
                 cpu = q[j][2] > rw || q[j][2] < -rw || q[j][3] > rw || q[j][3] < -rw;
             }
         }
-        if (!cpu && gPortShadeSplit && !sGpuLin && hi >= SUBDIV_MAX_RATIO * lo) {
+        /* (speed rules: no split for depth alone - triangles clipped near the camera still split, which keeps their
+         * per-vertex depth clamp small) */
+        if (!cpu && gPortShadeSplit && !gPortRawRelax && !sGpuLin && hi >= SUBDIV_MAX_RATIO * lo) {
             /* PORT (2026-10-02): any edge the CPU splitter would cut sends the triangle there - even when its
              * shade and fog are flat (it then gets its outline only, gfx_subdiv_outline): a neighbour that cuts
              * the shared edge would otherwise leave a T-junction, a crack on hardware. Same clip positions as
@@ -3490,6 +3663,9 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
 }
 
 static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
+#ifdef PORT_ICONGEN
+    if (mesh_capturing()) sMeshDbgTri1++;
+#endif
     gfx_select_target();
     gfx_port_tri_count++;
 #ifdef __3DS__
@@ -3759,6 +3935,42 @@ static void gfx_sp_tri1_impl(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_id
 
 emit_vertices:;
     const uint8_t vidx[3] = { vtx1_idx, vtx2_idx, vtx3_idx };
+#ifdef PORT_ICONGEN
+    if (mesh_capturing()) {
+        sMeshDbgTri++;
+        if (sMeshN < MESH_MAX && vtx1_idx < MAX_VERTICES && vtx2_idx < MAX_VERTICES &&
+            vtx3_idx < MAX_VERTICES) {
+            MeshTri* m = &sMeshTris[sMeshN++];
+            const struct TileDesc* t0 = &rdp.tiles[rdp.first_tile & 7];
+            bool blend = (((rdp.other_mode_l & (3U << 20)) == (G_BL_CLR_MEM << 20)) && ((rdp.other_mode_l & (3U << 16)) == (G_BL_1MA << 16))) ||
+                         (((rdp.other_mode_l & (3U << 22)) == (G_BL_CLR_MEM << 22)) && ((rdp.other_mode_l & (3U << 18)) == (G_BL_1MA << 18)));
+            m->combine = rdp.combine_mode;
+            memcpy(&m->prim, &rdp.prim_color, 4);
+            memcpy(&m->env, &rdp.env_color, 4);
+            m->tex = (sTC.used_textures[0] && rendering_state.textures[0] != NULL) ? rendering_state.textures[0]->texture_id : 0xFFFFFFFFu;
+            if (m->tex < 4096 && sMeshTex[m->tex].rgba == NULL) { /* decoded again now: the tile's state is this draw's */
+                int ti = rdp.first_tile & 7;
+                sMeshRedecode = 1;
+                import_texture_impl(0, ti);
+                sMeshRedecode = 0;
+            }
+            m->flags = (sTC.used_textures[0] ? 1 : 0) |
+                       ((rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_2CYCLE ? 2 : 0) |
+                       ((rdp.other_mode_l & CVG_X_ALPHA) ? 4 : 0) | (blend ? 8 : 0) |
+                       ((uint32_t)(t0->cms & 3) << 8) | ((uint32_t)(t0->cmt & 3) << 12);
+            for (int k = 0; k < 3; k++) {
+                const struct LoadedVertex* lv = &rsp.loaded_vertices[vidx[k]];
+                float uv[2][2];
+                gpu_uv(lv, uv);
+                m->v[k][0] = sMeshPos[vidx[k]][0], m->v[k][1] = sMeshPos[vidx[k]][1], m->v[k][2] = sMeshPos[vidx[k]][2];
+                m->v[k][3] = uv[0][0], m->v[k][4] = uv[0][1];
+                m->c[k] = (uint32_t)lv->color.r | ((uint32_t)lv->color.g << 8) | ((uint32_t)lv->color.b << 16) |
+                          ((uint32_t)lv->color.a << 24);
+            }
+            sMeshFrameHasTris = 1;
+        }
+    }
+#endif
 #ifdef __3DS__
     if (gPortGpuVtx) { /* GPU path: indices (+ any vertex new to this batch), nothing else per triangle */
         PROF_SET(PROF_EMIT);
@@ -4477,6 +4689,20 @@ static void gfx_dp_set_z_image(void *z_buf_address) {
 }
 
 static void gfx_dp_set_color_image(uint32_t format, uint32_t size, uint32_t width, void* address) {
+#ifdef PORT_ICONGEN
+    {
+        static void* sLast[8];
+        extern void PortDbgX(const char*, unsigned);
+        int k, seen = 0;
+        for (k = 0; k < 8; k++) seen |= sLast[k] == address;
+        if (!seen) {
+            for (k = 7; k > 0; k--) sLast[k] = sLast[k - 1];
+            sLast[0] = address;
+            PortDbgX("[mesh] color image", (unsigned)(uintptr_t)address);
+            PortDbgX("[mesh] preview buffer", (unsigned)(uintptr_t)gPortIconGenBuf);
+        }
+    }
+#endif
     rdp.color_image_address = address;
     rdp.color_image_width = width + 1; /* the command carries width - 1 */
     sTargetDirty = true;
@@ -4669,6 +4895,10 @@ static void gfx_run_dl(Gfx* cmd) {
             }
             valid_until = end;
         }
+        /* PORT PERF (2026-10-05): the display list is read sequentially; an Old 3DS (no L2) waits 50-190 cycles per
+         * missed 32-byte line (hardware v55 memory probe), so the line two commands-lines ahead is requested now (PLD:
+         * a hint, never faults, also past the end of the list) */
+        __builtin_prefetch(cmd + 8);
 #endif
         uint32_t opcode = cmd->words.w0 >> 24;
 #ifdef __3DS__
@@ -4714,9 +4944,35 @@ static void gfx_run_dl(Gfx* cmd) {
             case (uint8_t)G_NOOP:
                 if (((cmd->words.w0 >> 16) & 0xFF) == PORT_INTERP_TAG) {
                     interp_group(cmd->words.w0, cmd->words.w1);
-                } else if ((cmd->words.w1 & 0xFFFFFFFEu) == 0x3D5E5200u) {
+                }
+#ifdef PORT_ACTOR_PROF
+                else if ((cmd->words.w1 & 0xFFFF0000u) == 0x3D5D0000u) { /* z_actor.c: an actor type's drawing */
+                    static u64 sActT0;
+                    static int sActId = -1;
+                    extern u64 gPortActorTicks[512];
+                    extern u32 gPortActorCalls[512];
+                    u64 now = svcGetSystemTick();
+                    if (sActId >= 0) {
+                        gPortActorTicks[sActId] += now - sActT0;
+                        gPortActorCalls[sActId]++;
+                    }
+                    sActId = (cmd->words.w1 & 0xFFFF) == 0xFFFF ? -1 : (int)(cmd->words.w1 & 0x1FF);
+                    sActT0 = now;
+                }
+#endif
+                else if ((cmd->words.w1 & 0xFFFFFFFEu) == 0x3D5E5200u) {
                     /* z_room.c: room geometry begins (0) / ends (1) */
                     sInRoomDl = (cmd->words.w1 & 1) == 0;
+                    {
+                        static u64 sRoomT0;
+                        extern u64 gPortPerfRoomTicks;
+                        if (sInRoomDl) {
+                            sRoomT0 = svcGetSystemTick();
+                        } else if (sRoomT0 != 0) {
+                            gPortPerfRoomTicks += svcGetSystemTick() - sRoomT0;
+                            sRoomT0 = 0;
+                        }
+                    }
                 } else if ((cmd->words.w1 & 0xFFFFFF00u) == 0x3D5E3D00u) {
                     extern void gfx_citro3d_set_stereo_mode(int mode);
                     gfx_flush();
@@ -5012,6 +5268,7 @@ static void gfx_run_dl(Gfx* cmd) {
 
 static void gfx_sp_reset() {
     rsp.modelview_matrix_stack_size = 1;
+    sMPDirty = true;
     rsp.current_num_lights = 2;
     rsp.lights_changed = true;
 }
@@ -5161,6 +5418,22 @@ void gfx_run(Gfx *commands) {
     }
 #endif
     { extern void PortGfx_FrameReady(void); PortGfx_FrameReady(); }
+#ifdef PORT_ICONGEN
+    {
+        static int sMeshFrames;
+        if (sMeshFrameHasTris && ++sMeshFrames == 10) { /* the preview's 10th frame: every texture imported */
+            mesh_write();
+        }
+    }
+    if (sMeshDbgVtx || sMeshDbgTri || sMeshDbgTri1) {
+        extern void PortDbgX(const char*, unsigned);
+        PortDbgX("[mesh] frame: vertex loads", (unsigned)sMeshDbgVtx);
+        PortDbgX("[mesh] frame: tri1 calls", (unsigned)sMeshDbgTri1);
+        PortDbgX("[mesh] frame: triangles emitted", (unsigned)sMeshDbgTri);
+        sMeshDbgVtx = sMeshDbgTri = sMeshDbgTri1 = 0;
+    }
+    sMeshN = 0, sMeshFrameHasTris = 0;
+#endif
     double t1 = gfx_wapi->get_time();
     //printf("Process %f %f\n", t1, t1 - t0);
 #ifdef __3DS__

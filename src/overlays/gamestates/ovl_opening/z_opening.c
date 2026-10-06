@@ -35,6 +35,9 @@ void TitleSetup_SetupTitleScreen(TitleSetupState* this) {
     gSaveContext.save.linkAge = LINK_AGE_CHILD;
     gSaveContext.save.entranceIndex = PORT_START_ENTRANCE;
 #endif
+#ifdef PORT_START_DAYTIME
+    gSaveContext.save.dayTime = PORT_START_DAYTIME; // e.g. 0x8000 = noon (tools/make_showcase.py)
+#endif
 #ifdef PORT_START_AGE
     gSaveContext.save.linkAge = PORT_START_AGE; // tools/statediff scene tour: LINK_AGE_ADULT (0) / CHILD (1)
 #endif

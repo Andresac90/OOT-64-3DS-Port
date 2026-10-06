@@ -17,9 +17,10 @@
 ; texture's pool scale and the flipped t folded together on the CPU)
 .fvec uvc0
 .fvec uvc1
-; lit: x = 1 when G_LIGHTING (the vertex bytes are a normal), else 0
+; lit: x = 1 when G_LIGHTING (the vertex bytes are a normal), else 0; y = 1: camera-space lighting (ldir in camera
+; space; z = -1 / (aspect * P[0][0]), w = 1 / P[1][1] recover the camera's x and y from the palette rows)
 .fvec lit
-; lamb: ambient colour (0..1); ldir: model-space light directions / 127; lcol: their colours (0..1); unused = 0
+; lamb: ambient colour (0..1); ldir: light directions / 127 (model or camera space, lit.y); lcol: their colours (0..1)
 .fvec lamb
 .fvec ldir[4]
 .fvec lcol[4]
@@ -48,8 +49,10 @@
 	dp4 r2.y, pal[a0.x+1], r0
 	dp4 r2.z, pal[a0.x+2], r0
 	dp4 r2.w, pal[a0.x+3], r0
-	; the N64 (NoN microcode) does not clip at the near plane: a vertex in front of it gets z on the plane
-	min r2.z, rc1.z, r2.z
+	; the N64 (NoN microcode) does not clip at the near plane: a vertex in front of it gets z on the plane.
+	; remap.z = that limit: 0 (N64), or huge (the Old 3DS speed rules: the PICA clips at the near plane itself)
+	mov r15, remap
+	min r2.z, r15.z, r2.z
 
 	; unlit: the colour bytes / 255
 	mov r6, fogp
@@ -61,6 +64,26 @@
 	sge r4.xyz, incn.xyz, r7.yyy
 	mul r4.xyz, r4.xyz, r7.zzz
 	add r4.xyz, incn.xyz, -r4.xyz
+	; PORT PERF (2026-10-05): camera-space lighting (lit.y = 1). The normal goes to camera space through the vertex's
+	; palette entry - its rows are y', -x', z', w of P x MV: x_cam = row1 . n * lit.z, y_cam = row0 . n * lit.w,
+	; z_cam = -(row3 . n) - divided by the matrix's scale |row3.xyz|, which is the N64's normalisation of the
+	; model-space light direction (uniform scale; gfx_pc.c keeps other matrices on model-space light sets). One light
+	; set then serves every limb of a model (the N64's per-matrix light transform split draws and lit limb seams on the
+	; CPU).
+	mov r14, lit
+	dp3 r13.x, pal[a0.x+1], r4
+	dp3 r13.y, pal[a0.x], r4
+	dp3 r13.z, pal[a0.x+3], r4
+	mul r13.x, r13.x, r14.z
+	mul r13.y, r13.y, r14.w
+	mov r12, pal[a0.x+3]
+	dp3 r12.x, r12, r12
+	rsq r12.x, r12.x
+	mul r13.xy, r13.xy, r12.xx
+	mul r13.z, -r13.z, r12.x
+	add r13.xyz, r13.xyz, -r4.xyz
+	mul r13.xyz, r14.yyy, r13.xyz
+	add r4.xyz, r4.xyz, r13.xyz
 	dp3 r5.x, ldir[0], r4
 	dp3 r5.y, ldir[1], r4
 	dp3 r5.z, ldir[2], r4

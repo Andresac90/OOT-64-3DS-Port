@@ -1,7 +1,7 @@
 # Release 1.0: what "complete" means
 
 Each item has a way to verify it; "hardware" means a real console, the rest runs in the emulator (`tools/`).
-Status as of 2026-10-05.
+Status as of 2026-10-06.
 
 **Decision (2026-10-05):** 1.0 is released when the build is technically ready - every item that a tool or a
 short hardware session can check is done. The items that need long play on hardware (marked *after 1.0*) are
@@ -45,8 +45,8 @@ covered by playing the story after the release; problems found there go into 1.0
 |---|---|---|---|
 | [x] | New 3DS: full game speed (20 updates/s, like the N64) | hardware, `prof=1` | yes |
 | [x] | New 3DS: 60 frames shown per second in most scenes | hardware | v55 (2026-10-05): 59.3-59.8 frames shown per second in every report, 2D and 3D (whole reports in 3D included); the render thread, the CPU/GPU overlap, the raw vertex path, and no system-core reservation on the New 3DS (an 80% reservation in v54 had slowed every system-service request) |
-| [x] | Old 3DS: full game speed | hardware, `perf_ab=1`, then the Old 3DS layout (`settings_b.txt`, hold L at start) | Old 3DS mode on a New 3DS (268 MHz, no L2, the Old 3DS thread and audio layout), hardware v57: 20 updates/s with the mixer at 55% of the system core (30%: 13-19 updates/s and crackling; 80%: same speed, slower system services); 12-13 frames shown in Kokiri Forest, more in smaller scenes. On a real Old 3DS: *after 1.0* (no Old 3DS available) |
-| [ ] | Old 3DS: 60 frames shown per second | hardware | **1.0 goal (decision 2026-10-05).** 2026-10-05: in-between frames are copies of the first frame's GPU commands (`replay_copy`), so interiors reach ~45 at Old 3DS speed (emulator), but big scenes stay ~10 (Kokiri Forest: ~71 ms of CPU per drawn frame against a 50 ms update). Earlier status: at Old 3DS speed a drawn frame costs 25-130 ms of CPU depending on the scene (the CPU translating N64 display lists; reading data the CPU has not touched yet costs 50-190 cycles per 32-byte line there, hardware memory probe). The game keeps its full speed and shows 15-50 frames per second in 2D; 60 needs static geometry converted once and reused between frames - the next step |
+| [x] | Old 3DS: full game speed | hardware, `perf_ab=1`, then the Old 3DS layout (`settings_b.txt`, hold L at start) | Old 3DS mode on a New 3DS (268 MHz, no L2, the Old 3DS thread and audio layout), hardware v57: 20 updates/s with the mixer at 55% of the system core (30%: 13-19 updates/s and crackling; 80%: same speed, slower system services); 12-13 frames shown in Kokiri Forest (v57), 15.7-17 with the speed rules (v60), more in smaller scenes. On a real Old 3DS: *after 1.0* (no Old 3DS available) |
+| after 1.0 | Old 3DS: 60 frames shown per second | hardware | **Moved after 1.0 (decision 2026-10-05: release with the New 3DS at 60 and keep working on the Old 3DS).** Since then: speed rules (hardware v60: Kokiri Forest 15.7-17 vs 12.5-13.3 frames shown), camera-space lighting (Link's drawing -20%). 2026-10-05: in-between frames are copies of the first frame's GPU commands (`replay_copy`), so interiors reach ~45 at Old 3DS speed (emulator), but big scenes stay ~10 (Kokiri Forest: ~71 ms of CPU per drawn frame against a 50 ms update). Earlier status: at Old 3DS speed a drawn frame costs 25-130 ms of CPU depending on the scene (the CPU translating N64 display lists; reading data the CPU has not touched yet costs 50-190 cycles per 32-byte line there, hardware memory probe). The game keeps its full speed and shows 15-50 frames per second in 2D; 60 needs static geometry converted once and reused between frames - the next step |
 | [x] | Default vertex path chosen (CPU or GPU) | hardware `gpu_ab=1` + `fbdiff` | GPU (2026-10-02): same accuracy, faster on both consoles (v27) |
 
 ## E. User experience
@@ -64,8 +64,8 @@ covered by playing the story after the release; problems found there go into 1.0
 | | Item | Status |
 |---|---|---|
 | [x] | README, build guide, third-party notices | done |
-| [x] | Build tested from a fresh clone on macOS and Linux | 2026-10-05, exactly the files a clone gets plus the ROM, the documented steps: macOS builds and boots (Azahar boot test); Linux (Debian 12 in devkitPro's devkitARM Docker image, makerom 0.18.4) builds the same `.3ds` and `.cia`. Found and documented: the asset tools need Python 3.10+ (macOS's own is 3.9), `makerom` is not part of devkitPro (Project_CTR 0.19.0's Linux build needs glibc 2.38; 0.18.4 runs on Debian 12), and step 4 needs `COMPARE=0` (the N64 ROM it also builds differs from retail) |
-| [ ] | `CHANGELOG.md` complete for 1.0 | the section is "Unreleased (toward 1.0)" with highlights until the Old 3DS item is done; then it becomes 1.0.0 and `port/VERSION` (the version of source downloads without git, `1.0-dev` now) 1.0.0; the CIA's title version is 1.0.0 already. Release text: [RELEASE_NOTES_1.0.md](RELEASE_NOTES_1.0.md) |
+| [x] | Build tested from a fresh clone on macOS and Linux | 2026-10-05, re-run 2026-10-06 for the release tree (macOS: setup, N64 ROM, `.3ds`, `.cia`, all exit 0), exactly the files a clone gets plus the ROM, the documented steps: macOS builds and boots (Azahar boot test); Linux (Debian 12 in devkitPro's devkitARM Docker image, makerom 0.18.4) builds the same `.3ds` and `.cia`. Found and documented: the asset tools need Python 3.10+ (macOS's own is 3.9), `makerom` is not part of devkitPro (Project_CTR 0.19.0's Linux build needs glibc 2.38; 0.18.4 runs on Debian 12), and step 4 needs `COMPARE=0` (the N64 ROM it also builds differs from retail) |
+| [x] | `CHANGELOG.md` complete for 1.0 | section 1.0.0 (2026-10-06) with highlights; `port/VERSION` 1.0.0 (the version of source downloads without git); the CIA's title version 1.0.0. Release text: [RELEASE_NOTES_1.0.md](RELEASE_NOTES_1.0.md) |
 | [ ] | GitHub Release `v1.0.0`: notes and the source download only, no game builds | at release |
 
 Performance research and plan: [3ds-native-speed-research.md](3ds-native-speed-research.md).

@@ -1,11 +1,11 @@
-# Native Ocarina of Time (N64) 3DS Port
+# The Legend of Zelda: Ocarina of Time N64 3DS Port
 
 <p align="center">
   <img src="docs/images/showcase.png" width="460"
        alt="Kokiri Forest on the top screen; the bottom screen shows the touch panel with the live minimap, hearts, item buttons, Ocarina and Boots">
 </p>
 
-An unofficial, fan-made **native** Nintendo 3DS port of The Legend of Zelda: Ocarina of Time (N64), built on the
+A fan-made **native** Nintendo 3DS port of The Legend of Zelda: Ocarina of Time (N64), built on the
 [zeldaret/oot](https://github.com/zeldaret/oot) decompilation. The game's own code runs natively on the 3DS
 CPU; a new renderer, audio backend and dual-screen interface replace the N64 hardware.
 
@@ -13,6 +13,12 @@ CPU; a new renderer, audio backend and dual-screen interface replace the N64 har
 > obtained copy of the N64 game (NTSC-U 1.0). No prebuilt game binaries are distributed; see [Legal](#legal).
 
 This project is not affiliated with, endorsed by, or sponsored by Nintendo.
+
+<p align="center">
+  <img src="docs/images/hyrule_field.png" width="250" alt="Hyrule Field">
+  <img src="docs/images/kakariko.png" width="250" alt="Kakariko Village">
+  <img src="docs/images/deku_tree.png" width="250" alt="Inside the Deku Tree">
+</p>
 
 ## Features
 
@@ -31,8 +37,8 @@ This project is not affiliated with, endorsed by, or sponsored by Nintendo.
 - **Accuracy work:** the renderer is compared frame by frame against the N64 running the same inputs
   (tools in `tools/statediff`), and the audio is compared against the N64's output.
 - Saves to the SD card (`sdmc:/3ds/oot/save.bin`).
-- A stereoscopic HOME Menu banner: the sky behind the screen, the title at it, the figure in front (move the 3D
-  slider while the game is selected).
+- A stereoscopic HOME Menu banner: the sky behind the screen, the title at it, a figure in front (move the 3D
+  slider while the game is selected) - Link's own 3D model when you build it from your game data (see Building).
 
 ## Status
 
@@ -43,7 +49,7 @@ with the N64 running the same inputs). A full playthrough on hardware is still i
 | | New 3DS | Old 3DS |
 |---|---|---|
 | Game speed (N64 = 20 updates/s) | full speed | full speed |
-| Frames shown per second | 60 in 2D and 3D (measured on hardware) | depends on the scene: about 10–13 in the biggest (Kokiri Forest), around 45 in interiors such as Link's house, fewer in 3D (measured on a New 3DS running at Old 3DS speed with the Old 3DS's thread layout, and in the emulator at Old 3DS speed) |
+| Frames shown per second | 60 in 2D and 3D (measured on hardware) | depends on the scene: about 15–17 in the biggest (Kokiri Forest), around 45 in interiors such as Link's house, fewer in 3D (measured on a New 3DS running at Old 3DS speed with the Old 3DS's thread layout, and in the emulator at Old 3DS speed); 60 everywhere is still being worked on |
 | Stereoscopic 3D | yes | yes |
 
 Measurements and the work behind them: [docs/3ds-60fps-plan.md](docs/3ds-60fps-plan.md).
@@ -86,8 +92,9 @@ make -f Makefile.3ds cci             # -> build/3ds/oot.3ds (for the Azahar emul
 Step 3 also creates `baseroms/ntsc-1.0/baserom-decompressed.z64`, which the game reads at run time.
 
 **Optional, Link and Navi on the HOME Menu, from your game data** (needs the Azahar emulator and Python 3.10+
-with Pillow and gltflib): `python3 tools/make_link_banner.py` renders Link's 3D model and puts him in front of the
-screen in the stereoscopic top-screen banner (`port/banner_local.bnr`; also needs
+with Pillow, numpy and gltflib): `python3 tools/make_link_banner.py` captures Link's 3D model as the game draws it
+(his triangles, textures and lighting, from the pause menu's preview) and stands it in front of the screen in the
+stereoscopic top-screen banner (`port/banner_local.bnr`; `--picture` uses a flat picture of him instead; also needs
 [bannertool](https://github.com/diasurgical/bannertool) and [pycgfx](https://github.com/skyfloogle/pycgfx), cloned
 into `tools/pycgfx/`), and `python3 tools/make_navi_icon.py` renders Navi into the icon (`port/icon_local.png`). Run them before step 5; later builds use them. These files
 are made from Nintendo's models, so they are ignored by git and must never be shared; without them the build uses
@@ -109,7 +116,7 @@ Detailed notes, emulator testing and debugging tools: [docs/BUILDING_3DS.md](doc
    sdmc:/3ds/oot/baserom-decompressed.z64
    ```
 3. Make sure `sdmc:/3ds/dspfirm.cdc` exists (see Requirements).
-4. Launch *Ocarina of Time* from the HOME Menu.
+4. Launch *The Legend of Zelda: Ocarina of Time N64 3DS Port* from the HOME Menu.
 
 ## Controls
 
@@ -145,6 +152,7 @@ editing that file (one `name=value` per line):
 | `cstick` | 1 | New 3DS C-Stick: 1 = camera, 0 = the four C buttons |
 | `aa` | 0 | 1 = anti-aliasing: smoother edges, but more than twice the GPU work (the frame rate drops well below 60) |
 | `audio_share` | 55 | Old 3DS: percent of the system core for the audio mixer (less: crackling; more: slower system services) |
+| `speed_rules` | 1 | Old 3DS speed rules: every triangle on the GPU's fast path, no N64 screen-linear shading splits, the GPU clips at the near plane (1 = while frames are skipped, i.e. on an Old 3DS; 2 = always; 0 = never: the N64-exact rules) |
 
 ### Diagnostics
 
@@ -159,10 +167,10 @@ For bug reports and measurements only; the defaults are the fastest and most acc
 | `raw_ratio` | 30 | geometry whose far side is more than this / 10 times farther than its near side stays on the CPU path, which reproduces the N64's screen-linear shading |
 | `fastswitch` | 1 | 0 = switch between the two vertex programs through citro3d (for graphics bug reports) |
 | `replay_copy` | 1 | 1 = 60 fps in-between frames are copies of the first frame's GPU commands with the matrices patched; 0 = each replays the draw log (`replay_copy_check=1` compares both) |
-| `raw_relax` | 0 | Old 3DS: 1 = geometry near the camera stays on the raw vertex path (only triangles reaching behind the eye are clipped on the CPU): about 8% less drawing time, less N64-accurate shading |
+| `audio_margin` | automatic | samples kept queued for the DSP beyond the current frame (Old 3DS: 512, against crackling) |
 | `gpu_vtx` | 1 | vertex processing on the GPU; 0 = on the CPU |
 | `o3ds_sim`, `o3ds_layout` | 0 | on a New 3DS: 1 = Old 3DS speed (268 MHz, no L2 cache) / the Old 3DS thread layout |
-| `perf_ab`, `raw_vtx_ab`, `render_thread_ab`, `audio_share_ab`, ... | 0 | 1 = alternate one option during a session to compare both in `boot.log` |
+| `perf_ab`, `raw_vtx_ab`, `render_thread_ab`, `audio_share_ab`, `replay_copy_ab`, `speed_rules_ab`, ... | 0 | 1 = alternate one option during a session to compare both in `boot.log` |
 
 Holding L while the game starts reads `settings_b.txt` instead (when it exists): a second set of settings for tests.
 

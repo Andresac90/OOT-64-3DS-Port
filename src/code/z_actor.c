@@ -2650,6 +2650,11 @@ void Actor_Draw(PlayState* play, Actor* actor) {
         gPortInterpPush(POLY_OPA_DISP++, (u32)(uintptr_t)actor ^ ((u32)actor->id << 20), f);
         gPortInterpPush(POLY_XLU_DISP++, (u32)(uintptr_t)actor ^ ((u32)actor->id << 20), f);
     }
+#ifdef PORT_ACTOR_PROF
+    /* measurement builds: the renderer times each actor type's drawing (gfx_pc.c, 0x3D5D tags) */
+    gDPNoOpTag(POLY_OPA_DISP++, 0x3D5D0000 | (u16)actor->id);
+    gDPNoOpTag(POLY_XLU_DISP++, 0x3D5D0000 | (u16)actor->id);
+#endif
 #endif
     actor->draw(actor, play);
 
@@ -2665,6 +2670,10 @@ void Actor_Draw(PlayState* play, Actor* actor) {
         actor->shape.shadowDraw(actor, lights, play);
     }
 #ifdef __3DS__
+#ifdef PORT_ACTOR_PROF
+    gDPNoOpTag(POLY_OPA_DISP++, 0x3D5DFFFF);
+    gDPNoOpTag(POLY_XLU_DISP++, 0x3D5DFFFF);
+#endif
     gPortInterpPop(POLY_OPA_DISP++);
     gPortInterpPop(POLY_XLU_DISP++);
 #endif
