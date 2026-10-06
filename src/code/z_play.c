@@ -1393,7 +1393,9 @@ void Play_Draw(PlayState* this) {
         gPortStereoFocusW = (player != NULL) ? player->actor.projectedW : 0.0f;
         /* the pause menu is a menu like the file select: flat panels over a half-depth background */
         if (IS_PAUSED(&this->pauseCtx)) {
+            extern int gPortMenuInput;
             gPortStereoFlatScene = 1;
+            gPortMenuInput = 2; /* PORT: the D-pad navigates like the stick (3ds_main.c) */
         }
     }
     {

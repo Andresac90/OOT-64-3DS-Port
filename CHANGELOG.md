@@ -4,6 +4,10 @@ No game builds are published; each version is a source release. See the [README]
 
 ## Unreleased
 
+### Added
+- Menus: the D-pad moves the cursor like the stick on the file select and the pause screens (it stays the C
+  buttons in gameplay, dialogue and ocarina playing).
+
 ### Fixed
 - Stereoscopic 3D: objects in the middle of the picture could come far out of the screen at full 3D (the Deku Tree
   cutscene's Navi, right at the camera: uncomfortable on hardware). The nearest on-screen 3D surface now comes out at

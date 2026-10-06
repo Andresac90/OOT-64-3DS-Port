@@ -1063,6 +1063,7 @@ static unsigned short Port3ds_TouchUiPoll(void) {
 
 
 s8 gPortCamX, gPortCamY;     /* C-stick camera input for this update (z_camera.c) */
+int gPortMenuInput;          /* > 0 while a menu is up (set each update by the game: file select, pause) */
 static void Port3ds_PollInput(void) {
     hidScanInput();
     u32 k = hidKeysHeld();
@@ -1083,10 +1084,17 @@ static void Port3ds_PollInput(void) {
     if (k & KEY_R)      b |= BTN_R_;
     if (k & KEY_ZL)     b |= BTN_CDOWN_;
     /* ZR: the BOOTS pad (Port3ds_TouchUiPoll); C-up stays on VIEW and D-pad up */
-    if (k & KEY_DUP)    b |= BTN_CUP_;
-    if (k & KEY_DDOWN)  b |= BTN_CDOWN_;
-    if (k & KEY_DLEFT)  b |= BTN_CLEFT_;
-    if (k & KEY_DRIGHT) b |= BTN_CRIGHT_;
+    /* PORT (2026-10-06, asked for): in menus (file select, the pause screens: gPortMenuInput, set by the game each
+     * update) the D-pad moves like the stick, as menus are navigated on the N64; it presses no C button there (C
+     * buttons equip items on the pause screens). In gameplay, dialogue and ocarina playing it stays the C buttons. */
+    int menu = gPortMenuInput > 0;
+    if (gPortMenuInput > 0) gPortMenuInput--;
+    if (!menu) {
+        if (k & KEY_DUP)    b |= BTN_CUP_;
+        if (k & KEY_DDOWN)  b |= BTN_CDOWN_;
+        if (k & KEY_DLEFT)  b |= BTN_CLEFT_;
+        if (k & KEY_DRIGHT) b |= BTN_CRIGHT_;
+    }
     /* C-stick (New 3DS): turns the camera (z_camera.c Camera_Normal1) - PORT (2026-10-03), asked for on
      * hardware; settings cstick=0 makes it the four C buttons again (they are on Y/X/ZL/ZR/D-pad too) */
     gPortCamX = gPortCamY = 0;
@@ -1114,6 +1122,12 @@ static void Port3ds_PollInput(void) {
     /* circle pad range ~ +-156; scale to N64 +-80 */
     s3dsStickX = (signed char)(cp.dx * 80 / 156);
     s3dsStickY = (signed char)(cp.dy * 80 / 156);
+    if (menu) { /* the D-pad as a full stick tilt (the circle pad still works) */
+        if (k & KEY_DLEFT)  s3dsStickX = -80;
+        if (k & KEY_DRIGHT) s3dsStickX = 80;
+        if (k & KEY_DUP)    s3dsStickY = 80;
+        if (k & KEY_DDOWN)  s3dsStickY = -80;
+    }
     s3dsButtons = b;
 }
 

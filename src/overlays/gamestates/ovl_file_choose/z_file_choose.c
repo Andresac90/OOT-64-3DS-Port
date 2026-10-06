@@ -2048,7 +2048,9 @@ void FileSelect_Main(GameState* thisx) {
          * flat screen-depth layer, the sky behind them at half depth (gfx_citro3d.c). Automatic
          * convergence on its geometry put the menus at mixed depths (hardware: "hurts the eye"). */
         extern int gPortStereoFlatScene;
+        extern int gPortMenuInput;
         gPortStereoFlatScene = 1;
+        gPortMenuInput = 2; /* PORT: the D-pad navigates like the stick (3ds_main.c) */
     }
 #endif
 
