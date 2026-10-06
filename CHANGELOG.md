@@ -9,7 +9,8 @@ No game builds are published; each version is a source release. See the [README]
   stereoscopic 3D banner (a CGFX model made with pycgfx). Fixes tried on hardware - index lists for every mesh, the
   banner animation `COMMON`, the SMDH "extended banner" flag - did not stop it. The banner is now a flat picture
   in bannertool's standard banner, the format shown fine on hardware before: the original artwork for everyone
-  (`tools/make_banner3d.py --flat`), Link on white from your own game data (`tools/make_link_banner.py`). The
+  (`tools/make_banner3d.py --flat`), Link on a transparent background from your own game data (`tools/make_link_banner.py`;
+  `--white`: on white). The
   stereoscopic banner stays available as an experiment (`make_banner3d.py` without `--flat`,
   `make_link_banner.py --stereo`).
 - Touch screen: the rupee and key counts sat on the top row of their icons; the number is now centered on the

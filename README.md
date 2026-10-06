@@ -139,7 +139,8 @@ Step 3 also creates `baseroms/ntsc-1.0/baserom-decompressed.z64`, which the game
 
 **Optional, Link and Navi on the HOME Menu, from your game data** (needs the Azahar emulator and Python 3.10+
 with Pillow): `python3 tools/make_link_banner.py` captures Link as the game draws him (the pause menu's preview of
-his 3D model) and makes the HOME Menu banner from it: Link on white (`port/banner_local.bnr`; also needs
+his 3D model) and makes the HOME Menu banner from it: Link on a transparent background (`--white`: on white;
+`port/banner_local.bnr`; also needs
 [bannertool](https://github.com/diasurgical/bannertool)), and `python3 tools/make_navi_icon.py` renders Navi into the icon (`port/icon_local.png`). Run them before step 5; later builds use them. These files
 are made from Nintendo's models, so they are ignored by git and must never be shared; without them the build uses
 the original artwork (a drawn fairy and an ocarina).

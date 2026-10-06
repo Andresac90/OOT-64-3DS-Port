@@ -7,18 +7,18 @@ port/banner_local_mesh.bin (and with --icon port/icon_local.png), all ignored by
 exist, else the original artwork port/banner.bnr and port/icon.png (tools/make_banner.sh, tools/make_icon.py).
 
 How: builds the port with GAME_EXTRA=PORT_EXTRA=-DPORT_ICONGEN (boots straight into Link's house and opens the pause
-menu). The Equipment page draws Link's preview (at 2x, 128x224); while it does, the renderer records every triangle
-it draws there - world positions, texture coordinates, the N64's lit vertex colours, the material (colour combiner,
-primitive and environment colours, texture) - and the decoded textures, to sdmc:/3ds/oot/link_mesh.bin, and the
-picture to link_icon.bin. tools/make_banner3d.py --model bakes each material's combiner into its texture and stands
-the model in front of the screen in the stereoscopic banner (the sky behind, the title at the screen); --picture uses
-the flat picture instead. The icon is Link's head and shoulders from the picture on the original icon's night sky.
+menu). The Equipment page draws Link's preview (at 2x, 128x224) to link_icon.bin, and the renderer records the
+triangles it draws there to link_mesh.bin. The banner is the picture on a transparent background (--white: on white)
+in bannertool's standard picture banner, the format the real HOME Menu shows fine. --stereo makes the experimental
+stereoscopic banner instead (tools/make_banner3d.py: his 3D model in front of the screen, or with --picture the
+picture) - it still crashes the real HOME Menu (2026-10-06). The icon is Link's head and shoulders from the picture
+on the original icon's night sky.
 
-usage: make_link_banner.py [--age adult|child] [--icon] [--picture] [--raw link_icon.bin [--mesh link_mesh.bin]]
+usage: make_link_banner.py [--age adult|child] [--icon] [--white] [--stereo [--picture]] [--raw link_icon.bin [--mesh link_mesh.bin]]
        (--raw: only redo the files from earlier captures)
-Needs: an extracted ROM (as for any build), Azahar, Python 3.10+ with Pillow, numpy and gltflib, bannertool
-(https://github.com/diasurgical/bannertool) on PATH, in $BANNERTOOL or in $DEVKITPRO/tools/bin, and pycgfx
-(https://github.com/skyfloogle/pycgfx) in tools/pycgfx/ or $PYCGFX.
+Needs: an extracted ROM (as for any build), Azahar, Python 3.10+ with Pillow, bannertool
+(https://github.com/diasurgical/bannertool) on PATH, in $BANNERTOOL or in $DEVKITPRO/tools/bin; for --stereo also
+numpy, gltflib and pycgfx (https://github.com/skyfloogle/pycgfx) in tools/pycgfx/ or $PYCGFX.
 """
 import argparse, os, shutil, subprocess, sys, tempfile, time
 
@@ -128,8 +128,9 @@ def bannertool():
     return None
 
 
-def make_banner(link, out, mesh=None, stereo=False):
-    """the HOME Menu banner: Link's preview picture on white, as a flat picture banner (bannertool's standard
+def make_banner(link, out, mesh=None, stereo=False, white=False):
+    """the HOME Menu banner: Link's preview picture on a transparent background (white=True: on white), as a flat
+    picture banner (bannertool's standard
     template, shown fine on hardware). stereo=True: the experimental stereoscopic CGFX banner (tools/make_banner3d.py,
     his 3D model when mesh is given) - it still crashes the real HOME Menu (2026-10-06), so it is not the default.
     False: no bannertool."""
@@ -150,9 +151,9 @@ def make_banner(link, out, mesh=None, stereo=False):
         fig = link.crop(link.getbbox())
         scale = min(504 / fig.width, 244 / fig.height)  # composed at 512x256, 6 px margin, shown at 256x128
         fig = fig.resize((int(fig.width * scale), int(fig.height * scale)), Image.LANCZOS)
-        pic = Image.new("RGBA", (512, 256), (255, 255, 255, 255))
+        pic = Image.new("RGBA", (512, 256), (255, 255, 255, 255 if white else 0))  # (the template's texture is RGBA4)
         pic.alpha_composite(fig, ((512 - fig.width) // 2, (256 - fig.height) // 2))
-        pic = pic.convert("RGB").resize((256, 128), Image.LANCZOS)
+        pic = pic.resize((256, 128), Image.LANCZOS)
         png, wav = os.path.join(tmp, "banner.png"), os.path.join(tmp, "banner.wav")
         pic.save(png)
         pic.save(os.path.splitext(out)[0] + "_preview.png")
@@ -168,6 +169,7 @@ def main():
     ap.add_argument("--age", choices=("adult", "child"), default="adult")
     ap.add_argument("--raw", help="reuse a link_icon.bin instead of running the game")
     ap.add_argument("--mesh", help="reuse a link_mesh.bin (default with --raw: port/banner_local_mesh.bin if present)")
+    ap.add_argument("--white", action="store_true", help="Link on white instead of a transparent background")
     ap.add_argument("--stereo", action="store_true",
                     help="experimental stereoscopic 3D banner (crashes the real HOME Menu, 2026-10-06)")
     ap.add_argument("--picture", action="store_true", help="with --stereo: Link as a picture instead of his 3D model")
@@ -186,7 +188,7 @@ def main():
     if mesh is not None and not os.path.exists(mesh):
         print("no model capture (%s): Link as a picture" % mesh)
         mesh = None
-    if make_banner(link, args.banner_out, mesh, args.stereo):
+    if make_banner(link, args.banner_out, mesh, args.stereo, args.white):
         print("wrote %s" % args.banner_out)
     else:
         print("no bannertool found: banner not made (the build keeps port/banner.bnr)")
