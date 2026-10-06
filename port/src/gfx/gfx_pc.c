@@ -2423,8 +2423,20 @@ static const float sStereoProbe[STEREO_PROBES][2] = {
     { 0.97f, 0.5f },
 };
 float gPortStereoProbeW[STEREO_PROBES]; /* nearest w per probe this frame (0 = nothing), gfx_3ds.c resets */
+/* PORT (2026-10-06): the nearest on-screen vertex of any 3D surface this frame (0 = nothing), gfx_3ds.c resets.
+ * The border probes keep the frame edges at the screen; nothing limited what pops out in the MIDDLE of the
+ * picture: the Deku Tree cutscene puts Navi right at the lens, far in front of the screen plane - painful at full
+ * 3D (hardware photo). gfx_3ds.c caps the pop-out of this nearest surface. */
+float gPortStereoNearW;
 static int sStereoDrawMode; /* G_NOOP stereo tag: only mode 0 (3D by distance) is measured */
 static void stereo_probe_tri(const PVtx* t[3]) {
+    for (int i = 0; i < 3; i++) {
+        float w = t[i]->w;
+        if (w > 1.0f && t[i]->x >= -w && t[i]->x <= w && t[i]->y >= -w && t[i]->y <= w &&
+            (gPortStereoNearW == 0.0f || w < gPortStereoNearW)) {
+            gPortStereoNearW = w;
+        }
+    }
     for (int k = 0; k < STEREO_PROBES; k++) {
         float X = sStereoProbe[k][0], Y = sStereoProbe[k][1];
         float u0 = t[0]->x - X * t[0]->w, u1 = t[1]->x - X * t[1]->w, u2 = t[2]->x - X * t[2]->w;

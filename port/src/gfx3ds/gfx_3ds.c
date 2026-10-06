@@ -254,6 +254,20 @@ static void gfx_3ds_update_stereo(void) {
             extern int gPortPrerenderedFrame;
             if (gPortPrerenderedFrame) target *= 0.5f;
         }
+        {
+            /* PORT (2026-10-06): pop-out limit. A surface at w in front of the screen plane c has a crossed
+             * disparity of shift * (c - w) / w, shift being the disparity at infinity (~16 px at the full slider).
+             * Keep the nearest on-screen 3D surface (gfx_pc.c gPortStereoNearW) within STEREO_POPOUT_MAX of it:
+             * c <= w * (1 + max). Hardware: the Deku Tree cutscene's Navi, at the lens, popped out painfully at
+             * full 3D; the depth budget for comfortable viewing is usually split with only a small part in front of
+             * the screen (docs/3ds-stereo-3d.md). */
+            #define STEREO_POPOUT_MAX 0.25f
+            extern float gPortStereoNearW;
+            float nearW = gPortStereoNearW;
+            gPortStereoNearW = 0.0f;
+            if (nearW > 0.0f && nearW * (1.0f + STEREO_POPOUT_MAX) < target) target = nearW * (1.0f + STEREO_POPOUT_MAX);
+            if (target < 4.0f) target = 4.0f;
+        }
         /* asymmetric: pull the screen plane nearer fast (border geometry must never pop out), let it
          * recede slowly (no depth "breathing" when the border estimate jumps between frames) */
         gPortStereoConv += (target - gPortStereoConv) * (target < gPortStereoConv ? 0.3f : 0.04f);

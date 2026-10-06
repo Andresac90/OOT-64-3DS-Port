@@ -5,6 +5,10 @@ No game builds are published; each version is a source release. See the [README]
 ## Unreleased
 
 ### Fixed
+- Stereoscopic 3D: objects in the middle of the picture could come far out of the screen at full 3D (the Deku Tree
+  cutscene's Navi, right at the camera: uncomfortable on hardware). The nearest on-screen 3D surface now comes out at
+  most a quarter of the depth at infinity (~4 px at the full slider); the screen plane moves nearer when it would
+  come out further. Frame-edge geometry and Link keep their existing rules.
 - The HOME Menu crashed (hardware, Luma crash dumps: a null-pointer read in the HOME Menu) when it showed the
   stereoscopic 3D banner (a CGFX model made with pycgfx). Fixes tried on hardware - index lists for every mesh, the
   banner animation `COMMON`, the SMDH "extended banner" flag - did not stop it. The banner is now a flat picture
