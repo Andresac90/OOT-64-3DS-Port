@@ -37,8 +37,8 @@ This project is not affiliated with, endorsed by, or sponsored by Nintendo.
 - **Accuracy work:** the renderer is compared frame by frame against the N64 running the same inputs
   (tools in `tools/statediff`), and the audio is compared against the N64's output.
 - Saves to the SD card (`sdmc:/3ds/oot/save.bin`).
-- A stereoscopic HOME Menu banner: the sky behind the screen, the title at it, a figure in front (move the 3D
-  slider while the game is selected) - Link's own 3D model when you build it from your game data (see Building).
+- A HOME Menu banner: original artwork (the title and an ocarina under a night sky), or Link as the game draws
+  him when you build it from your game data (see Building).
 
 ## Status
 
@@ -138,11 +138,9 @@ make -f Makefile.3ds cci             # -> build/3ds/oot.3ds (for the Azahar emul
 Step 3 also creates `baseroms/ntsc-1.0/baserom-decompressed.z64`, which the game reads at run time.
 
 **Optional, Link and Navi on the HOME Menu, from your game data** (needs the Azahar emulator and Python 3.10+
-with Pillow, numpy and gltflib): `python3 tools/make_link_banner.py` captures Link's 3D model as the game draws it
-(his triangles, textures and lighting, from the pause menu's preview) and stands it in front of the screen in the
-stereoscopic top-screen banner (`port/banner_local.bnr`; `--picture` uses a flat picture of him instead; also needs
-[bannertool](https://github.com/diasurgical/bannertool) and [pycgfx](https://github.com/skyfloogle/pycgfx), cloned
-into `tools/pycgfx/`), and `python3 tools/make_navi_icon.py` renders Navi into the icon (`port/icon_local.png`). Run them before step 5; later builds use them. These files
+with Pillow): `python3 tools/make_link_banner.py` captures Link as the game draws him (the pause menu's preview of
+his 3D model) and makes the HOME Menu banner from it: Link on white (`port/banner_local.bnr`; also needs
+[bannertool](https://github.com/diasurgical/bannertool)), and `python3 tools/make_navi_icon.py` renders Navi into the icon (`port/icon_local.png`). Run them before step 5; later builds use them. These files
 are made from Nintendo's models, so they are ignored by git and must never be shared; without them the build uses
 the original artwork (a drawn fairy and an ocarina).
 

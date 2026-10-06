@@ -333,9 +333,24 @@ def build_glb(path, layers, parts=()):
             material=len(materials) - 1)]))
         nodes.append(Node(name=name, mesh=len(meshes) - 1))
 
+    # a still animation (the first node stays where it is for one second, looped): pycgfx writes the skeletal
+    # animation "COMMON" only for a glTF with an animation, and the HOME Menu reads that animation through a null
+    # pointer when it is missing (hardware crash, 2026-10-06; pycgfx's own banners are all animated)
+    from gltflib import Animation, AnimationSampler, Channel, Target
+    vt = add_view(struct.pack("<2f", 0.0, 1.0))
+    accessors.append(Accessor(bufferView=vt, componentType=ComponentType.FLOAT.value, count=2,
+                              type=AccessorType.SCALAR.value, min=[0.0], max=[1.0]))
+    a_time = len(accessors) - 1
+    vv = add_view(struct.pack("<6f", *([0.0] * 6)))
+    accessors.append(Accessor(bufferView=vv, componentType=ComponentType.FLOAT.value, count=2,
+                              type=AccessorType.VEC3.value))
+    a_still = len(accessors) - 1
+    still = Animation(name="COMMON", samplers=[AnimationSampler(input=a_time, output=a_still, interpolation="LINEAR")],
+                      channels=[Channel(sampler=0, target=Target(node=0, path="translation"))])
+
     model = GLTFModel(asset=Asset(version="2.0"), scenes=[Scene(nodes=list(range(len(nodes))))], scene=0,
                       nodes=nodes, meshes=meshes, materials=materials, textures=textures, images=images,
-                      samplers=samplers,
+                      samplers=samplers, animations=[still],
                       buffers=[Buffer(byteLength=len(blob))], bufferViews=views, accessors=accessors)
     GLTF(model=model, resources=[GLBResource(bytes(blob))]).export(path)
 
@@ -375,6 +390,8 @@ def glb_to_cgfx(glb, out):
                 for prim in pset.primitives.data.contents:
                     if not prim.index_streams.data.contents:
                         sys.exit("CGFX shape %s has no index stream: the HOME Menu would crash on it" % shape.name)
+    if "COMMON" not in [a if isinstance(a, str) else a.name for a in cgfx.data.skeletal_animations]:
+        sys.exit("CGFX without the skeletal animation COMMON: the HOME Menu would crash on it")
     data = pycgfx.write(cgfx)
     if len(data) > 0x80000:
         sys.exit("CGFX too big for the HOME Menu: %d bytes (max 524288)" % len(data))
@@ -479,11 +496,36 @@ def main():
     ap.add_argument("--figure", help="PNG with a transparent background (default: the ocarina)")
     ap.add_argument("--preview", help="write a side-by-side stereo preview PNG")
     ap.add_argument("--model", help="a captured model (link_mesh.bin) in front of the screen instead of a picture")
+    ap.add_argument("--flat", action="store_true",
+                    help="the layers as one flat picture (bannertool's standard banner) - the default banner: the "
+                         "stereoscopic CGFX one still crashes the real HOME Menu (2026-10-06)")
     a = ap.parse_args()
     tool = bannertool()
     if tool is None:
         sys.exit("bannertool not found (PATH or $BANNERTOOL)")
     fig = Image.open(a.figure).convert("RGBA") if a.figure else draw_ocarina()
+    if a.flat:
+        flat = Image.new("RGBA", (400, 240), (0, 0, 0, 255))
+        for img, (x0, y0, x1, y1) in ((draw_sky(), SKY_PX), (draw_title(), TITLE_PX)):
+            img = img.convert("RGBA").resize((x1 - x0, y1 - y0), Image.LANCZOS)
+            flat.paste(img, (x0, y0), img)
+        f = fig.crop(fig.getbbox()) if fig.getbbox() else fig
+        x0, y0, x1, y1 = FIGURE_PX
+        s = min((x1 - x0) / f.width, (y1 - y0) / f.height)
+        f = f.resize((int(f.width * s), int(f.height * s)), Image.LANCZOS)
+        flat.alpha_composite(f, (x0 + (x1 - x0 - f.width) // 2, y0 + (y1 - y0 - f.height) // 2))
+        flat = flat.crop((0, 20, 400, 220)).convert("RGB").resize((256, 128), Image.LANCZOS)
+        with tempfile.TemporaryDirectory() as tmp:
+            png, wav = os.path.join(tmp, "banner.png"), os.path.join(tmp, "banner.wav")
+            flat.save(png)
+            chime(wav)
+            r = subprocess.run([tool, "makebanner", "-i", png, "-a", wav, "-o", a.out], capture_output=True, text=True)
+            if r.returncode != 0 or not os.path.exists(a.out):
+                sys.exit("bannertool failed:\n" + r.stdout + r.stderr)
+        if a.preview:
+            flat.save(a.preview)
+        print("%s: flat banner" % a.out)
+        return
     layers = [("sky", draw_sky(), SKY_PX, SKY_Z, "OPAQUE", 1.0),
               ("title", draw_title(), TITLE_PX, TITLE_Z, "BLEND", 1.0),
               ("figure", figure_texture(fig), FIGURE_PX, FIGURE_Z, "BLEND", 224 / 256)]

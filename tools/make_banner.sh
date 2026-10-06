@@ -8,5 +8,5 @@ set -e
 cd "$(dirname "$0")/.."
 PY=python3
 [ -x .venv/bin/python3 ] && PY=.venv/bin/python3
-"$PY" tools/make_banner3d.py port/banner.bnr --preview port/banner_preview.png
-echo "port/banner.bnr updated (preview: port/banner_preview.png, left and right eye)"
+"$PY" tools/make_banner3d.py port/banner.bnr --flat --preview port/banner_preview.png
+echo "port/banner.bnr updated (preview: port/banner_preview.png)"

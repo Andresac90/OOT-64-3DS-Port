@@ -20,8 +20,8 @@ A native port of *The Legend of Zelda: Ocarina of Time* (N64, NTSC-U 1.0) to the
 - Stereoscopic 3D with the 3D slider, a widescreen option, the C-Stick as camera (New 3DS).
 - A touch screen: C items, ocarina, boots, pause pages, minimap, HUD and screen
   options; the NAVI button pulses when Navi wants to talk.
-- Saves on the SD card, written atomically; the HOME menu and sleep work; a stereoscopic HOME Menu banner (with
-  Link's own 3D model when built from your game data: `tools/make_link_banner.py`).
+- Saves on the SD card, written atomically; the HOME menu and sleep work; a HOME Menu banner (with
+  Link when built from your game data: `tools/make_link_banner.py`).
 
 ## Known limitations
 

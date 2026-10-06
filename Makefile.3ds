@@ -219,8 +219,9 @@ $(BUILD)/$(TARGET).smdh: $(ICON_PNG)
 	@mkdir -p $(dir $@)
 	$(SMDHTOOL) --create "The Legend of Zelda: Ocarina of Time N64 3DS Port" "The Legend of Zelda: Ocarina of Time N64 3DS Port" "Fan project" $< $@
 
-# HOME Menu banner: port/banner_local.bnr when present (Link, tools/make_link_banner.py, never committed), else the
-# committed original artwork port/banner.bnr (tools/make_banner.sh; bannertool not needed to build)
+# HOME Menu banner (flat pictures: the stereoscopic 3D banner still crashes the real HOME Menu): port/banner_local.bnr
+# when present (Link, tools/make_link_banner.py, never committed), else the committed original artwork port/banner.bnr
+# (tools/make_banner.sh; bannertool not needed to build)
 BANNER := $(if $(wildcard port/banner_local.bnr),port/banner_local.bnr,port/banner.bnr)
 # Title version in the CIA (1.0.0): a new version makes FBI install it as an update and the HOME Menu re-read the
 # icon and banner (it keeps them cached per title version)

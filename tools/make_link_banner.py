@@ -128,19 +128,38 @@ def bannertool():
     return None
 
 
-def make_banner(link, out, mesh=None):
-    """the stereoscopic banner (tools/make_banner3d.py) with Link in front of the screen: his 3D model (mesh, the
-    game's own triangles) or the preview picture. False: no bannertool."""
+def make_banner(link, out, mesh=None, stereo=False):
+    """the HOME Menu banner: Link's preview picture on white, as a flat picture banner (bannertool's standard
+    template, shown fine on hardware). stereo=True: the experimental stereoscopic CGFX banner (tools/make_banner3d.py,
+    his 3D model when mesh is given) - it still crashes the real HOME Menu (2026-10-06), so it is not the default.
+    False: no bannertool."""
     tool = bannertool()
     if tool is None:
         return False
     with tempfile.TemporaryDirectory() as tmp:
-        link.save(os.path.join(tmp, "link.png"))
-        cmd = [sys.executable, os.path.join(REPO, "tools/make_banner3d.py"), out, "--figure",
-               os.path.join(tmp, "link.png"), "--preview", os.path.splitext(out)[0] + "_preview.png"]
-        if mesh is not None:
-            cmd += ["--model", mesh]
-        subprocess.run(cmd, check=True, env=dict(os.environ, BANNERTOOL=tool))
+        if stereo:
+            link.save(os.path.join(tmp, "link.png"))
+            cmd = [sys.executable, os.path.join(REPO, "tools/make_banner3d.py"), out, "--figure",
+                   os.path.join(tmp, "link.png"), "--preview", os.path.splitext(out)[0] + "_preview.png"]
+            if mesh is not None:
+                cmd += ["--model", mesh]
+            subprocess.run(cmd, check=True, env=dict(os.environ, BANNERTOOL=tool))
+            return True
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        import make_banner3d  # (its banner chime)
+        fig = link.crop(link.getbbox())
+        scale = min(504 / fig.width, 244 / fig.height)  # composed at 512x256, 6 px margin, shown at 256x128
+        fig = fig.resize((int(fig.width * scale), int(fig.height * scale)), Image.LANCZOS)
+        pic = Image.new("RGBA", (512, 256), (255, 255, 255, 255))
+        pic.alpha_composite(fig, ((512 - fig.width) // 2, (256 - fig.height) // 2))
+        pic = pic.convert("RGB").resize((256, 128), Image.LANCZOS)
+        png, wav = os.path.join(tmp, "banner.png"), os.path.join(tmp, "banner.wav")
+        pic.save(png)
+        pic.save(os.path.splitext(out)[0] + "_preview.png")
+        make_banner3d.chime(wav)
+        r = subprocess.run([tool, "makebanner", "-i", png, "-a", wav, "-o", out], capture_output=True, text=True)
+        if r.returncode != 0 or not os.path.exists(out):
+            sys.exit("bannertool failed:\n" + r.stdout + r.stderr)
     return True
 
 
@@ -149,7 +168,9 @@ def main():
     ap.add_argument("--age", choices=("adult", "child"), default="adult")
     ap.add_argument("--raw", help="reuse a link_icon.bin instead of running the game")
     ap.add_argument("--mesh", help="reuse a link_mesh.bin (default with --raw: port/banner_local_mesh.bin if present)")
-    ap.add_argument("--picture", action="store_true", help="Link as a flat picture instead of his 3D model")
+    ap.add_argument("--stereo", action="store_true",
+                    help="experimental stereoscopic 3D banner (crashes the real HOME Menu, 2026-10-06)")
+    ap.add_argument("--picture", action="store_true", help="with --stereo: Link as a picture instead of his 3D model")
     ap.add_argument("--icon", action="store_true", help="also make the HOME Menu icon (default: the original one)")
     ap.add_argument("--icon-out", default=os.path.join(REPO, "port/icon_local.png"))
     ap.add_argument("--banner-out", default=os.path.join(REPO, "port/banner_local.bnr"))
@@ -161,11 +182,11 @@ def main():
     if link.getbbox() is None:
         sys.exit("the preview is empty")
     link.save(os.path.splitext(args.banner_out)[0] + "_source.png")
-    mesh = None if args.picture else (args.mesh or os.path.join(REPO, "port", "banner_local_mesh.bin"))
+    mesh = None if args.picture or not args.stereo else (args.mesh or os.path.join(REPO, "port", "banner_local_mesh.bin"))
     if mesh is not None and not os.path.exists(mesh):
         print("no model capture (%s): Link as a picture" % mesh)
         mesh = None
-    if make_banner(link, args.banner_out, mesh):
+    if make_banner(link, args.banner_out, mesh, args.stereo):
         print("wrote %s" % args.banner_out)
     else:
         print("no bannertool found: banner not made (the build keeps port/banner.bnr)")

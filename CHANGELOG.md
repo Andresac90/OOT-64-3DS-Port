@@ -5,10 +5,13 @@ No game builds are published; each version is a source release. See the [README]
 ## Unreleased
 
 ### Fixed
-- The HOME Menu crashed when it showed a banner with Link's 3D model (`tools/make_link_banner.py`; hardware, two
-  crash dumps: a null-pointer read in the HOME Menu). pycgfx writes a mesh without an index list as a primitive
-  with no index stream at all, and the model parts had none; every part now has one, and `tools/make_banner3d.py`
-  refuses to write a banner with a missing index stream. The default banner (the ocarina) always had index lists.
+- The HOME Menu crashed (hardware, Luma crash dumps: a null-pointer read in the HOME Menu) when it showed the
+  stereoscopic 3D banner (a CGFX model made with pycgfx). Fixes tried on hardware - index lists for every mesh, the
+  banner animation `COMMON`, the SMDH "extended banner" flag - did not stop it. The banner is now a flat picture
+  in bannertool's standard banner, the format shown fine on hardware before: the original artwork for everyone
+  (`tools/make_banner3d.py --flat`), Link on white from your own game data (`tools/make_link_banner.py`). The
+  stereoscopic banner stays available as an experiment (`make_banner3d.py` without `--flat`,
+  `make_link_banner.py --stereo`).
 - Touch screen: the rupee and key counts sat on the top row of their icons; the number is now centered on the
   icon's height, and icon and number are centered in the left column like the buttons above them.
 
