@@ -345,7 +345,23 @@ void KaleidoScope_DrawDungeonMap(PlayState* play, GraphicsContext* gfxCtx) {
     gDPSetTextureFilter(POLY_OPA_DISP++, G_TF_POINT);
     gDPSetPrimColor(POLY_OPA_DISP++, 0, 0, 255, 255, 255, pauseCtx->alpha);
 
+#ifdef __3DS__
+    {
+        /* PORT (2026-10-07): the palette is built byte by byte in big-endian order (above, z_map_exp.c), but the
+         * renderer reads game memory in the layout of loaded ROM data, each 8 bytes reversed (gfx_pc.c
+         * gfx_src_swizzle): read in place it was scrambled, mostly transparent, and the dungeon map page showed
+         * no rooms. A copy in that layout is loaded instead. */
+        u8* pal = GRAPH_ALLOC(gfxCtx, sizeof(interfaceCtx->mapPalette));
+        s32 k;
+
+        for (k = 0; k < (s32)sizeof(interfaceCtx->mapPalette); k++) {
+            pal[k ^ 7] = interfaceCtx->mapPalette[k];
+        }
+        gDPLoadTLUT_pal16(POLY_OPA_DISP++, 0, pal);
+    }
+#else
     gDPLoadTLUT_pal16(POLY_OPA_DISP++, 0, interfaceCtx->mapPalette);
+#endif
     gDPSetTextureLUT(POLY_OPA_DISP++, G_TT_RGBA16);
 
     gSPVertex(POLY_OPA_DISP++, &pauseCtx->mapPageVtx[60], 8, 0);

@@ -7,6 +7,9 @@ No game builds are published; each version is a source release. See the [README]
 ### Added
 - Menus: the D-pad moves the cursor like the stick on the file select and the pause screens (it stays the C
   buttons in gameplay, dialogue and ocarina playing).
+- Touch screen, dungeons: floor buttons left of the map, as on the pause map page. Tapping a floor shows its map
+  (visited rooms, the outlines with the Map, Link's room highlighted, a yellow arrow at his floor); tapping it again
+  or the map goes back to the room map.
 
 ### Fixed
 - Stereoscopic 3D: objects in the middle of the picture could come far out of the screen at full 3D (the Deku Tree
@@ -21,6 +24,27 @@ No game builds are published; each version is a source release. See the [README]
   `--white`: on white). The
   stereoscopic banner stays available as an experiment (`make_banner3d.py` without `--flat`,
   `make_link_banner.py --stereo`).
+- Widescreen in 2D: pre-rendered rooms (the Kokiri houses, shops) drew wide, showing their hidden geometry at the
+  sides, and rooms that 3D showed in 4:3 were wide in 2D. Each frame starts with the GPU scissor off, and the
+  renderer re-sent its 4:3 scissor only when it changed; it is now sent again every frame (3D was right: each eye's
+  draw sets it).
+- "HUD off" hid the Z-target reticle; it now stays.
+- The pause screen's dungeon map showed no rooms, even with the Map. Its palette is built byte by byte in game
+  memory, which the renderer reads in the layout of loaded ROM data (each 8 bytes reversed): it came out scrambled,
+  mostly transparent. The page now loads a copy in that layout.
+- C-stick camera: turning the view into a hillside or a wall made it shake and look doubled (Hyrule Field). The
+  eye now stops at the collision point instead of fighting the game's own swing, and the stick no longer lowers the
+  camera into the ground at Link's feet.
+- 60 fps, C-stick camera: turning the camera made Link look doubled and the sky shake. The in-between frames blended
+  the camera's view matrix part by part, and its translation (the world origin seen from the camera, thousands of
+  units away) fell short of the turn's arc: the ground near Link jumped about 4 pixels back and forth on every
+  in-between frame (measured in Azahar). The camera's position is now blended and the translation rebuilt from it:
+  the steps are even.
+- The sun showed twice (four half-suns on hardware). Its display list loads its textures as 8-bit, but they are
+  4-bit: read as 8-bit, each texture row held two rows of the picture side by side. The N64 shows one round sun
+  (checked in ares); the 3DS now draws it with 4-bit loads.
+- 60 fps: a rupee blinking before it vanishes stood up as a huge spike in the in-between frames (the actor's shadow
+  took the rupee's place in the matching on the frames it was hidden). Shadows are now matched on their own.
 - Touch screen: the rupee and key counts sat on the top row of their icons; the number is now centered on the
   icon's height, and icon and number are centered in the left column like the buttons above them.
 

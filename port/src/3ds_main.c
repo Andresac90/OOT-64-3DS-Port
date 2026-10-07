@@ -705,6 +705,90 @@ static int MapTexel(const PortMinimap* m, int tx, int ty, int* lum) { /* alpha 0
 }
 
 static void DrawMapInto(int have);
+static void DrawParchment(void);
+
+/* PORT (2026-10-07): dungeon floors (user request: the touch map showed only the current room, with no way to look
+ * at another floor). In a dungeon a column of floor buttons sits left of the map, as on the pause map page; tapping a
+ * floor shows that floor's map (the pause page's picture: visited rooms, outlines with the Map, Link's room
+ * highlighted), tapping it again - or the map - goes back to the room map. Data: gPortFloorMap (z_map_exp.c). */
+#define FLOOR_BTN_W 24
+#define FLOOR_BTN_H 16
+#define FLOOR_INSET 34 /* map pixels on the left taken by the buttons */
+static int sMapInset;       /* FLOOR_INSET in a dungeon, else 0 */
+static int sFloorView = -1; /* the floor slot shown, -1 = the room map */
+static int sFloorStale = 99;
+static unsigned sLastFloorSerial;
+static int FloorCount(void) {
+    return sFloorStale < 4 ? gPortFloorMap.numFloors : 0;
+}
+static int FloorBtnY(int k, int n) {
+    return MAP_Y + (MAP_H - n * (FLOOR_BTN_H + 3) + 3) / 2 + k * (FLOOR_BTN_H + 3);
+}
+static void DrawFloorButtons(void) {
+    const PortFloorMap* f = &gPortFloorMap;
+    int n = FloorCount(), k;
+    for (k = 0; k < n; k++) {
+        int x = MAP_X + 5, y = FloorBtnY(k, n), sel = f->slot[k] == sFloorView, id = f->label[k];
+        char lab[4];
+        if (id >= 1 && id <= 8) {
+            snprintf(lab, sizeof(lab), "%dF", 9 - id);
+        } else {
+            snprintf(lab, sizeof(lab), "B%d", id - 8);
+        }
+        FillRect(x, y, FLOOR_BTN_W, FLOOR_BTN_H, PRGB(64, 46, 30));
+        if (sel) {
+            FillStone(x + 1, y + 1, FLOOR_BTN_W - 2, FLOOR_BTN_H - 2, 60, 96, 200, 6);
+        } else {
+            FillStone(x + 1, y + 1, FLOOR_BTN_W - 2, FLOOR_BTN_H - 2, 150, 146, 138, 10);
+        }
+        DrawTextC(x + FLOOR_BTN_W / 2, y + 4, lab, COL_TEXT);
+        if (f->slot[k] == f->curSlot) { /* Link's floor: a yellow arrow pointing at it */
+            int r;
+            for (r = 0; r < 4; r++) FillRect(x + FLOOR_BTN_W + 1 + r, y + 4 + r, 1, 8 - 2 * r, PRGB(250, 210, 30));
+        }
+    }
+}
+/* the floor's map: 96x85 (two 48x85 CI4 halves, the second ALIGN16(2040) = 2048 bytes on), fitted right of the
+ * buttons */
+static void DrawFloorView(void) {
+    const PortFloorMap* f = &gPortFloorMap;
+    float s, ox, oy;
+    int x, y;
+    DrawParchment();
+    if (f->tex == NULL || f->mapSlot != sFloorView) return; /* loading (the next update) */
+    s = fminf((MAP_W - sMapInset - 8) / 96.0f, (MAP_H - 8) / 85.0f);
+    ox = MAP_X + sMapInset + (MAP_W - sMapInset - 96 * s) * 0.5f;
+    oy = MAP_Y + (MAP_H - 85 * s) * 0.5f;
+    for (y = MAP_Y + 2; y < MAP_Y + MAP_H - 2; y++) {
+        int ty = (int)floorf((y + 0.5f - oy) / s);
+        if (ty < 0 || ty >= 85) continue;
+        for (x = MAP_X + sMapInset; x < MAP_X + MAP_W - 2; x++) {
+            int tx = (int)floorf((x + 0.5f - ox) / s), idx, b, nib;
+            u16 c;
+            if (tx < 0 || tx >= 96) continue;
+            idx = ty * 48 + tx % 48;
+            b = f->tex[((tx / 48) * 2048 + (idx >> 1)) ^ 7]; /* game memory: byte k at k ^ 7 */
+            nib = (idx & 1) ? (b & 15) : (b >> 4);
+            c = f->pal[nib];
+            if (nib == f->curRoomIndex) {
+                Px(x, y, PRGB(110, 210, 255)); /* Link's room (the pause page makes it pulse) */
+            } else if (c & 1) {
+                Px(x, y, PRGB(((c >> 11) & 31) * 255 / 31, ((c >> 6) & 31) * 255 / 31, ((c >> 1) & 31) * 255 / 31));
+            }
+        }
+    }
+}
+static u32 FloorSig(void) {
+    const PortFloorMap* f = &gPortFloorMap;
+    u32 sig = (u32)FloorCount() * 31u + (u32)(f->curSlot + 1) * 37u + (u32)(sFloorView + 1) * 41u + (u32)sMapInset;
+    int k;
+    for (k = 0; k < FloorCount(); k++) sig = sig * 33u + f->slot[k] * 7u + f->label[k];
+    if (sFloorView >= 0) {
+        sig = sig * 33u + (u32)(f->mapSlot + 1) * 43u + (u32)(f->curRoomIndex + 1) * 47u + (u32)(uintptr_t)f->tex;
+        for (k = 0; k < 16; k++) sig = sig * 33u + f->pal[k];
+    }
+    return sig;
+}
 
 /* The bottom framebuffer is single-buffered and scanned out while we draw: repainting the parchment and
  * then the map in place showed the half-drawn state (the map flashed on hardware). Draw into a shadow
@@ -746,12 +830,22 @@ static void MapCopyColumns(u16* dst, const u16* src) {
 
 static void DrawMapBase(int have, float* ps, float* pox, float* poy);
 
+static void DrawRoomMapInto(int have);
 static void DrawMapInto(int have) {
+    if (sFloorView >= 0) {
+        DrawFloorView();
+    } else {
+        DrawRoomMapInto(have);
+    }
+    DrawFloorButtons();
+}
+
+static void DrawRoomMapInto(int have) {
     const PortMinimap* m = &gPortMinimap;
     float s, ox, oy;
     int x;
     u32 key = (u32)have * 0x9E3779B1u ^ (u32)(uintptr_t)m->tex * 31u ^ (u32)m->w * 7u ^ (u32)m->h * 13u ^
-              (u32)m->r * 29u ^ (u32)m->g * 37u ^ (u32)m->b * 41u;
+              (u32)m->r * 29u ^ (u32)m->g * 37u ^ (u32)m->b * 41u ^ (u32)sMapInset * 0x01000193u;
     if (have && m->tex != NULL && m->w > 0 && m->h > 0) { /* same buffer, new room: sample the texels */
         const u8* t = m->tex;
         int n = m->w * m->h / 2, k;
@@ -803,24 +897,10 @@ static void DrawMapBase(int have, float* ps, float* pox, float* poy) {
     float s, ox, oy, inv;
     int x, y, bx0, by0, bx1, by1, lum;
     *ps = 1.0f, *pox = 0.0f, *poy = 0.0f;
-    /* parchment with a darker burnt edge */
-    for (x = MAP_X; x < MAP_X + MAP_W; x++) {
-        for (y = MAP_Y; y < MAP_Y + MAP_H; y++) {
-            int e = x - MAP_X, d;
-            if (MAP_X + MAP_W - 1 - x < e) e = MAP_X + MAP_W - 1 - x;
-            if (y - MAP_Y < e) e = y - MAP_Y;
-            if (MAP_Y + MAP_H - 1 - y < e) e = MAP_Y + MAP_H - 1 - y;
-            d = e < 10 ? (10 - e) * 7 : 0;
-            {
-                int n = Noise(x >> 1, y >> 1) * 2;
-                Px(x, y, PRGB(Clamp8(206 - d + n), Clamp8(176 - d * 5 / 4 + n), Clamp8(116 - d * 3 / 2 + n)));
-            }
-        }
-    }
-    sFbDirty = 1;
+    DrawParchment();
     if (!have || m->w <= 0 || m->h <= 0) return;
     /* fit the drawn part of the texture (plus the markers) to the frame: N64 maps sit in a corner of
-     * their texture; shown large and centred */
+     * their texture; shown large and centred (right of the floor buttons in a dungeon) */
     bx0 = m->w, by0 = m->h, bx1 = -1, by1 = -1;
     if (m->tex != NULL) {
         for (y = 0; y < m->h; y++) {
@@ -836,9 +916,9 @@ static void DrawMapBase(int have, float* ps, float* pox, float* poy) {
     }
     if (bx1 < 0) bx0 = 0, by0 = 0, bx1 = m->w - 1, by1 = m->h - 1; /* nothing drawn: whole frame */
     bx1++, by1++;
-    s = fminf((MAP_W - 16) / (float)(bx1 - bx0), (MAP_H - 16) / (float)(by1 - by0));
+    s = fminf((MAP_W - sMapInset - 16) / (float)(bx1 - bx0), (MAP_H - 16) / (float)(by1 - by0));
     if (s > 3.0f) s = 3.0f;
-    ox = MAP_X + (MAP_W - (bx1 - bx0) * s) * 0.5f - bx0 * s;
+    ox = MAP_X + sMapInset + (MAP_W - sMapInset - (bx1 - bx0) * s) * 0.5f - bx0 * s;
     oy = MAP_Y + (MAP_H - (by1 - by0) * s) * 0.5f - by0 * s;
     inv = 1.0f / s;
     if (m->tex != NULL) {
@@ -847,7 +927,7 @@ static void DrawMapBase(int have, float* ps, float* pox, float* poy) {
         for (y = MAP_Y + 2; y < MAP_Y + MAP_H - 2; y++) {
             int ty = (int)floorf((y + 0.5f - oy) * inv);
             if (ty < by0 || ty >= by1) continue;
-            for (x = MAP_X + 2; x < MAP_X + MAP_W - 2; x++) {
+            for (x = MAP_X + sMapInset + 2; x < MAP_X + MAP_W - 2; x++) {
                 int tx = (int)floorf((x + 0.5f - ox) * inv), a;
                 if (tx < bx0 || tx >= bx1) continue;
                 a = MapTexel(m, tx, ty, &lum);
@@ -857,6 +937,25 @@ static void DrawMapBase(int have, float* ps, float* pox, float* poy) {
         }
     }
     *ps = s, *pox = ox, *poy = oy;
+}
+
+/* parchment with a darker burnt edge */
+static void DrawParchment(void) {
+    int x, y;
+    for (x = MAP_X; x < MAP_X + MAP_W; x++) {
+        for (y = MAP_Y; y < MAP_Y + MAP_H; y++) {
+            int e = x - MAP_X, d;
+            if (MAP_X + MAP_W - 1 - x < e) e = MAP_X + MAP_W - 1 - x;
+            if (y - MAP_Y < e) e = y - MAP_Y;
+            if (MAP_Y + MAP_H - 1 - y < e) e = MAP_Y + MAP_H - 1 - y;
+            d = e < 10 ? (10 - e) * 7 : 0;
+            {
+                int n = Noise(x >> 1, y >> 1) * 2;
+                Px(x, y, PRGB(Clamp8(206 - d + n), Clamp8(176 - d * 5 / 4 + n), Clamp8(116 - d * 3 / 2 + n)));
+            }
+        }
+    }
+    sFbDirty = 1;
 }
 
 static void Port3ds_TouchUiInit(void) {
@@ -892,7 +991,7 @@ void Port3ds_ScanBetweenUpdates(void) {
 /* held pads -> N64 bits; tap actions; redraws what changed */
 static unsigned short Port3ds_TouchUiPoll(void) {
     static unsigned sPolls;
-    int hit = -1, i, iconsOk;
+    int hit = -1, i, iconsOk, floorTap = -2, mapForce = 0;
     PortHudInfo now;
     if (!sTouchUi) return 0;
     sPolls++;
@@ -905,6 +1004,8 @@ static unsigned short Port3ds_TouchUiPoll(void) {
     sLastHudSerial = gPortHudSerial;
     sMapStale = (gPortMinimap.serial != sLastMapSerial) ? 0 : sMapStale + 1;
     sLastMapSerial = gPortMinimap.serial;
+    sFloorStale = (gPortFloorMap.serial != sLastFloorSerial) ? 0 : sFloorStale + 1;
+    sLastFloorSerial = gPortFloorMap.serial;
 
     Port_GetHudInfo(&now);
     if (sHudStale >= 4) now.keys = -1; /* the HUD is not being drawn (title, file select) */
@@ -932,6 +1033,19 @@ static unsigned short Port3ds_TouchUiPoll(void) {
             } else {
                 hidTouchRead(&tp);
             }
+            if (down & KEY_TOUCH) { /* a dungeon floor button, or the map to leave a floor's map */
+                int k, n = FloorCount();
+                for (k = 0; k < n; k++) {
+                    int bx = MAP_X + 5, by = FloorBtnY(k, n);
+                    if (tp.px >= bx && tp.px < bx + FLOOR_BTN_W && tp.py >= by && tp.py < by + FLOOR_BTN_H) {
+                        floorTap = gPortFloorMap.slot[k] == sFloorView ? -1 : gPortFloorMap.slot[k];
+                    }
+                }
+                if (floorTap == -2 && sFloorView >= 0 && tp.px >= MAP_X + sMapInset && tp.px < MAP_X + MAP_W &&
+                    tp.py >= MAP_Y && tp.py < MAP_Y + MAP_H) {
+                    floorTap = -1;
+                }
+            }
             for (i = 0; i < P_COUNT; i++) {
                 const PanelPad* p = &sPads[i];
                 if (tp.px >= p->x && tp.px < p->x + p->w && tp.py >= p->y && tp.py < p->y + p->h) hit = i;
@@ -952,6 +1066,16 @@ static unsigned short Port3ds_TouchUiPoll(void) {
         } else if (hit >= 0 && sPads[hit].page >= 0) {
             gPortTouchPage = sPads[hit].page;
         }
+    }
+    { /* dungeon floors: the view follows the taps; leaving the dungeon goes back to the room map */
+        int inset = FloorCount() > 0 ? FLOOR_INSET : 0;
+        if (FloorCount() == 0 && sFloorStale > 30) floorTap = -1;
+        if (floorTap != -2 && floorTap != sFloorView) {
+            sFloorView = floorTap;
+            gPortFloorReq = floorTap;
+            mapForce = 1;
+        }
+        if (inset != sMapInset) sMapInset = inset, mapForce = 1;
     }
     /* New 3DS: ZR is the BOOTS pad (pressed look while held) */
     if ((hidKeysDown() | sTapDownAcc) & KEY_ZR) gPortTouchBoots = 3;
@@ -1020,14 +1144,26 @@ static unsigned short Port3ds_TouchUiPoll(void) {
                 int n = m->w * m->h / 2, k;
                 for (k = 0; k < 64; k++) sig = sig * 33u + t[(k * (n / 64)) ^ 7];
             }
-            if (!sMapShown || sig != sMapSig) {
+            sig = sig * 33u + FloorSig();
+            if (sFloorView < 0 && (!sMapShown || sig != sMapSig || mapForce)) {
                 DrawMap(1);
                 sMapSig = sig;
             }
             sMapShown = 1;
-        } else if (sMapStale > 6 && sMapShown) {
+        } else if (sMapStale > 6 && sMapShown && sFloorView < 0) {
             DrawMap(0);
             sMapShown = 0;
+        } else if (sFloorView < 0 && mapForce) {
+            DrawMap(sMapShown);
+        }
+        if (sFloorView >= 0) { /* a floor's map: redrawn when it or the floor list changes */
+            static u32 sFloorSigShown;
+            u32 fsig = FloorSig();
+            if (fsig != sFloorSigShown || mapForce) {
+                DrawMap(1);
+                sFloorSigShown = fsig;
+            }
+            sMapSig = 0; /* the room map is drawn again on the way back */
         }
     }
 

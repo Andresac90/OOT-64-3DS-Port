@@ -2667,7 +2667,19 @@ void Actor_Draw(PlayState* play, Actor* actor) {
     }
 
     if (actor->shape.shadowDraw != NULL) {
+#ifdef __3DS__
+        /* PORT (2026-10-07): the shadow's matrices in a group of their own. In the actor's group they took the
+         * draw function's places on frames it draws nothing (a blinking rupee about to vanish): the next
+         * frame's rupee blended from the flat, wide shadow matrix and stood up as a huge spike in the
+         * in-between frames (hardware photo). */
+        gPortInterpPush(POLY_OPA_DISP++, PORT_INTERP_ID_SHADOW, 0);
+        gPortInterpPush(POLY_XLU_DISP++, PORT_INTERP_ID_SHADOW, 0);
+#endif
         actor->shape.shadowDraw(actor, lights, play);
+#ifdef __3DS__
+        gPortInterpPop(POLY_OPA_DISP++);
+        gPortInterpPop(POLY_XLU_DISP++);
+#endif
     }
 #ifdef __3DS__
 #ifdef PORT_ACTOR_PROF

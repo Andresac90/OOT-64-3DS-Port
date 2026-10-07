@@ -649,6 +649,69 @@ s16 Map_GetFloorTextIndexOffset(s32 mapIndex, s32 floor) {
     return gMapData->floorTexIndexOffset[mapIndex][floor];
 }
 
+#ifdef __3DS__
+PortFloorMap gPortFloorMap = { 0, 0, { 0 }, { 0 }, 0, -1, NULL, { 0 }, -1 };
+volatile int gPortFloorReq = -1;
+
+/* PORT (2026-10-07): the floor list and, on request, one floor's map for the touch screen (port_minimap.h). The
+ * floors and the map are the pause map page's (z_kaleido_map.c, KaleidoScope_UpdateDungeonMap): a floor is listed
+ * once visited, or all of them with the Map; its rooms are coloured when visited, outlined with the Map. */
+static void Map_ExportFloors(PlayState* play, s32 dungeonIndex) {
+    static u64 sFloorTex[2 * ALIGN16(MAP_48x85_TEX_SIZE) / sizeof(u64)];
+    static s32 sLoadedTexIndex = -1;
+    InterfaceContext* interfaceCtx = &play->interfaceCtx;
+    PortFloorMap* f = &gPortFloorMap;
+    s32 mapIndex = gSaveContext.mapIndex;
+    s32 req = gPortFloorReq;
+    s32 i, n = 0;
+
+    f->curSlot = VREG(30);
+    if (interfaceCtx->unk_25A >= 0) {
+        for (i = 0; i < PORT_FLOOR_MAX; i++) {
+            u8 id = gMapData->floorID[interfaceCtx->unk_25A][i];
+
+            if (id != 0 && ((gSaveContext.save.info.sceneFlags[mapIndex].floors & gBitFlags[i]) ||
+                            CHECK_DUNGEON_ITEM(DUNGEON_MAP, mapIndex) || i == f->curSlot)) {
+                f->slot[n] = i;
+                f->label[n] = id;
+                n++;
+            }
+        }
+    }
+    f->numFloors = n;
+    if (req >= 0 && req < PORT_FLOOR_MAX) {
+        s32 texIndex = R_MAP_TEX_INDEX_BASE + gMapData->floorTexIndexOffset[dungeonIndex][req];
+        char savedPal[sizeof(interfaceCtx->mapPalette)];
+        s16 savedIndex = interfaceCtx->mapPaletteIndex;
+
+        if (texIndex != sLoadedTexIndex) {
+            DMA_REQUEST_SYNC(sFloorTex, (uintptr_t)_map_48x85_staticSegmentRomStart + texIndex * MAP_48x85_TEX_SIZE,
+                             MAP_48x85_TEX_SIZE, "../z_map_exp.c", __LINE__);
+            DMA_REQUEST_SYNC((u8*)sFloorTex + ALIGN16(MAP_48x85_TEX_SIZE),
+                             (uintptr_t)_map_48x85_staticSegmentRomStart + (texIndex + 1) * MAP_48x85_TEX_SIZE,
+                             MAP_48x85_TEX_SIZE, "../z_map_exp.c", __LINE__);
+            sLoadedTexIndex = texIndex;
+        }
+        /* the game's own palette builder, on a copy: the pause page and the HUD keep theirs */
+        for (i = 0; i < (s32)sizeof(savedPal); i++) {
+            savedPal[i] = interfaceCtx->mapPalette[i];
+        }
+        Map_SetFloorPalettesData(play, req);
+        for (i = 0; i < 16; i++) {
+            f->pal[i] = ((u8)interfaceCtx->mapPalette[i * 2] << 8) | (u8)interfaceCtx->mapPalette[i * 2 + 1];
+        }
+        for (i = 0; i < (s32)sizeof(savedPal); i++) {
+            interfaceCtx->mapPalette[i] = savedPal[i];
+        }
+        interfaceCtx->mapPaletteIndex = savedIndex;
+        f->curRoomIndex = (req == f->curSlot) ? savedIndex : -1;
+        f->tex = (const unsigned char*)sFloorTex;
+        f->mapSlot = req;
+    }
+    f->serial++;
+}
+#endif
+
 void Map_Update(PlayState* play) {
     static s16 sLastRoomNum = 99;
     Player* player = GET_PLAYER(play);
@@ -709,6 +772,9 @@ void Map_Update(PlayState* play) {
                 }
 
                 VREG(10) = interfaceCtx->mapRoomNum;
+#ifdef __3DS__
+                Map_ExportFloors(play, mapIndex);
+#endif
                 break;
             case SCENE_DEKU_TREE_BOSS:
             case SCENE_DODONGOS_CAVERN_BOSS:
@@ -721,6 +787,9 @@ void Map_Update(PlayState* play) {
                 VREG(30) = gMapData->bossFloor[play->sceneId - SCENE_DEKU_TREE_BOSS];
                 R_MAP_TEX_INDEX = R_MAP_TEX_INDEX_BASE +
                                   gMapData->floorTexIndexOffset[play->sceneId - SCENE_DEKU_TREE_BOSS][VREG(30)];
+#ifdef __3DS__
+                Map_ExportFloors(play, play->sceneId - SCENE_DEKU_TREE_BOSS);
+#endif
                 break;
         }
     }

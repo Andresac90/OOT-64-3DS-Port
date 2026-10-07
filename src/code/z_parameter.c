@@ -3365,7 +3365,18 @@ void Interface_Draw(PlayState* play) {
 
         if ((R_PAUSE_BG_PRERENDER_STATE != PAUSE_BG_PRERENDER_PROCESS) &&
             (R_PAUSE_BG_PRERENDER_STATE != PAUSE_BG_PRERENDER_READY)) {
+#ifdef __3DS__
+            /* PORT (2026-10-07): "HUD off" keeps the Z-target reticle: it is gameplay, not HUD. The HUD drawn so
+             * far is dropped here instead of at the end, and the rewind below starts after the reticle. */
+            extern int gPortHudTop;
+            if (!gPortHudTop) {
+                OVERLAY_DISP = portHudStart;
+            }
             Attention_Draw(&play->actorCtx.attention, play);
+            portHudStart = OVERLAY_DISP;
+#else
+            Attention_Draw(&play->actorCtx.attention, play);
+#endif
         }
 
         Gfx_SetupDL_39Overlay(play->state.gfxCtx);

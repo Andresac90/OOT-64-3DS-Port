@@ -40,6 +40,24 @@ extern int gPortHudTop;                       /* 1 = the N64 HUD on the top scre
 extern volatile int gPortTouchOcarina, gPortTouchBoots; /* touch requests, consumed by z_player.c */
 extern volatile int gPortTouchPage; /* pause page for the next START (-1 = the game's own), z_kaleido_setup.c */
 
+/* PORT (2026-10-07): dungeon floors for the touch screen (z_map_exp.c Map_ExportFloors): the floor list the pause
+ * map page shows, and the map of one floor on request - the pause page's picture (two 48x85 CI4 halves side by
+ * side, game memory layout: byte k at k ^ 7) with its palette (visited rooms, the outline with the Map) */
+#define PORT_FLOOR_MAX 8
+typedef struct {
+    unsigned int serial;   /* bumped by every update that fills it */
+    int numFloors;         /* 0 = no floor list here (not a dungeon) */
+    unsigned char slot[PORT_FLOOR_MAX];  /* the game's floor slots shown, top floor first */
+    unsigned char label[PORT_FLOOR_MAX]; /* F_* (map.h): 1..8 = 8F..1F, 9.. = B1.. */
+    int curSlot;           /* Link's floor */
+    int mapSlot;           /* the floor whose map is in tex/pal, -1 = none yet */
+    const unsigned char* tex;
+    unsigned short pal[16]; /* RGBA5551 */
+    int curRoomIndex;       /* palette index of Link's room on mapSlot's map, -1 = not on it */
+} PortFloorMap;
+extern PortFloorMap gPortFloorMap;
+extern volatile int gPortFloorReq; /* the floor slot the touch screen wants the map of, -1 = none */
+
 /* everything else the panel shows, read from the save by Port_GetHudInfo (ultra_shims.c) */
 typedef struct {
     int valid; /* a save is loaded and the game is in normal play mode */

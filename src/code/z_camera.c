@@ -1789,6 +1789,10 @@ s32 Camera_Normal1(Camera* camera) {
         if ((gPortCamX != 0 || gPortCamY != 0) && (camera->status == CAM_STAT_ACTIVE)) {
             eyeAdjustment.yaw = atEyeNextGeo.yaw - (s16)(gPortCamX * 13);
             eyeAdjustment.pitch = atEyeNextGeo.pitch - (s16)(gPortCamY * 6);
+            /* (not below about 7 degrees under his head: lower, the eye only sinks into the ground at his feet) */
+            if (gPortCamY > 0 && eyeAdjustment.pitch < -0x500) {
+                eyeAdjustment.pitch = MIN(atEyeNextGeo.pitch, -0x500);
+            }
             sPortCamHold = camera;
         } else if (sPortCamHold == camera) {
             eyeAdjustment.yaw = atEyeNextGeo.yaw;
@@ -1813,6 +1817,15 @@ s32 Camera_Normal1(Camera* camera) {
         } else {
             sp88 = *eyeNext;
             rwData->swing.swingUpdateRate = camera->yawUpdateRateInv = roData->unk_0C * 2.0f;
+#ifdef __3DS__
+            if (sPortCamHold == camera && Camera_BGCheck(camera, at, &sp88)) {
+                /* PORT (2026-10-07): the C-stick angle turned the view into a wall or a hillside. The N64 code
+                 * below keeps the old eye and starts swinging toward its own angle, which the C-stick overrides
+                 * the next frame: the eye jumped between the two (hardware: Hyrule Field's slopes shook and
+                 * looked doubled). The eye goes to the collision point instead, between Link and the wall. */
+                *eye = sp88;
+            } else
+#endif
             if (Camera_BGCheck(camera, at, &sp88)) {
                 rwData->swingYawTarget = atEyeNextGeo.yaw;
                 rwData->startSwingTimer = -1;

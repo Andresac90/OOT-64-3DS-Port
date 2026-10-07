@@ -1340,6 +1340,35 @@ static int interp_decomposed(float out[4][4], const float a[4][4], const float b
     return 1;
 }
 
+/* the eye of a view matrix (rows = scaled camera axes, row 3 = translation): the point it maps to the origin,
+ * E * M3 + t = 0. Returns 0 when the 3x3 part is singular. */
+static int interp_view_eye(const float m[4][4], float e[3]) {
+    float c00 = m[1][1] * m[2][2] - m[1][2] * m[2][1], c01 = m[1][2] * m[2][0] - m[1][0] * m[2][2],
+          c02 = m[1][0] * m[2][1] - m[1][1] * m[2][0];
+    float det = m[0][0] * c00 + m[0][1] * c01 + m[0][2] * c02, inv[3][3];
+    int j, k;
+    if (fabsf(det) < 1e-12f) {
+        return 0;
+    }
+    /* inverse of the row-vector 3x3 (inv = adj / det) */
+    inv[0][0] = c00 / det;
+    inv[1][0] = c01 / det;
+    inv[2][0] = c02 / det;
+    inv[0][1] = (m[0][2] * m[2][1] - m[0][1] * m[2][2]) / det;
+    inv[1][1] = (m[0][0] * m[2][2] - m[0][2] * m[2][0]) / det;
+    inv[2][1] = (m[0][1] * m[2][0] - m[0][0] * m[2][1]) / det;
+    inv[0][2] = (m[0][1] * m[1][2] - m[0][2] * m[1][1]) / det;
+    inv[1][2] = (m[0][2] * m[1][0] - m[0][0] * m[1][2]) / det;
+    inv[2][2] = (m[0][0] * m[1][1] - m[0][1] * m[1][0]) / det;
+    for (k = 0; k < 3; k++) {
+        e[k] = 0.0f;
+        for (j = 0; j < 3; j++) {
+            e[k] -= m[3][j] * inv[j][k];
+        }
+    }
+    return 1;
+}
+
 /* blend `m` (this logic frame's matrix) from the previous frame's into out[k] for t = (k + 1) / 3 (copies
  * of m when there is nothing to blend); records m on the exact pass. Returns 1 when out[] was written. */
 static int interp_matrix3(const float m[4][4], uint8_t parameters, float out[2][4][4]) {
@@ -1382,6 +1411,23 @@ static int interp_matrix3(const float m[4][4], uint8_t parameters, float out[2][
             if (!interp_decomposed(out[k], p, m, t)) {
                 gPortInterpJump++;
                 return 0;
+            }
+            if (parameters & G_MTX_PROJECTION) {
+                /* PORT (2026-10-07): the camera's view matrix (OoT multiplies it onto the projection, z_view.c). Its
+                 * translation is the world origin seen from the camera, far away: blended in a straight line while
+                 * the camera turns (the C-stick: 9 degrees per update), it fell short of the arc by several units,
+                 * so on the in-between frames the whole scene shifted against Link and the sky (hardware: Link
+                 * doubled, the sky shaking). The camera's own position is blended instead and the translation
+                 * rebuilt from it: a turn about Link keeps him and the sky steady. */
+                float ea[3], eb[3], e[3];
+                int j, c;
+                if (interp_view_eye(p, ea) && interp_view_eye(m, eb)) {
+                    for (c = 0; c < 3; c++) e[c] = ea[c] + (eb[c] - ea[c]) * t;
+                    for (c = 0; c < 3; c++) {
+                        out[k][3][c] = 0.0f;
+                        for (j = 0; j < 3; j++) out[k][3][c] -= e[j] * out[k][j][c];
+                    }
+                }
             }
         } else {
             int i, j;
@@ -5338,6 +5384,13 @@ void gfx_start_frame(void) {
     }
     sDrawTarget = NULL; /* the backend starts each frame on the screen */
     sTargetDirty = true;
+    /* PORT (2026-10-07): the backend starts each frame with the full-target viewport and the scissor off
+     * (C3D_FrameDrawOn / C3D_SetViewport), so the frame's first draw must send both again even when they equal the
+     * last frame's. Kept, the 4:3 scissor of a pre-rendered room was never re-sent in 2D: the room drew wide, its
+     * hidden geometry showing at the sides (3D was right: each eye's draw sets the scissor itself). */
+    memset(&rendering_state.viewport, 0xFF, sizeof(rendering_state.viewport));
+    memset(&rendering_state.scissor, 0xFF, sizeof(rendering_state.scissor));
+    rdp.viewport_or_scissor_changed = true;
     gfx_wapi->get_dimensions(&gfx_current_dimensions.width, &gfx_current_dimensions.height);
     if (gfx_current_dimensions.height == 0) {
         // Avoid division by zero

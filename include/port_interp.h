@@ -23,6 +23,7 @@
 /* local ids */
 #define PORT_INTERP_ID_CAMERA 0xCA3E0001u
 #define PORT_INTERP_ID_SKYBOX 0x5CB00001u
+#define PORT_INTERP_ID_SHADOW 0x5AD00001u /* an actor's shadow, inside the actor's group */
 #define PORT_INTERP_ID_LIMB(i) (0x11B00000u + (unsigned)(i))
 #define PORT_INTERP_ID_POSTLIMB(i) (0x11C00000u + (unsigned)(i))
 #define PORT_INTERP_ID_SKIN(i) (0x5C100000u + (unsigned)(i))

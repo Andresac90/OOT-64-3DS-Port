@@ -54,6 +54,14 @@ owned. The player/start arrows need the compass in dungeons (they are always sho
 overworld). Chest (unopened only) and boss markers come from the map-mark data. It also follows the
 game's fade: the map is blank whenever `minimapAlpha == 0` (cutscenes, some HUD modes).
 
+**Dungeon floors:** in a dungeon, floor buttons (3F, 2F, 1F, B1...) sit left of the map, listed as on the pause
+map page (visited floors, or all of them with the Map); a yellow arrow marks Link's floor. Tapping a floor shows
+that floor's map, the pause page's picture: visited rooms coloured, outlines with the Map, Link's room in light
+blue. Tapping the same floor again, or the map, goes back to the room map. The game side
+(`Map_ExportFloors` in `src/code/z_map_exp.c`, `gPortFloorMap` / `gPortFloorReq` in `port_minimap.h`) loads the
+requested floor's two 48x85 CI4 halves from `map_48x85_static` and builds its palette with the game's own
+`Map_SetFloorPalettesData`, on a copy (the pause page's palette is left alone).
+
 ## How it works
 
 ### Game side (all under `#ifdef __3DS__`; N64 builds are unchanged)

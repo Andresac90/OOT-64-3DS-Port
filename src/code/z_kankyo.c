@@ -38,6 +38,38 @@
 #include "assets/objects/gameplay_keep/lens_flare.h"
 #include "assets/objects/gameplay_keep/moon.h"
 #include "assets/objects/gameplay_keep/gameplay_keep_0x4D160.h"
+#ifdef __3DS__
+#include "assets/objects/gameplay_keep/sun_textures.h"
+#include "assets/objects/gameplay_keep/sun_evening_textures.h"
+
+/* PORT (2026-10-07): the sun. gSunDL loads its six textures as 8-bit 64x32 / 64x17, but the data is 4-bit (64x31,
+ * 64x16, 64x16: the decomp's asset formats). Read as 8-bit, each texture row holds two rows of the picture side by
+ * side and the sun came out twice (hardware photo: four suns). The N64 shows one round sun - measured in ares with
+ * the sun moved in front of the camera, it matches the three 4-bit strips stacked - so the 3DS draws gSunDL's
+ * commands with 4-bit loads (same vertices, tile sizes and texture memory slots: each strip's last row is the
+ * next texture's first, as on the N64, so the strips join without a seam). */
+static Gfx sPortSunDL[] = {
+    gsSPMatrix(0x01000000, G_MTX_NOPUSH | G_MTX_MUL | G_MTX_MODELVIEW),
+    gsDPPipeSync(),
+    gsDPLoadTextureBlock_4b(gSun1Tex, G_IM_FMT_I, 64, 32, 0, G_TX_NOMIRROR | G_TX_CLAMP, G_TX_NOMIRROR | G_TX_CLAMP,
+                            6, 5, G_TX_NOLOD, G_TX_NOLOD),
+    gsDPLoadMultiBlock_4b(gSunEvening1Tex, 0x0100, 1, G_IM_FMT_I, 64, 32, 0, G_TX_NOMIRROR | G_TX_CLAMP,
+                          G_TX_NOMIRROR | G_TX_CLAMP, 6, 5, G_TX_NOLOD, G_TX_NOLOD),
+    gsSPVertex(&gSunVtx[0], 12, 0),
+    gsSP2Triangles(0, 1, 2, 0, 2, 1, 3, 0),
+    gsDPLoadTextureBlock_4b(gSun2Tex, G_IM_FMT_I, 64, 17, 0, G_TX_NOMIRROR | G_TX_CLAMP, G_TX_NOMIRROR | G_TX_CLAMP,
+                            6, 5, G_TX_NOLOD, G_TX_NOLOD),
+    gsDPLoadMultiBlock_4b(gSunEvening2Tex, 0x0100, 1, G_IM_FMT_I, 64, 17, 0, G_TX_NOMIRROR | G_TX_CLAMP,
+                          G_TX_NOMIRROR | G_TX_CLAMP, 6, 5, G_TX_NOLOD, G_TX_NOLOD),
+    gsSP2Triangles(4, 5, 6, 0, 6, 5, 7, 0),
+    gsDPLoadTextureBlock_4b(gSun3Tex, G_IM_FMT_I, 64, 17, 0, G_TX_NOMIRROR | G_TX_CLAMP, G_TX_NOMIRROR | G_TX_CLAMP,
+                            6, 5, G_TX_NOLOD, G_TX_NOLOD),
+    gsDPLoadMultiBlock_4b(gSunEvening3Tex, 0x0100, 1, G_IM_FMT_I, 64, 17, 0, G_TX_NOMIRROR | G_TX_CLAMP,
+                          G_TX_NOMIRROR | G_TX_CLAMP, 6, 5, G_TX_NOLOD, G_TX_NOLOD),
+    gsSP2Triangles(8, 9, 10, 0, 10, 9, 11, 0),
+    gsSPEndDisplayList(),
+};
+#endif
 #include "assets/objects/gameplay_field_keep/gameplay_field_keep.h"
 
 typedef enum LightningBoltState {
@@ -1489,7 +1521,11 @@ void Environment_DrawSunAndMoon(PlayState* play) {
         Matrix_Scale(scale, scale, scale, MTXMODE_APPLY);
         MATRIX_FINALIZE_AND_LOAD(POLY_OPA_DISP++, play->state.gfxCtx, "../z_kankyo.c", 2364);
         Gfx_SetupDL_54Opa(play->state.gfxCtx);
+#ifdef __3DS__
+        gSPDisplayList(POLY_OPA_DISP++, sPortSunDL);
+#else
         gSPDisplayList(POLY_OPA_DISP++, gSunDL);
+#endif
 
         Matrix_Translate(play->view.eye.x - play->envCtx.sunPos.x, play->view.eye.y - play->envCtx.sunPos.y,
                          play->view.eye.z - play->envCtx.sunPos.z, MTXMODE_NEW);
