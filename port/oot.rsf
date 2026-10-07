@@ -3,7 +3,11 @@
 # e.g. FBI, are built with). The earlier hand-reconstructed RSF hung on real hardware before main() (every
 # title built with it, even a minimal probe, stayed on the HOME splash): AffinityMask 0 (no CPU core allowed
 # for the main thread), no kernel-version fields, "gsp::Gsp" instead of gsp::Gpu. Azahar enforces none of these.
-# Port values: SystemMode 96MB (Old 3DS: ~51MB image + heaps), SystemModeExt 124MB + 804MHz + L2 (New 3DS).
+# Port values: SystemMode 80MB (Old 3DS / 2DS: ~51MB image + heaps; 3.2MB of linear memory left at the lowest, paused,
+# in Azahar's Old 3DS mode), SystemModeExt 124MB + 804MHz + L2 (New 3DS).
+# 2026-10-07: was 96MB ("Dev1" on 3dbrew), the mode that leaves the system region, where the HOME Menu runs, the least
+# memory: a 2DS's HOME Menu crashed launching it (Luma dump: data abort, write to address 0, process "menu"). Now 80MB
+# ("Dev2"); likely cause, to be confirmed on an Old 3DS / 2DS. Emulators run 96MB titles, so it showed only on hardware.
 BasicInfo:
   Title                   : OcarinaOfTime
   ProductCode             : CTR-P-CZLE
@@ -71,7 +75,7 @@ AccessControlInfo:
 
   # Process Settings
   MemoryType                    : Application # Application/System/Base
-  SystemMode                    : 96MB # 64MB(Default)/96MB/80MB/72MB/32MB
+  SystemMode                    : 80MB # 64MB(Default)/96MB/80MB/72MB/32MB
   IdealProcessor                : 0
   AffinityMask                  : 1
   Priority                      : 16

@@ -12,6 +12,11 @@ No game builds are published; each version is a source release. See the [README]
   or the map goes back to the room map.
 
 ### Fixed
+- Old 3DS / 2DS: the HOME Menu crashed when launching the game (user report from a 2DS, Luma crash dump: process
+  "menu", write to address 0). The game asked for the Old 3DS's 96 MB memory mode ("Dev1"), which leaves the
+  system (where the HOME Menu runs) the least memory; it now asks for 80 MB ("Dev2"). Likely cause, to be confirmed on
+  a 2DS. The game fits in 80 MB: checked in Azahar's Old 3DS mode in Hyrule Field and the pause menu (3.2 MB of
+  linear memory left at the lowest). New 3DS systems are unchanged (they use the 124 MB extended mode).
 - Stereoscopic 3D: objects in the middle of the picture could come far out of the screen at full 3D (the Deku Tree
   cutscene's Navi, right at the camera: uncomfortable on hardware). The nearest on-screen 3D surface now comes out at
   most a quarter of the depth at infinity (~4 px at the full slider); the screen plane moves nearer when it would
