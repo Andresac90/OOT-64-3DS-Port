@@ -12,6 +12,11 @@ No game builds are published; each version is a source release. See the [README]
   or the map goes back to the room map.
 
 ### Fixed
+- Stereoscopic 3D: Navi in the opening cutscene still came far out of the screen (hardware: "hurts the eyes"). The
+  pop-out limit follows the nearest 3D surface on screen, but the fast "raw" vertex path, which draws most models,
+  never reported its vertices, so a model at the lens was not seen: the screen plane stayed at ~138 units while Navi
+  was at ~30. The raw paths now report their nearest vertex too (3D on only). Measured in Azahar on that cutscene:
+  Navi ~7 px behind the screen, nothing in front of it.
 - Old 3DS / 2DS: the HOME Menu crashed when launching the game (user report from a 2DS, Luma crash dump: process
   "menu", write to address 0). The game asked for the Old 3DS's 96 MB memory mode ("Dev1"), which leaves the
   system (where the HOME Menu runs) the least memory; it now asks for 80 MB ("Dev2"). Likely cause, to be confirmed on

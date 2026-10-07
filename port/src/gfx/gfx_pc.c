@@ -3342,11 +3342,44 @@ static int* sRawPosP;
 static u32 sRawCapN;
 static uint32_t sRawVboFrame = ~0u;
 
+/* PORT (2026-10-07): 3D on: the raw paths (most models) feed the nearest on-screen depth (gPortStereoNearW, the pop-out
+ * limit in gfx_3ds.c) as the other paths do through stereo_probe_tri; they did not, so a model at the lens (Navi in
+ * the opening cutscene: hardware, "still hurts the eyes") was not seen and came far out of the screen. Vertices only
+ * (the 13 border probes stay with the other paths: too costly per raw triangle); each vertex once per load. */
+static PVtx sProbeV[MAX_VERTICES + 4]; /* each vertex's clip x, y, w for the 3D probes, computed once per load */
+static void stereo_probe_near_raw(int a, int b, int c) {
+    extern float gPortStereoNearW;
+    const int v[3] = { a, b, c };
+    int i;
+    for (i = 0; i < 3; i++) {
+        int slot = v[i];
+        const struct LoadedVertex* lv;
+        const float(*rows)[4];
+        float x, y, w;
+        if (slot >= MAX_VERTICES || !sProbeStale[slot]) {
+            continue; /* (already measured since its load) */
+        }
+        sProbeStale[slot] = 0;
+        lv = &rsp.loaded_vertices[slot];
+        rows = gpu_rows2(sLoadSlot[slot]);
+        y = rows[0][0] * lv->x + rows[0][1] * lv->y + rows[0][2] * lv->z + rows[0][3];
+        x = -(rows[1][0] * lv->x + rows[1][1] * lv->y + rows[1][2] * lv->z + rows[1][3]);
+        w = rows[3][0] * lv->x + rows[3][1] * lv->y + rows[3][2] * lv->z + rows[3][3];
+        sProbeV[slot].x = x, sProbeV[slot].y = y, sProbeV[slot].w = w; /* (shared with gpu_emit_tri's probe) */
+        if (w > 1.0f && x >= -w && x <= w && y >= -w && y <= w && (gPortStereoNearW == 0.0f || w < gPortStereoNearW)) {
+            gPortStereoNearW = w;
+        }
+    }
+}
+
 static void gpu_emit_tri_raw(const uint8_t vidx[3]) {
     uint16_t sl[3];
     int i, j, need = 0, ix[3];
     const int lit = sLoadLit[vidx[0]]; /* (gpu_emit_tri: all three raw, one light set) */
     PROF_SET(PROF_RAW_EMIT);
+    if (stereo_conv() != 0.0f && sStereoDrawMode == 0) {
+        stereo_probe_near_raw(vidx[0], vidx[1], vidx[2]);
+    }
     for (i = 0; i < 3; i++) {
         sl[i] = sLoadSlot[vidx[i]];
     }
@@ -3506,6 +3539,9 @@ static int raw_tri_fast(int a, int b, int c) {
         gfx_port_tri_count++;
         { extern u32 gPortPerfTrisIn; gPortPerfTrisIn++; gPortPerfRoomTris += sInRoomDl != 0; }
         return 1; /* entirely outside one clip plane: as gfx_sp_tri1_impl */
+    }
+    if (stereo_conv() != 0.0f && sStereoDrawMode == 0) {
+        stereo_probe_near_raw(a, b, c);
     }
     for (i = 0; i < 3; i++) {
         int slot = v[i];
@@ -3683,7 +3719,6 @@ static void gpu_emit_tri(const uint8_t vidx[3]) {
     if (stereo_conv() != 0.0f && sStereoDrawMode == 0) {
         /* 3D on: feed the border probes of the automatic convergence (gfx_3ds.c) as the CPU path does;
          * clip x/y/w per vertex from its slot rows (out0 = y, out1 = -x, out3 = w), once per frame */
-        static PVtx sProbeV[MAX_VERTICES + 4];
         const PVtx* t[3];
         for (i = 0; i < 3; i++) {
             int slot = vidx[i];
