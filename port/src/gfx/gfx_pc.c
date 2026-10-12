@@ -5160,7 +5160,18 @@ static void gfx_run_dl(Gfx* cmd) {
                 break;
             case (uint8_t)G_BRANCH_Z: {
                 uint32_t vi = C0(0, 12) / 2;
-                if (vi < MAX_VERTICES && rsp.loaded_vertices[vi].z <= (float)(int32_t)cmd->words.w1) {
+                float vz = vi < MAX_VERTICES ? rsp.loaded_vertices[vi].z : 0.0f;
+#ifdef __3DS__
+                /* PORT (2026-10-12): a vertex loaded by the GPU path keeps its MODEL coordinates (the shader transforms
+                 * it); its clip-space z is computed here as the near-camera routing does. The model z was compared
+                 * instead, so a level-of-detail branch depended on where the geometry sits in the world: Death Mountain
+                 * Trail's entrance wall (model z 2821 against 1600) was taken as far and never drawn (hardware photo;
+                 * ares draws it). */
+                if (gPortGpuVtx && vi < MAX_VERTICES) {
+                    vz = gpu_vtx_zw((int)vi, sLoadSlot[vi])[0];
+                }
+#endif
+                if (vi < MAX_VERTICES && vz <= (float)(int32_t)cmd->words.w1) {
 #ifdef __3DS__
                     if (++sDlBranches > 400000u) {
                         PortLogFastX("[GFX] RUNAWAY stop cmd", (unsigned)(uintptr_t)cmd);

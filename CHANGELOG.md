@@ -5,6 +5,7 @@ No game builds are published; each version is a source release. See the [README]
 ## Unreleased
 
 ### Added
+- Touch screen: black during cutscenes (no touch input then); the panel comes back when the cutscene ends.
 - Menus: the D-pad moves the cursor like the stick on the file select and the pause screens (it stays the C
   buttons in gameplay, dialogue and ocarina playing).
 - Touch screen, dungeons: floor buttons left of the map, as on the pause map page. Tapping a floor shows its map
@@ -12,6 +13,14 @@ No game builds are published; each version is a source release. See the [README]
   or the map goes back to the room map.
 
 ### Fixed
+- Touch screen: while paused, the minimap turned into a scrambled grid: the pause screen loads its floor maps into
+  the buffer the room map is read from. The room map is no longer taken from it while paused; it is back after.
+- Level-of-detail models: close-range geometry behind an N64 "branch on depth" command (`gsSPBranchLessZraw`) was
+  judged by the vertex's model coordinate on the GPU vertex paths instead of its distance from the camera, so it
+  could vanish up close: Death Mountain Trail's entrance wall (hardware photo; checked against ares). The depth is
+  now computed from the camera.
+- After sleep mode the game could run silent (hardware: 40 minutes asleep). The sound queue is cleared and the
+  channel set up again on wake-up and return from the HOME Menu, and whenever the queue stops moving for ~0.5 s.
 - Stereoscopic 3D: Navi in the opening cutscene still came far out of the screen (hardware: "hurts the eyes"). The
   pop-out limit follows the nearest 3D surface on screen, but the fast "raw" vertex path, which draws most models,
   never reported its vertices, so a model at the lens was not seen: the screen plane stayed at ~138 units while Navi
@@ -59,6 +68,7 @@ No game builds are published; each version is a source release. See the [README]
   icon's height, and icon and number are centered in the left column like the buttons above them.
 
 ### Changed
+- New 3DS: ZL and ZR swapped. ZL now cycles the boots (touch pad BOOTS), ZR uses the third item (touch pad "I").
 - README: build instructions for Linux, Windows (WSL) and macOS, with the commands for devkitPro and `makerom`.
 - README screenshots show an early game (3 hearts, no items, only the Kokiri Sword and the Deku Shield) instead
   of the debug save's full inventory: `tools/make_showcase.py` builds with the new `PORT_START_FRESH` option.

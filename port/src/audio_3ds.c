@@ -25,6 +25,32 @@ static s16* sWaveData[PORT_AUDIO_NBUFS];
 static int sNextBuf = 0;
 u32 gPortPerfAudioUnderruns, gPortPerfAudioDrops; /* perf report: the DSP ran dry before a buffer came / a buffer dropped */
 static int sAudioStarted;
+volatile int gPortAudioResync; /* set by the APT hook (3ds_main.c) on wake-up / return from the HOME Menu */
+static int sAudioStuck;         /* frames dropped in a row because every buffer stayed queued */
+
+/* PORT (2026-10-12): after sleep (hardware: 40 minutes asleep, then no sound at all) the DSP is stopped and restarted
+ * by ndsp, and buffers queued before it can stay "queued" for good: every new frame then found the next buffer busy
+ * and was dropped, so the game ran silent. On wake-up / return, or after ~0.5 s of nothing but drops, the channel's
+ * queue is cleared and the channel set up again. */
+static void audio_channel_setup(void) {
+    ndspChnReset(0);
+    ndspChnSetInterp(0, NDSP_INTERP_LINEAR);
+    ndspChnSetRate(0, (float)PORT_AUDIO_RATE);
+    ndspChnSetFormat(0, NDSP_FORMAT_STEREO_PCM16);
+}
+static void audio_resync(const char* why) {
+    extern void PortDbg(const char*);
+    int i;
+    ndspChnWaveBufClear(0);
+    audio_channel_setup();
+    for (i = 0; i < PORT_AUDIO_NBUFS; i++) {
+        sWaveBufs[i].status = NDSP_WBUF_DONE;
+    }
+    sNextBuf = 0;
+    sAudioStarted = 0;
+    sAudioStuck = 0;
+    PortDbg(why);
+}
 
 
 void Port3ds_AudioInit(void) {
@@ -43,10 +69,7 @@ void Port3ds_AudioInit(void) {
     PortDbg("[audio] ndspInit OK - ndsp up");
     sNdspOk = true;
     ndspSetOutputMode(NDSP_OUTPUT_STEREO);
-    ndspChnReset(0);
-    ndspChnSetInterp(0, NDSP_INTERP_LINEAR);
-    ndspChnSetRate(0, (float)PORT_AUDIO_RATE);
-    ndspChnSetFormat(0, NDSP_FORMAT_STEREO_PCM16);
+    audio_channel_setup();
 
     for (int i = 0; i < PORT_AUDIO_NBUFS; i++) {
         sWaveData[i] = (s16*)linearAlloc(PORT_AUDIO_MAXSAMPLES * 2 * sizeof(s16));
@@ -70,11 +93,19 @@ void Port3ds_AudioSubmit(const s16* samples, int nsamples) {
     if (nsamples > PORT_AUDIO_MAXSAMPLES) {
         nsamples = PORT_AUDIO_MAXSAMPLES;
     }
+    if (gPortAudioResync) {
+        gPortAudioResync = 0;
+        audio_resync("[audio] resync after wake-up / HOME Menu");
+    }
     ndspWaveBuf* wb = &sWaveBufs[sNextBuf];
     if (wb->status != NDSP_WBUF_DONE && wb->status != NDSP_WBUF_FREE) {
         gPortPerfAudioDrops++;
+        if (++sAudioStuck >= 30) { /* ~0.5 s of drops: the queue is not moving */
+            audio_resync("[audio] resync: the DSP queue stopped moving");
+        }
         return; /* all buffers in flight; drop */
     }
+    sAudioStuck = 0;
     {
         int i, live = 0;
         for (i = 0; i < PORT_AUDIO_NBUFS; i++) {

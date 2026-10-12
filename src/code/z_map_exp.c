@@ -425,6 +425,12 @@ static s32 Minimap_ExportToBottom(PlayState* play, s32 dungeon) {
     if (R_MINIMAP_DISABLED || (interfaceCtx->minimapAlpha == 0)) {
         return true; /* serial not bumped: the panel shows no map */
     }
+    if (IS_PAUSED(&play->pauseCtx)) {
+        /* PORT (2026-10-12): the pause screen loads its floor maps into mapSegment (KaleidoScope_LoadDungeonMap),
+         * the buffer the room map is read from: exported, the touch screen drew those pictures as a room map, a
+         * scrambled grid (hardware: "floors don't look right"). Not exported while paused: the panel's map stays. */
+        return true;
+    }
     m->tex = NULL;
     m->numIcons = 0;
     m->numMarks = 0;

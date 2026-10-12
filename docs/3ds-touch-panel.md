@@ -16,8 +16,8 @@ ZL/ZR or the C-stick. The New 3DS extras are shortcuts only.
 | START | START (pause) | |
 | SELECT | N64 L | shows or hides the minimap |
 | D-pad up/down/left/right | C-up / C-down / C-left / C-right | the N64 D-pad is unused by OoT |
-| **New 3DS** ZL | C-down | item pad "I" |
-| **New 3DS** ZR | BOOTS pad | cycles the owned boots, like tapping the pad (C-up stays on VIEW and D-pad up) |
+| **New 3DS** ZR | C-down | item pad "I" |
+| **New 3DS** ZL | BOOTS pad | cycles the owned boots, like tapping the pad (C-up stays on VIEW and D-pad up) |
 | **New 3DS** C-stick | camera | turns the camera (left/right, up/down); `cstick=0` in settings.txt makes it the four C buttons |
 | Touch panel | see below | |
 
@@ -26,12 +26,12 @@ ZL/ZR or the C-stick. The New 3DS extras are shortcuts only.
 ```
 +--------+--------------------------+--------+
 |  VIEW  |  hearts (10 per row)     |  Y     |  C-left item + ammo
-| (C-up) |  magic bar               | I   ZL |  C-down item + ammo
+| (C-up) |  magic bar               | I   ZR |  C-down item + ammo
 | rupees |                          |  X     |  C-right item + ammo
 | keys   |        MINIMAP           |        |
 | SCREEN |  (parchment, centred,    |        |
 | 4:3/WIDE|  zoomed to the map)     |        |
-|OCARINA |                          | BOOTS ZR|
+|OCARINA |                          | BOOTS ZL|
 |        | [GEAR]  [MAP]  [ITEMS]   |        |
 +--------+--------------------------+--------+
 ```
@@ -39,9 +39,9 @@ ZL/ZR or the C-stick. The New 3DS extras are shortcuts only.
 | Pad | Behaviour |
 |---|---|
 | VIEW | Holds C-up (first person, or talk to Navi). When Navi wants to talk, the eye becomes a fairy labelled NAVI that pulses blue and green, so her call is seen with the top-screen HUD off too. |
-| Y / I / X | Hold the matching C button. The pad shows the equipped icon (live from `interfaceCtx->iconItemSegment`), the ammo count (red at 0), and is greyed when the game disables that button. The middle pad is labelled "I" on every model (D-pad down presses it too); a New 3DS adds a small "ZL" tag. |
+| Y / I / X | Hold the matching C button. The pad shows the equipped icon (live from `interfaceCtx->iconItemSegment`), the ammo count (red at 0), and is greyed when the game disables that button. The middle pad is labelled "I" on every model (D-pad down presses it too); a New 3DS adds a small "ZR" tag. |
 | OCARINA | Tap to play the owned ocarina without putting it on a C button. It works like a virtual fifth item button (`Port_VirtualOcarinaItem`), so the game's normal rules still apply. It is refused where the ocarina is restricted, where every C button is disabled, and in bombchu bowling. |
-| BOOTS | Tap (or ZR on a New 3DS) to cycle through owned boots: Kokiri → Iron → Hover (Iron and Hover need adult Link). It uses the same path as the pause menu (`Inventory_ChangeEquipment` + `Player_SetEquipmentData`) and plays the "decide" sound. |
+| BOOTS | Tap (or ZL on a New 3DS) to cycle through owned boots: Kokiri → Iron → Hover (Iron and Hover need adult Link). It uses the same path as the pause menu (`Inventory_ChangeEquipment` + `Player_SetEquipmentData`) and plays the "decide" sound. |
 | SCREEN | Tap to toggle 4:3 and widescreen. Saved to `sdmc:/3ds/oot/settings.txt`. |
 | GEAR / MAP / ITEMS | Press START with that pause page preselected (`gPortTouchPage` → `KaleidoSetup_Update`). Tapping any tab while paused closes the menu (START). |
 | rupees / keys | Display only. Keys show only in scenes where the N64 HUD shows them (`gPortHudKeys`, set in `Interface_Draw`). |

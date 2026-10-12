@@ -292,8 +292,8 @@ static void Port3ds_LoadSettings(void) {
  *   left:   VIEW (C-up: first person / Navi), rupees, small keys, SCREEN (4:3 / wide), OCARINA
  *   centre: hearts + magic, the minimap (software-drawn from gPortMinimap, port_minimap.h),
  *           tabs GEAR / MAP / ITEMS (START straight to that pause page)
- *   right:  C-left (Y), C-down (I; ZL on a New 3DS), C-right (X) with live item icons + ammo, BOOTS (cycles owned
- *           boots; ZR on a New 3DS)
+ *   right:  C-left (Y), C-down (I; ZR on a New 3DS), C-right (X) with live item icons + ammo, BOOTS (cycles owned
+ *           boots; ZL on a New 3DS)
  * Everything redraws only when it changes. Full description: docs/3ds-touch-panel.md. */
 #include "port_minimap.h"
 extern const unsigned char* Port_GetItemIcon(int itemId);
@@ -327,7 +327,7 @@ static const PanelPad sPads[P_COUNT] = {
     { 4, 148, 56, 32, "HUD", 0, -1, 0, 0, 0 },
     { 4, 184, 56, 52, "OCARINA", 0, -1, 0, 0, 0 },
     { 260, 4, 56, 56, "Y", BTN_CLEFT_, -1, 0, 0, 0 },
-    { 260, 64, 56, 56, "I", BTN_CDOWN_, -1, 0, 0, 0 }, /* touch item slot I (+ ZL / D-pad down) */
+    { 260, 64, 56, 56, "I", BTN_CDOWN_, -1, 0, 0, 0 }, /* touch item slot I (+ ZR / D-pad down) */
     { 260, 124, 56, 56, "X", BTN_CRIGHT_, -1, 0, 0, 0 },
     { 260, 184, 56, 52, "BOOTS", 0, -1, 0, 0, 0 },
     { 66, 208, 60, 30, "GEAR", BTN_START_, 3, 52, 116, 60 },
@@ -495,6 +495,8 @@ static int sNaviPulse; /* the NAVI pad's phase while Navi calls (1: green) */
 static const u8* sShownIconSeg;
 static unsigned sLastHudSerial, sLastMapSerial;
 static int sHudStale = 99, sMapStale = 99;
+int gPortInCutscene;          /* z_play.c: a cutscene is running (the panel goes black) */
+static int sMapRedrawPending; /* draw the map again at the next chance (after a cutscene) */
 
 static int IconsOk(void) {
     return sHudStale < 4 && gPortHudIconSeg != NULL;
@@ -516,15 +518,15 @@ static void DrawPad(int i) {
             }
         }
         /* the 3DS button that also presses it; the middle slot is the touch slot "I" on every model (D-pad
-         * down presses it too), and the New 3DS adds a "ZL" tag (2026-10-03: ZL alone meant nothing on an Old 3DS) */
+         * down presses it too), and the New 3DS adds a "ZR" tag (2026-10-03: a ZL/ZR tag alone meant nothing on an Old 3DS) */
         DrawText(p->x + 4, p->y + 4, p->label, PRGB(255, 230, 120));
-        if (c == 1 && sTouchUiN3ds) DrawText(p->x + p->w - 4 - 16, p->y + 4, "ZL", PRGB(200, 204, 214));
+        if (c == 1 && sTouchUiN3ds) DrawText(p->x + p->w - 4 - 16, p->y + 4, "ZR", PRGB(200, 204, 214));
     } else if (i == P_BOOTS) {
         if (sShown.boots >= 1 && sShown.boots <= 3) {
             DrawIcon(cx - 20, p->y + 3, Port_GetItemIcon(PANEL_ITEM_BOOTS_KOKIRI + sShown.boots - 1), 40, 0);
         }
         DrawTextC(cx, p->y + p->h - 12, "BOOTS", COL_TEXT);
-        if (sTouchUiN3ds) DrawText(p->x + p->w - 4 - 16, p->y + 4, "ZR", PRGB(200, 204, 214)); /* ZR presses it */
+        if (sTouchUiN3ds) DrawText(p->x + p->w - 4 - 16, p->y + 4, "ZL", PRGB(200, 204, 214)); /* ZL presses it */
     } else if (i == P_OCARINA) {
         int have = sShown.ocarina == PANEL_ITEM_OCARINA_FAIRY || sShown.ocarina == PANEL_ITEM_OCARINA_OF_TIME;
         if (have) DrawIcon(cx - 20, p->y + 3, Port_GetItemIcon(sShown.ocarina), 40, 0);
@@ -970,10 +972,10 @@ static void Port3ds_TouchUiInit(void) {
 /* PORT (2026-10-04): taps between updates. Input is read once per update; at low update rates (the Old 3DS, a heavy
  * scene) a quick tap on a touch pad could start and end between two reads and be lost (hardware v52 at ~11 updates
  * per second: the SCREEN pad "did nothing" on the title screen). The game thread also reads the buttons at each audio
- * pump (once per retrace, Port3ds_ScanBetweenUpdates); a touch or ZR press seen there is kept, with where the touch
+ * pump (once per retrace, Port3ds_ScanBetweenUpdates); a touch or ZL press seen there is kept, with where the touch
  * landed, until the next update's touch panel poll. The game's own controller still reads the buttons once per
  * update, as on the N64. */
-static u32 sTapDownAcc;      /* KEY_TOUCH / KEY_ZR presses since the last update's poll */
+static u32 sTapDownAcc;      /* KEY_TOUCH / KEY_ZL presses since the last update's poll */
 static touchPosition sTapPos; /* where that touch landed */
 void Port3ds_ScanBetweenUpdates(void) {
     u32 d;
@@ -981,7 +983,7 @@ void Port3ds_ScanBetweenUpdates(void) {
         return;
     }
     hidScanInput();
-    d = hidKeysDown() & (KEY_TOUCH | KEY_ZR);
+    d = hidKeysDown() & (KEY_TOUCH | KEY_ZL);
     if ((d & KEY_TOUCH) && !(sTapDownAcc & KEY_TOUCH)) {
         hidTouchRead(&sTapPos);
     }
@@ -991,7 +993,7 @@ void Port3ds_ScanBetweenUpdates(void) {
 /* held pads -> N64 bits; tap actions; redraws what changed */
 static unsigned short Port3ds_TouchUiPoll(void) {
     static unsigned sPolls;
-    int hit = -1, i, iconsOk, floorTap = -2, mapForce = 0;
+    int hit = -1, i, iconsOk, floorTap = -2, mapForce = sMapRedrawPending, inCs = 0;
     PortHudInfo now;
     if (!sTouchUi) return 0;
     sPolls++;
@@ -1009,6 +1011,29 @@ static unsigned short Port3ds_TouchUiPoll(void) {
 
     Port_GetHudInfo(&now);
     if (sHudStale >= 4) now.keys = -1; /* the HUD is not being drawn (title, file select) */
+
+    { /* PORT (2026-10-12, asked for): black during cutscenes (z_play.c gPortInCutscene, fresh while the game draws its
+       * HUD), no touch; the whole panel is drawn again when the cutscene ends */
+        static int sShownCs;
+        int cs = gPortInCutscene && sHudStale < 4;
+        if (cs != sShownCs) {
+            sShownCs = cs;
+            if (cs) {
+                FillRect(0, 0, 320, 240, 0);
+                Port3ds_CacheFlush(sFb, 240 * 320 * 2);
+            } else {
+                sTouchUiRedraw = 1;
+                sMapBaseValid = 0;
+                sMapRedrawPending = 1;
+            }
+        }
+        if (cs) {
+            sTapDownAcc = 0;
+            sHeldPad = -1;
+            inCs = 1;
+            goto capture; /* (the verification dump below still runs) */
+        }
+    }
 
     if (sTouchUiRedraw) {
         sTouchUiRedraw = 0;
@@ -1077,10 +1102,10 @@ static unsigned short Port3ds_TouchUiPoll(void) {
         }
         if (inset != sMapInset) sMapInset = inset, mapForce = 1;
     }
-    /* New 3DS: ZR is the BOOTS pad (pressed look while held) */
-    if ((hidKeysDown() | sTapDownAcc) & KEY_ZR) gPortTouchBoots = 3;
+    /* New 3DS: ZL is the BOOTS pad (pressed look while held; 2026-10-12, was ZR, swapped on request) */
+    if ((hidKeysDown() | sTapDownAcc) & KEY_ZL) gPortTouchBoots = 3;
     sTapDownAcc = 0;
-    if (hit < 0 && (hidKeysHeld() & KEY_ZR)) hit = P_BOOTS;
+    if (hit < 0 && (hidKeysHeld() & KEY_ZL)) hit = P_BOOTS;
     if (hit != sHeldPad) {
         int old = sHeldPad;
         sHeldPad = hit;
@@ -1167,6 +1192,7 @@ static unsigned short Port3ds_TouchUiPoll(void) {
         }
     }
 
+    sMapRedrawPending = 0;
     if (sFbDirty) {
         sFbDirty = sFbMapDirty = 0;
         Port3ds_CacheFlush(sFb, 240 * 320 * 2);
@@ -1175,6 +1201,7 @@ static unsigned short Port3ds_TouchUiPoll(void) {
         Port3ds_CacheFlush(sFb + MAP_X * 240, MAP_W * 240 * 2);
     }
 
+capture:
     { /* verification aid: with sdmc:/3ds/oot/capture_bottom present, dump the panel every 300 polls
        * (raw framebuffer + header, overwritten) so tools can check it without screenshots */
         if ((sPolls % 300) == 0) {
@@ -1194,7 +1221,7 @@ static unsigned short Port3ds_TouchUiPoll(void) {
         }
     }
     /* the tabs press START only when opening a page from gameplay (or closing the pause menu) */
-    return hit >= 0 ? sPads[hit].btn : 0;
+    return (hit >= 0 && !inCs) ? sPads[hit].btn : 0;
 }
 
 
@@ -1207,8 +1234,8 @@ static void Port3ds_PollInput(void) {
      *   A/B = A/B, L = Z-target, R = shield, Y/X = C-left/C-right, D-pad = C-up/C-down/C-left/C-right
      *   (the N64 D-pad is unused by OoT), SELECT = N64 L (minimap), START = START, touch panel =
      *   VIEW/C buttons/OCARINA/BOOTS/pause tabs/SCREEN + the minimap (docs/3ds-touch-panel.md).
-     * New 3DS extras: C-stick = camera (settings cstick=0: the four C buttons), ZL = C-down (item slot I),
-     * ZR = BOOTS (cycles the owned boots, like tapping the pad; 2026-10-03, it was a third C-up). */
+     * New 3DS extras: C-stick = camera (settings cstick=0: the four C buttons), ZR = C-down (item slot I),
+     * ZL = BOOTS (cycles the owned boots, like tapping the pad; 2026-10-03, it was a third C-up; ZL/ZR swapped 2026-10-12). */
     unsigned short b = 0;
     if (k & KEY_A)      b |= BTN_A_;
     if (k & KEY_B)      b |= BTN_B_;
@@ -1218,8 +1245,8 @@ static void Port3ds_PollInput(void) {
     if (k & KEY_SELECT) b |= BTN_L_;
     if (k & KEY_L)      b |= BTN_Z_;
     if (k & KEY_R)      b |= BTN_R_;
-    if (k & KEY_ZL)     b |= BTN_CDOWN_;
-    /* ZR: the BOOTS pad (Port3ds_TouchUiPoll); C-up stays on VIEW and D-pad up */
+    if (k & KEY_ZR)     b |= BTN_CDOWN_;
+    /* ZL: the BOOTS pad (Port3ds_TouchUiPoll); C-up stays on VIEW and D-pad up */
     /* PORT (2026-10-06, asked for): in menus (file select, the pause screens: gPortMenuInput, set by the game each
      * update) the D-pad moves like the stick, as menus are navigated on the N64; it presses no C button there (C
      * buttons equip items on the pause screens). In gameplay, dialogue and ocarina playing it stays the C buttons. */
@@ -2507,6 +2534,8 @@ static aptHookCookie sCpuStateHook;
 static void Port3ds_CpuStateHook(APT_HookType type, void* param) {
     (void)param;
     if (type == APTHOOK_ONRESTORE || type == APTHOOK_ONWAKEUP) {
+        extern volatile int gPortAudioResync;
+        gPortAudioResync = 1; /* audio_3ds.c: clear the sound queue the DSP may have lost (sleep: silent game) */
         extern unsigned gPortAudioCore1Limit;
         extern int gPortO3dsSim;
         bool n3ds = false;

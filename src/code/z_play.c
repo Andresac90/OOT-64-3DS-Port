@@ -1397,6 +1397,11 @@ void Play_Draw(PlayState* this) {
             gPortStereoFlatScene = 1;
             gPortMenuInput = 2; /* PORT: the D-pad navigates like the stick (3ds_main.c) */
         }
+        {
+            /* PORT (2026-10-12, asked for): the touch panel goes black during cutscenes (3ds_main.c) */
+            extern int gPortInCutscene;
+            gPortInCutscene = this->csCtx.state != CS_STATE_IDLE;
+        }
     }
     {
         /* PORT (2026-09-30): widescreen shows past the N64's 4:3 view. Scenes without a sky (skybox none /

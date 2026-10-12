@@ -13,9 +13,13 @@
 #include "save.h"
 #include "sram.h"
 #include "view.h"
-#ifdef PORT_START_FRESH
+#if defined(PORT_START_FRESH) || defined(PORT_MAKE_FULL_SAVE)
 #include "array_count.h"
 #include "inventory.h"
+#endif
+#ifdef PORT_MAKE_FULL_SAVE
+#include "item.h"
+#include "scene.h"
 #endif
 /* #include "file_select_state.h"  // restore for PORT_FS_TEST */
 
@@ -38,6 +42,9 @@ void TitleSetup_SetupTitleScreen(TitleSetupState* this) {
     // specific entrance, e.g. 0xB7 Bazaar / 0xB1 Market to exercise pre-rendered (S2DEX) rooms.
     gSaveContext.save.linkAge = LINK_AGE_CHILD;
     gSaveContext.save.entranceIndex = PORT_START_ENTRANCE;
+#endif
+#ifdef PORT_START_CS
+    gSaveContext.save.cutsceneIndex = PORT_START_CS; /* e.g. 0xFFF3 with entrance 0xEE: the Deku Tree calls Navi */
 #endif
 #ifdef PORT_START_DAYTIME
     gSaveContext.save.dayTime = PORT_START_DAYTIME; // e.g. 0x8000 = noon (tools/make_showcase.py)
@@ -72,6 +79,63 @@ void TitleSetup_SetupTitleScreen(TitleSetupState* this) {
         gSaveContext.save.info.equips.buttonItems[0] = ITEM_SWORD_KOKIRI;
         Inventory_ChangeEquipment(EQUIP_TYPE_SWORD, EQUIP_VALUE_SWORD_KOKIRI);
         Inventory_ChangeEquipment(EQUIP_TYPE_SHIELD, EQUIP_VALUE_SHIELD_DEKU);
+    }
+#endif
+#ifdef PORT_MAKE_FULL_SAVE
+    {
+        /* Tool build (GAME_EXTRA=-DPORT_DEBUG_BOOT -DPORT_MAKE_FULL_SAVE): writes FILE 2 of sdmc:/3ds/oot/save.bin as a
+         * finished game, for visiting late dungeons, then boots on with saving off. File 1 is left as it is (the SRAM
+         * layer loads save.bin first; Sram_WriteSave writes only file 2's slot and its backup). The debug save already
+         * has every item, song, medallion and stone, and each dungeon's map, compass, boss key and keys. */
+        extern void PortSram_FlushNow(void);
+        extern void PortDbg(const char*);
+        SramContext sramCtx;
+        int u;
+
+        gSaveContext.save.linkAge = LINK_AGE_ADULT;
+        gSaveContext.save.dayTime = CLOCK_TIME(12, 0);
+        gSaveContext.save.info.playerData.healthCapacity = gSaveContext.save.info.playerData.health = 20 * 16;
+        gSaveContext.save.info.playerData.isMagicAcquired = true;
+        gSaveContext.save.info.playerData.isDoubleMagicAcquired = true;
+        gSaveContext.save.info.playerData.magicLevel = 2;
+        gSaveContext.save.info.playerData.magic = 0x60;
+        gSaveContext.save.info.playerData.isDoubleDefenseAcquired = true;
+        gSaveContext.save.info.inventory.defenseHearts = 20;
+        gSaveContext.save.info.inventory.gsTokens = 100;
+        for (u = UPG_QUIVER; u <= UPG_DEKU_NUTS; u++) {
+            Inventory_ChangeUpgrade(u, u == UPG_SCALE ? 2 : 3);
+        }
+        gSaveContext.save.info.playerData.rupees = 500;
+        gSaveContext.save.info.equips.buttonItems[0] = ITEM_SWORD_MASTER;
+        Inventory_ChangeEquipment(EQUIP_TYPE_SWORD, EQUIP_VALUE_SWORD_MASTER);
+        Inventory_ChangeEquipment(EQUIP_TYPE_SHIELD, EQUIP_VALUE_SHIELD_HYLIAN);
+        SET_EVENTCHKINF(EVENTCHKINF_OPENED_DOOR_OF_TIME);
+        SET_EVENTCHKINF(EVENTCHKINF_REVEALED_MASTER_SWORD);
+        SET_EVENTCHKINF(EVENTCHKINF_EPONA_OBTAINED);
+        SET_EVENTCHKINF(EVENTCHKINF_CARPENTER_0_RESCUED);
+        SET_EVENTCHKINF(EVENTCHKINF_CARPENTER_1_RESCUED);
+        SET_EVENTCHKINF(EVENTCHKINF_CARPENTER_2_RESCUED);
+        SET_EVENTCHKINF(EVENTCHKINF_CARPENTER_3_RESCUED);
+        SET_EVENTCHKINF(EVENTCHKINF_DRAINED_WELL);
+        SET_EVENTCHKINF(EVENTCHKINF_RESTORED_LAKE_HYLIA);
+        SET_EVENTCHKINF(EVENTCHKINF_CREATED_RAINBOW_BRIDGE);
+        SET_EVENTCHKINF(EVENTCHKINF_OPENED_JABU_JABU);
+        SET_EVENTCHKINF(EVENTCHKINF_GAVE_LETTER_TO_KING_ZORA);
+        SET_EVENTCHKINF(EVENTCHKINF_BEGAN_GOHMA_BATTLE);
+        SET_EVENTCHKINF(EVENTCHKINF_BEGAN_KING_DODONGO_BATTLE);
+        SET_EVENTCHKINF(EVENTCHKINF_BEGAN_BARINADE_BATTLE);
+        SET_EVENTCHKINF(EVENTCHKINF_BEGAN_PHANTOM_GANON_BATTLE);
+        SET_EVENTCHKINF(EVENTCHKINF_BEGAN_VOLVAGIA_BATTLE);
+        SET_EVENTCHKINF(EVENTCHKINF_BEGAN_MORPHA_BATTLE);
+        SET_EVENTCHKINF(EVENTCHKINF_BEGAN_BONGO_BONGO_BATTLE);
+        SET_EVENTCHKINF(EVENTCHKINF_BEGAN_TWINROVA_BATTLE);
+        gSaveContext.save.info.playerData.savedSceneId = SCENE_TEMPLE_OF_TIME;
+        gSaveContext.save.entranceIndex = ENTR_TEMPLE_OF_TIME_0;
+        gSaveContext.fileNum = 1; /* file 2 */
+        Sram_WriteSave(&sramCtx);
+        PortSram_FlushNow();
+        gSaveContext.fileNum = 0xFF; /* (no saving from this boot) */
+        PortDbg("[fullsave] file 2 written");
     }
 #endif
     SET_NEXT_GAMESTATE(&this->state, Play_Init, PlayState);

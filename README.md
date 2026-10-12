@@ -175,8 +175,8 @@ Detailed notes, emulator testing and debugging tools: [docs/BUILDING_3DS.md](doc
 | START | START (pause) | |
 | SELECT | L (minimap on/off) | |
 | D-Pad | C buttons | the N64 D-pad is unused by the game |
-| ZL (New 3DS) | C-Down | third item (touch pad "I") |
-| ZR (New 3DS) | Boots | cycles the owned boots (touch pad BOOTS) |
+| ZL (New 3DS) | Boots | cycles the owned boots (touch pad BOOTS) |
+| ZR (New 3DS) | C-Down | third item (touch pad "I") |
 | C-Stick (New 3DS) | camera | `cstick=0` makes it the C buttons |
 | Touch screen | VIEW, items, Ocarina, Boots, pause pages, 4:3 / wide, top HUD | |
 
