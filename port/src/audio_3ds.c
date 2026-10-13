@@ -84,6 +84,17 @@ int Port3ds_AudioReady(void) {
     return sNdspOk ? 1 : 0;
 }
 
+/* PORT (2026-10-13): crackling reported on New 3DS hardware without a profile run: every gap and dropped frame goes
+ * to boot.log (the first 20, then every 100th), so a log from a session with crackles tells which it was */
+static unsigned sLogGaps, sLogDrops;
+static void audio_log_glitch(const char* what, unsigned* n) {
+    extern void PortDbgX(const char* label, unsigned val);
+    ++*n;
+    if (*n <= 20 || *n % 100 == 0) {
+        PortDbgX(what, *n);
+    }
+}
+
 /* M3c/M3d sink: push one engine frame of interleaved stereo s16. Drops the frame
  * if all wave bufs are still queued (underrun-safe, never blocks). */
 void Port3ds_AudioSubmit(const s16* samples, int nsamples) {
@@ -100,6 +111,7 @@ void Port3ds_AudioSubmit(const s16* samples, int nsamples) {
     ndspWaveBuf* wb = &sWaveBufs[sNextBuf];
     if (wb->status != NDSP_WBUF_DONE && wb->status != NDSP_WBUF_FREE) {
         gPortPerfAudioDrops++;
+        audio_log_glitch("[audio] frame dropped (queue full), count", &sLogDrops);
         if (++sAudioStuck >= 30) { /* ~0.5 s of drops: the queue is not moving */
             audio_resync("[audio] resync: the DSP queue stopped moving");
         }
@@ -112,6 +124,9 @@ void Port3ds_AudioSubmit(const s16* samples, int nsamples) {
             live |= sWaveBufs[i].status == NDSP_WBUF_QUEUED || sWaveBufs[i].status == NDSP_WBUF_PLAYING;
         }
         gPortPerfAudioUnderruns += sAudioStarted && !live; /* a gap: the DSP had nothing left to play */
+        if (sAudioStarted && !live) {
+            audio_log_glitch("[audio] gap (the DSP ran dry), count", &sLogGaps);
+        }
         sAudioStarted = 1;
     }
     memcpy(sWaveData[sNextBuf], samples, (size_t)nsamples * 2 * sizeof(s16));
@@ -192,7 +207,8 @@ void Port3ds_AudioSubmitAi(const s16* stereo, int nframes) {
  * whose audio task runs on time. On an Old 3DS the mixer shares the system core (7.5-10 ms per task in big scenes,
  * hardware v58) and the game's update can hold the next task back: a frame more than 4 ms late found the DSP empty
  * and played a gap (crackling, user report). With one more frame queued (~16 ms more latency) it tolerates ~20 ms.
- * -1 = by model (Old 3DS mixer on the system core: 512, else 0); settings audio_margin=<samples>. */
+ * -1 = by model (Old 3DS mixer on the system core: 512, else 256 - 2026-10-13, crackles still heard sometimes on a
+ * New 3DS: 8 ms more for a late frame); settings audio_margin=<samples>. */
 int gPortAudioMargin = -1;
 
 /* Stereo frames queued on ndsp and not yet played (the N64 osAiGetLength equivalent). */
@@ -211,7 +227,7 @@ int Port3ds_AudioQueuedFrames(void) {
     }
     {
         extern int gPortAudioCoreNow;
-        int margin = gPortAudioMargin >= 0 ? gPortAudioMargin : gPortAudioCoreNow == 1 ? 512 : 0;
+        int margin = gPortAudioMargin >= 0 ? gPortAudioMargin : gPortAudioCoreNow == 1 ? 512 : 256;
         queued -= margin;
     }
     return queued > 0 ? queued : 0;

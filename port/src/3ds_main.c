@@ -496,6 +496,8 @@ static const u8* sShownIconSeg;
 static unsigned sLastHudSerial, sLastMapSerial;
 static int sHudStale = 99, sMapStale = 99;
 int gPortInCutscene;          /* z_play.c: a cutscene is running (the panel goes black) */
+unsigned gPortPlaySerial;     /* z_play.c: counts gameplay frames (stale = title screen, file select: black too) */
+static unsigned sLastPlaySerial, sPlayStale = 99;
 static int sMapRedrawPending; /* draw the map again at the next chance (after a cutscene) */
 
 static int IconsOk(void) {
@@ -720,8 +722,13 @@ static int sMapInset;       /* FLOOR_INSET in a dungeon, else 0 */
 static int sFloorView = -1; /* the floor slot shown, -1 = the room map */
 static int sFloorStale = 99;
 static unsigned sLastFloorSerial;
+/* PORT (2026-10-12): the floor list stays while the game is paused (the HUD is still drawn but Map_Update, which
+ * refreshes the list, and the minimap export stop): a floor's map is no longer replaced by the room map on pausing */
+static int FloorsPaused(void) {
+    return sFloorStale >= 4 && sHudStale < 4 && sMapStale >= 4;
+}
 static int FloorCount(void) {
-    return sFloorStale < 4 ? gPortFloorMap.numFloors : 0;
+    return (sFloorStale < 4 || FloorsPaused()) ? gPortFloorMap.numFloors : 0;
 }
 static int FloorBtnY(int k, int n) {
     return MAP_Y + (MAP_H - n * (FLOOR_BTN_H + 3) + 3) / 2 + k * (FLOOR_BTN_H + 3);
@@ -1008,14 +1015,17 @@ static unsigned short Port3ds_TouchUiPoll(void) {
     sLastMapSerial = gPortMinimap.serial;
     sFloorStale = (gPortFloorMap.serial != sLastFloorSerial) ? 0 : sFloorStale + 1;
     sLastFloorSerial = gPortFloorMap.serial;
+    sPlayStale = (gPortPlaySerial != sLastPlaySerial) ? 0 : sPlayStale + 1;
+    sLastPlaySerial = gPortPlaySerial;
 
     Port_GetHudInfo(&now);
     if (sHudStale >= 4) now.keys = -1; /* the HUD is not being drawn (title, file select) */
 
     { /* PORT (2026-10-12, asked for): black during cutscenes (z_play.c gPortInCutscene, fresh while the game draws its
-       * HUD), no touch; the whole panel is drawn again when the cutscene ends */
+       * HUD), no touch; the whole panel is drawn again when the cutscene ends. 2026-10-13 (asked for): black outside
+       * gameplay too - title screen, file select (gPortPlaySerial not counting) */
         static int sShownCs;
-        int cs = gPortInCutscene && sHudStale < 4;
+        int cs = (gPortInCutscene && sHudStale < 4) || sPlayStale >= 4;
         if (cs != sShownCs) {
             sShownCs = cs;
             if (cs) {
@@ -1094,7 +1104,7 @@ static unsigned short Port3ds_TouchUiPoll(void) {
     }
     { /* dungeon floors: the view follows the taps; leaving the dungeon goes back to the room map */
         int inset = FloorCount() > 0 ? FLOOR_INSET : 0;
-        if (FloorCount() == 0 && sFloorStale > 30) floorTap = -1;
+        if (FloorCount() == 0 && (sFloorStale < 4 || sFloorStale > 30)) floorTap = -1; /* left the dungeon (or the game) */
         if (floorTap != -2 && floorTap != sFloorView) {
             sFloorView = floorTap;
             gPortFloorReq = floorTap;

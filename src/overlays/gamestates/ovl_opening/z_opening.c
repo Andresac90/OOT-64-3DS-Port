@@ -19,6 +19,8 @@
 #endif
 #ifdef PORT_MAKE_FULL_SAVE
 #include "item.h"
+#include "message.h"
+#include "string.h"
 #include "scene.h"
 #endif
 /* #include "file_select_state.h"  // restore for PORT_FS_TEST */
@@ -92,6 +94,11 @@ void TitleSetup_SetupTitleScreen(TitleSetupState* this) {
         SramContext sramCtx;
         int u;
 
+        static const u8 sName[8] = { FILENAME_UPPERCASE('L'), FILENAME_LOWERCASE('i'), FILENAME_LOWERCASE('n'),
+                                     FILENAME_LOWERCASE('k'), FILENAME_SPACE, FILENAME_SPACE, FILENAME_SPACE,
+                                     FILENAME_SPACE };
+
+        memcpy(gSaveContext.save.info.playerData.playerName, sName, sizeof(sName));
         gSaveContext.save.linkAge = LINK_AGE_ADULT;
         gSaveContext.save.dayTime = CLOCK_TIME(12, 0);
         gSaveContext.save.info.playerData.healthCapacity = gSaveContext.save.info.playerData.health = 20 * 16;
@@ -106,6 +113,12 @@ void TitleSetup_SetupTitleScreen(TitleSetupState* this) {
             Inventory_ChangeUpgrade(u, u == UPG_SCALE ? 2 : 3);
         }
         gSaveContext.save.info.playerData.rupees = 500;
+        gSaveContext.save.info.inventory.items[SLOT_OCARINA] = ITEM_OCARINA_OF_TIME; /* (the debug save has the Fairy Ocarina) */
+        for (u = 1; u < 4; u++) {
+            if (gSaveContext.save.info.equips.buttonItems[u] == ITEM_OCARINA_FAIRY) {
+                gSaveContext.save.info.equips.buttonItems[u] = ITEM_OCARINA_OF_TIME;
+            }
+        }
         gSaveContext.save.info.equips.buttonItems[0] = ITEM_SWORD_MASTER;
         Inventory_ChangeEquipment(EQUIP_TYPE_SWORD, EQUIP_VALUE_SWORD_MASTER);
         Inventory_ChangeEquipment(EQUIP_TYPE_SHIELD, EQUIP_VALUE_SHIELD_HYLIAN);

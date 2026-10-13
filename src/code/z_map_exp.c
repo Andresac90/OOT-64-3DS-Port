@@ -797,6 +797,14 @@ void Map_Update(PlayState* play) {
                 Map_ExportFloors(play, play->sceneId - SCENE_DEKU_TREE_BOSS);
 #endif
                 break;
+#ifdef __3DS__
+            default:
+                /* PORT (2026-10-12): not a dungeon: say so, fresh, so the touch screen drops the last dungeon's floors
+                 * here (it keeps them while paused, when nothing is reported) */
+                gPortFloorMap.numFloors = 0;
+                gPortFloorMap.serial++;
+                break;
+#endif
         }
     }
 }

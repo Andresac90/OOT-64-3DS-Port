@@ -116,7 +116,11 @@ static C3D_Tex sTexturePool[4096];
  * wrong in Azahar: grey title-screen sky, tools/statediff bootflow.py title). */
 extern int gPortGpuVtx, gPortShadeLinear;
 static C3D_Tex sTex0Proj;
+static C3D_Tex sTexEmpty; /* 8x8 white: bound in place of a texture that has no memory (gfx_citro3d_upload_texture) */
 static void texBindUnit(int unit, C3D_Tex* t) {
+    if (t->data == NULL && sTexEmpty.data != NULL) {
+        t = &sTexEmpty;
+    }
     if (unit == 0 && gPortGpuVtx && gPortShadeLinear) {
         sTex0Proj = *t;
         sTex0Proj.param = (t->param & ~GPU_TEXTURE_MODE(7)) | GPU_TEXTURE_MODE(GPU_TEX_PROJECTION);
@@ -714,6 +718,9 @@ static void performTexSwizzle(const u8* src, u32* dst, u32 w, u32 h)
     }
 }
 
+extern void PortDbgX(const char* label, unsigned val);
+extern int gPortTexCacheFlush; /* gfx_pc.c */
+
 static void gfx_citro3d_upload_texture(uint8_t *rgba32_buf, int width, int height) {
     gPortC3dCalls[5]++;
     if(width < 8 || height < 8 || (width & (width - 1)) || (height & (height - 1)))
@@ -769,8 +776,29 @@ static void gfx_citro3d_upload_texture(uint8_t *rgba32_buf, int width, int heigh
         C3D_TexDelete(&sTexturePool[sCurTex]);
         sTexturePool[sCurTex].data = NULL;
     }
-    if (sTexturePool[sCurTex].data == NULL) {
-        C3D_TexInit(&sTexturePool[sCurTex], width, height, GPU_RGBA8);
+    if (sTexturePool[sCurTex].data == NULL && !C3D_TexInit(&sTexturePool[sCurTex], width, height, GPU_RGBA8)) {
+        /* PORT (2026-10-13): out of linear memory (Old 2DS, 80MB mode: crash after saving in Deku Tree B2 and
+         * Dodongo's Cavern, GitHub issue #3 - the upload wrote to address 0). Free every other texture, have
+         * gfx_pc forget its cache (they are uploaded again when next used) and try once more; still nothing ->
+         * this texture stays empty (texBindUnit binds sTexEmpty) instead of crashing. */
+        static int sOomLogs;
+        int i;
+        sTexturePool[sCurTex].data = NULL;
+        for (i = 0; i < sTextureIndex; i++) {
+            if (i != sCurTex && sTexturePool[i].data != NULL) {
+                C3D_TexDelete(&sTexturePool[i]);
+                sTexturePool[i].data = NULL;
+            }
+        }
+        sTexBoundOk[0] = sTexBoundOk[1] = false;
+        gPortTexCacheFlush = 1;
+        if (sOomLogs++ < 8) {
+            PortDbgX("TEX out of linear memory, cache freed; linear free KB", linearSpaceFree() / 1024);
+        }
+        if (!C3D_TexInit(&sTexturePool[sCurTex], width, height, GPU_RGBA8)) {
+            sTexturePool[sCurTex].data = NULL;
+            return;
+        }
     }
     C3D_TexUpload(&sTexturePool[sCurTex], sTexBuf);
     C3D_TexFlush(&sTexturePool[sCurTex]);
@@ -1536,6 +1564,10 @@ static void gfx_citro3d_init(void)
     // Create the VBO (vertex buffer object)
     sVboBuffer = linearAlloc(VBO_BYTES);
     sIdxBuf = linearAlloc(IDX_CAP * sizeof(u16));
+    if (C3D_TexInit(&sTexEmpty, 8, 8, GPU_RGBA8)) {
+        memset(sTexEmpty.data, 0xFF, 8 * 8 * 4);
+        C3D_TexFlush(&sTexEmpty);
+    }
     gfx_citro3d_setup_mode(gPortGpuVtx != 0);
     rawInit();
     C3D_DepthMap(true, -1.0f, 0);

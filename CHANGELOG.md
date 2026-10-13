@@ -5,7 +5,13 @@ No game builds are published; each version is a source release. See the [README]
 ## Unreleased
 
 ### Added
-- Touch screen: black during cutscenes (no touch input then); the panel comes back when the cutscene ends.
+- Touch screen: black during cutscenes (no touch input then); the panel comes back when the cutscene ends. Also black
+  on the title screen and the file select.
+- `tools/make_title_banner.py`: a HOME Menu icon with the Hylian Shield (its 3D model, rendered by the port) and a
+  banner with the title-screen logo and the first seconds of Zelda's Lullaby (`--sound item`: the item fanfare),
+  made from your own game data like the other local icon tools; these files are never committed.
+- Audio: every gap (the DSP ran dry) and dropped sound frame is written to `boot.log` (the first 20, then every
+  100th), so a session with crackling shows which it was.
 - Menus: the D-pad moves the cursor like the stick on the file select and the pause screens (it stays the C
   buttons in gameplay, dialogue and ocarina playing).
 - Touch screen, dungeons: floor buttons left of the map, as on the pause map page. Tapping a floor shows its map
@@ -13,6 +19,17 @@ No game builds are published; each version is a source release. See the [README]
   or the map goes back to the room map.
 
 ### Fixed
+- Old 3DS / 2DS: the game could crash right after saving (GitHub issue #3: Deku Tree B2, Dodongo's Cavern 2F; crash
+  dump: a copy to address 0 in the texture upload). With the 80 MB memory mode about 2 MB of linear memory is left in
+  those dungeons (Azahar, Old 3DS mode); when a texture found none, its upload wrote to address 0. Now every other
+  cached texture is freed and the allocation tried again (they are uploaded again when next drawn); if there is still
+  none, the texture is left blank instead. Checked in Azahar with textures limited to 300 KB: the Deku Tree runs on.
+- New 3DS: one more short audio frame (8 ms) is kept queued, as on the Old 3DS, so a late frame does not leave the
+  DSP empty (crackling still heard sometimes).
+- Lens of Truth: the tinted frame showed only on the left with no round lens. Its mask is drawn mirrored and
+  clamped, which the 3DS GPU cannot do at once; the mirrored copy is now built into the texture. In widescreen the
+  frame also covers the sides (full-screen texture rectangles are widened). Checked against ares.
+- Touch screen: a floor's map now stays when the pause menu is opened and closed (it went back to the room map).
 - Touch screen: while paused, the minimap turned into a scrambled grid: the pause screen loads its floor maps into
   the buffer the room map is read from. The room map is no longer taken from it while paused; it is back after.
 - Level-of-detail models: close-range geometry behind an N64 "branch on depth" command (`gsSPBranchLessZraw`) was

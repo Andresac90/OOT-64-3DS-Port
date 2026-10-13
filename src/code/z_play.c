@@ -37,6 +37,9 @@
 #include "z_actor_dlftbls.h"
 #include "zelda_arena.h"
 #include "audio.h"
+#ifdef PORT_BANNER_SOUND
+#include "seqcmd.h"
+#endif
 #include "cutscene_flags.h"
 #include "debug_display.h"
 #include "effect.h"
@@ -1235,6 +1238,86 @@ void Play_DrawOverlayElements(PlayState* this) {
     }
 }
 
+#ifdef PORT_SHIELDGEN
+#include "draw.h"
+#include "item.h"
+#include "object.h"
+// tools/make_title_banner.py: the Hylian Shield's get-item model (object_gi_shield_2) alone, close in front of the
+// camera, over a black and then a white screen (the two give the edges' transparency), at a few turns. Both frames
+// are read back in full color and written to the SD card, as make_navi_icon.py does with Navi.
+extern s32 Object_SpawnPersistent(ObjectContext* objectCtx, s16 objectId);
+
+static void PortShieldGen(PlayState* this) {
+    extern void Port3ds_RequestColor(void);
+    extern void PortStateDump_WriteColor(const char* path);
+    static s32 sSlot = -1;
+    GraphicsContext* gfxCtx = this->state.gfxCtx;
+    s32 f = (s32)this->gameplayFrames;
+    s32 white = ((f - 100) / 10) & 1, turn = (f - 100) / 20;
+
+    if (f == 50) {
+        sSlot = Object_SpawnPersistent(&this->objectCtx, OBJECT_GI_SHIELD_2);
+    } else if (f == 95) {
+        Port3ds_RequestColor(); // eager per-frame readback from here on
+    } else if (f > 100 && f <= 171 && (f - 101) % 10 == 0) {
+        static const char* sPaths[8] = {
+            "sdmc:/3ds/oot/shield_0_black.bin", "sdmc:/3ds/oot/shield_0_white.bin", "sdmc:/3ds/oot/shield_1_black.bin",
+            "sdmc:/3ds/oot/shield_1_white.bin", "sdmc:/3ds/oot/shield_2_black.bin", "sdmc:/3ds/oot/shield_2_white.bin",
+            "sdmc:/3ds/oot/shield_3_black.bin", "sdmc:/3ds/oot/shield_3_white.bin",
+        };
+        PortStateDump_WriteColor(sPaths[(f - 101) / 10]); // the previous frame's
+    }
+    if (f < 100 || f > 170 || (f - 100) % 10 != 0 || sSlot < 0) {
+        return;
+    }
+    {
+        u8 shade = white ? 255 : 0;
+        void* segment = this->objectCtx.slots[sSlot].segment;
+        Vec3f fwd, at;
+        Vec3s rot = { 0, 0, 0 };
+        f32 len;
+        Gfx* opa;
+
+        OPEN_DISPS(gfxCtx, "../z_play.c", 0);
+
+        // the whole screen in one flat color, over everything the frame drew
+        gDPPipeSync(OVERLAY_DISP++);
+        gDPSetScissor(OVERLAY_DISP++, G_SC_NON_INTERLACE, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
+        gDPSetCycleType(OVERLAY_DISP++, G_CYC_FILL);
+        gDPSetRenderMode(OVERLAY_DISP++, G_RM_NOOP, G_RM_NOOP2);
+        gDPSetFillColor(OVERLAY_DISP++,
+                        (GPACK_RGBA5551(shade, shade, shade, 1) << 16) | GPACK_RGBA5551(shade, shade, shade, 1));
+        gDPFillRectangle(OVERLAY_DISP++, 0, 0, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1);
+        gDPPipeSync(OVERLAY_DISP++);
+
+        // 40 units in front of the game's camera (nothing of the room is that close), facing it, then turned
+        fwd.x = this->view.at.x - this->view.eye.x;
+        fwd.y = this->view.at.y - this->view.eye.y;
+        fwd.z = this->view.at.z - this->view.eye.z;
+        len = sqrtf(SQ(fwd.x) + SQ(fwd.y) + SQ(fwd.z));
+        at.x = this->view.eye.x + fwd.x / len * 40.0f;
+        at.y = this->view.eye.y + fwd.y / len * 40.0f;
+        at.z = this->view.eye.z + fwd.z / len * 40.0f;
+        rot.y = Math_Vec3f_Yaw(&at, &this->view.eye) + 0x8000 + (turn - 1) * 0xA00; // its front: straight, then turned
+
+        gSegments[6] = OS_K0_TO_PHYSICAL(segment);
+        gSPSegment(OVERLAY_DISP++, 0x06, segment);
+        // GetItem_Draw's drawing (lit, opaque), pointed at the overlay list for this call
+        opa = POLY_OPA_DISP;
+        POLY_OPA_DISP = OVERLAY_DISP;
+        Matrix_Push();
+        Matrix_SetTranslateRotateYXZ(at.x, at.y, at.z, &rot);
+        Matrix_Scale(2.2f, 2.2f, 2.2f, MTXMODE_APPLY);
+        GetItem_Draw(this, GID_SHIELD_HYLIAN);
+        Matrix_Pop();
+        OVERLAY_DISP = POLY_OPA_DISP;
+        POLY_OPA_DISP = opa;
+
+        CLOSE_DISPS(gfxCtx, "../z_play.c", 0);
+    }
+}
+#endif
+
 #ifdef PORT_NAVIGEN
 #include "overlays/actors/ovl_En_Elf/z_en_elf.h"
 #include "assets/objects/gameplay_keep/fairy_skel.h"
@@ -1400,7 +1483,11 @@ void Play_Draw(PlayState* this) {
         {
             /* PORT (2026-10-12, asked for): the touch panel goes black during cutscenes (3ds_main.c) */
             extern int gPortInCutscene;
+            extern unsigned gPortPlaySerial;
             gPortInCutscene = this->csCtx.state != CS_STATE_IDLE;
+            if (gSaveContext.gameMode == GAMEMODE_NORMAL) { /* black outside gameplay too (2026-10-13): the title */
+                gPortPlaySerial++; /* screen (a Play state with GAMEMODE_TITLE_SCREEN), the file select, credits */
+            }
         }
     }
     {
@@ -1691,6 +1778,9 @@ Play_Draw_skip:
 #ifdef PORT_NAVIGEN
     PortNaviGen(this);
 #endif
+#ifdef PORT_SHIELDGEN
+    PortShieldGen(this);
+#endif
 
     CLOSE_DISPS(gfxCtx, "../z_play.c", 4508);
 }
@@ -1699,6 +1789,22 @@ void Play_Main(GameState* thisx) {
     PlayState* this = (PlayState*)thisx;
 
     D_8012D1F8 = &this->state.input[0];
+
+#ifdef PORT_BANNER_SOUND
+    {
+        /* Tool build (tools/make_title_banner.py): silence, then play one sequence (the HOME Menu banner's sound),
+         * recorded by the audio capture (sdmc:/3ds/oot/capture_audio -> oot_audio.wav) */
+        static int sFrames;
+
+        sFrames++;
+        if (sFrames < 100) {
+            SEQCMD_STOP_SEQUENCE(SEQ_PLAYER_BGM_MAIN, 0);
+            SEQCMD_STOP_SEQUENCE(SEQ_PLAYER_BGM_SUB, 0);
+        } else if (sFrames == 100) {
+            Audio_PlayFanfare(PORT_BANNER_SOUND);
+        }
+    }
+#endif
 
     DebugDisplay_Init();
 

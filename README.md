@@ -141,7 +141,10 @@ Step 3 also creates `baseroms/ntsc-1.0/baserom-decompressed.z64`, which the game
 with Pillow): `python3 tools/make_link_banner.py` captures Link as the game draws him (the pause menu's preview of
 his 3D model) and makes the HOME Menu banner from it: Link on a transparent background (`--white`: on white;
 `port/banner_local.bnr`; also needs
-[bannertool](https://github.com/diasurgical/bannertool)), and `python3 tools/make_navi_icon.py` renders Navi into the icon (`port/icon_local.png`). Run them before step 5; later builds use them. These files
+[bannertool](https://github.com/diasurgical/bannertool)), and `python3 tools/make_navi_icon.py` renders Navi into the icon (`port/icon_local.png`). Or
+`python3 tools/make_title_banner.py`: the Hylian Shield as the icon and the title-screen logo as the banner, with the
+first seconds of Zelda's Lullaby as its sound (`--sound item`: the item fanfare). Run them before step 5; later builds
+use them (the last one run wins). These files
 are made from Nintendo's models, so they are ignored by git and must never be shared; without them the build uses
 the original artwork (a drawn fairy and an ocarina).
 

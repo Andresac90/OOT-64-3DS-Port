@@ -110,6 +110,7 @@ struct TextureHashmapNode {
     uint32_t pal_hash;   /* PORT: CI textures: hash of the palette colors they use (0 otherwise) */
     uint32_t line_size_bytes; /* PORT: the tile's row pitch: same bytes, different width = different texture */
     uint16_t width, height;   /* PORT: dimensions uploaded (texture coordinates are normalized to them) */
+    uint8_t mirror_key;       /* PORT: MIRROR+CLAMP per axis (gfx_upload_texture may build the mirrored copy in) */
     
     uint32_t texture_id;
     uint8_t cms, cmt;
@@ -654,14 +655,28 @@ static int sTlutHashValid;
 static const struct TileDesc* sImpTile; /* tile of the texture being imported (import_texture) */
 static struct TextureHashmapNode* sImpNode; /* its cache node */
 
+int gPortTexCacheFlush; /* set by the renderer when it had to free every texture (out of memory) */
+
+static uint8_t tile_mirror_key(const struct TileDesc* t) {
+    return (uint8_t)(((t->cms & (G_TX_MIRROR | G_TX_CLAMP)) == (G_TX_MIRROR | G_TX_CLAMP)) |
+                     (((t->cmt & (G_TX_MIRROR | G_TX_CLAMP)) == (G_TX_MIRROR | G_TX_CLAMP)) << 1));
+}
 static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, const uint8_t *orig_addr, uint32_t fmt, uint32_t siz, uint32_t size_bytes) {
     uint32_t pal_hash = gfx_ci_palette_hash(fmt, siz);
+    uint8_t mirror_key = tile_mirror_key(sImpTile);
     size_t hash = (uintptr_t)orig_addr;
     hash = (hash >> 5) & 0x3ff;
-    struct TextureHashmapNode **node = &gfx_texture_cache.hashmap[hash];
+    struct TextureHashmapNode **node;
+    if (gPortTexCacheFlush) { /* the renderer ran out of memory and freed every texture: start over */
+        gPortTexCacheFlush = 0;
+        memset(gfx_texture_cache.hashmap, 0, sizeof(gfx_texture_cache.hashmap));
+        gfx_texture_cache.pool_pos = 0;
+    }
+    node = &gfx_texture_cache.hashmap[hash];
     while (*node != NULL && *node - gfx_texture_cache.pool < gfx_texture_cache.pool_pos) {
         if ((*node)->texture_addr == orig_addr && (*node)->fmt == fmt && (*node)->siz == siz && (*node)->size_bytes == size_bytes &&
-            (*node)->pal_hash == pal_hash && (*node)->line_size_bytes == sImpTile->line_size_bytes) {
+            (*node)->pal_hash == pal_hash && (*node)->line_size_bytes == sImpTile->line_size_bytes &&
+            (*node)->mirror_key == mirror_key) {
             gfx_rapi->select_texture(tile, (*node)->texture_id);
             *n = *node;
             return true;
@@ -696,6 +711,7 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
     (*node)->texture_addr = orig_addr;
     (*node)->pal_hash = pal_hash;
     (*node)->line_size_bytes = sImpTile->line_size_bytes;
+    (*node)->mirror_key = mirror_key;
     (*node)->width = (*node)->height = 0;
     (*node)->fmt = fmt;
     (*node)->siz = siz;
@@ -794,6 +810,32 @@ static void gfx_upload_texture(uint8_t* buf, uint32_t width, uint32_t height) {
     if (sMeshRedecode) {
         mesh_keep_texture(sImpNode->texture_id, buf, width, height);
         return;
+    }
+#endif
+#ifdef __3DS__
+    {
+        /* PORT (2026-10-12): MIRROR + CLAMP (the Lens of Truth's circle mask): the RDP mirrors within the mask and
+         * clamps at the tile's edges; the PICA can only do one of the two, and CLAMP_TO_EDGE alone lost the mirrored
+         * half (hardware photo: the tint only on the left; ares shows a round lens). When the tile spans more than
+         * one mirror period (the texture's size), the mirrored copy is built into the texture - twice as wide or
+         * tall - and clamped; the uploaded size doubles, so texture coordinates land as before. */
+        static uint8_t sMirrorBuf[128 * 128 * 4];
+        const struct TileDesc* t = sImpTile;
+        int ms = t != NULL && (t->cms & (G_TX_MIRROR | G_TX_CLAMP)) == (G_TX_MIRROR | G_TX_CLAMP) &&
+                 (uint32_t)((t->lrs - t->uls) / 4 + 1) > width;
+        int mt = t != NULL && (t->cmt & (G_TX_MIRROR | G_TX_CLAMP)) == (G_TX_MIRROR | G_TX_CLAMP) &&
+                 (uint32_t)((t->lrt - t->ult) / 4 + 1) > height;
+        if ((ms || mt) && (width << ms) * (height << mt) <= 128 * 128) {
+            uint32_t w2 = width << ms, h2 = height << mt, x, y;
+            for (y = 0; y < h2; y++) {
+                uint32_t sy = y < height ? y : 2 * height - 1 - y;
+                for (x = 0; x < w2; x++) {
+                    uint32_t sx = x < width ? x : 2 * width - 1 - x;
+                    memcpy(&sMirrorBuf[(y * w2 + x) * 4], &buf[(sy * width + sx) * 4], 4);
+                }
+            }
+            buf = sMirrorBuf, width = w2, height = h2;
+        }
     }
 #endif
     gfx_rapi->upload_texture(buf, width, height);
@@ -4682,6 +4724,18 @@ static void gfx_dp_texture_rectangle_impl(int32_t ulx, int32_t uly, int32_t lrx,
         lry += 1 << 2;
     }
     
+#ifdef __3DS__
+    if ((rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) != G_CYC_COPY && !flip && ulx <= 0 && uly <= 0 &&
+        lrx >= SCREEN_WIDTH * 4 - 4 && lry >= SCREEN_HEIGHT * 4 - 4 && WIDE_ACTIVE_CIMG() &&
+        !sWideLoaded[rdp.tiles[tile & 7].tmem != 0]) {
+        /* PORT (2026-10-12): a full-screen texture rectangle (the Lens of Truth's tinted frame) covers the 4:3 area
+         * only; in widescreen it is extended to the sides, its texture coordinates continued at the same rate (the
+         * Lens mask clamps there to its outer tint, as the N64's frame edge) */
+        ulx -= 40 << 2;
+        lrx += 40 << 2;
+        uls -= (int16_t)((40 * (int32_t)dsdx) >> 5);
+    }
+#endif
     /* PORT (2026-09-27): at exactly 1 texel per pixel the RDP's bilinear filter samples texel centers,
      * i.e. returns the texels unfiltered; here 2x2 supersamples land a quarter texel off-center and
      * bilinear smeared 1-pixel HUD/minimap lines (tools/statediff fbdiff). Point-sample instead. */
