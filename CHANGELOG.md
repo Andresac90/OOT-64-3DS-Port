@@ -19,6 +19,9 @@ No game builds are published; each version is a source release. See the [README]
   or the map goes back to the room map.
 
 ### Fixed
+- Pause screens: the selection cursor (the four corners around the item, song, map point) was not drawn. The N64
+  builds its corners in the next frame's update, before the RSP reads them a frame late; the port draws each frame as
+  built, so the corners were all at 0. They are now built when drawn (the Z/R arrows already were).
 - Old 3DS / 2DS: the game could crash right after saving (GitHub issue #3: Deku Tree B2, Dodongo's Cavern 2F; crash
   dump: a copy to address 0 in the texture upload). With the 80 MB memory mode about 2 MB of linear memory is left in
   those dungeons (Azahar, Old 3DS mode); when a texture found none, its upload wrote to address 0. Now every other

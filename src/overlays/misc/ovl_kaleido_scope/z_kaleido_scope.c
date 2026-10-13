@@ -1154,6 +1154,16 @@ void KaleidoScope_DrawCursor(PlayState* play, u16 pageIndex) {
         s16 j;
 
         if (pauseCtx->pageIndex == pageIndex) {
+#ifdef __3DS__
+            // PORT: cursorVtx is allocated each frame and the draw only sets the top-left position; the N64's RSP
+            // runs a frame behind the CPU and reads it after the next update (KaleidoScope_UpdateCursorVtx) has
+            // built the corner quads around that position. The port renders this frame's list as built, so the
+            // corners are built here (they were all at 0: no cursor on any page, hardware 2026-10-13; the Z/R
+            // bracket had this fix since 2026-09-28). The update's own rebuild is skipped (it would move a list
+            // the render thread may still be drawing).
+            void KaleidoScope_UpdateCursorVtx(PlayState * play);
+            KaleidoScope_UpdateCursorVtx(play);
+#endif
 
             // Draw PAUSE_CURSOR_QUAD_TL, PAUSE_CURSOR_QUAD_TR, PAUSE_CURSOR_QUAD_BL, PAUSE_CURSOR_QUAD_BR
 
@@ -1873,17 +1883,7 @@ void KaleidoScope_DrawUIOverlay(PlayState* play) {
         j = (pauseCtx->cursorSpecialPos - PAUSE_CURSOR_PAGE_LEFT + UI_OVERLAY_QUAD_BUTTON_LEFT) * 4;
         pauseCtx->cursorVtx[0].v.ob[0] = pauseCtx->uiOverlayVtx[j].v.ob[0];
         pauseCtx->cursorVtx[0].v.ob[1] = pauseCtx->uiOverlayVtx[j].v.ob[1];
-#ifdef __3DS__
-        {
-            // PORT: cursorVtx is not double-buffered. The N64's RSP runs a frame behind the CPU and reads it
-            // after the next update has rebuilt the corner quads around this position; the port renders
-            // right after this draw, so rebuild them now (stale corners made inverted, culled quads: the
-            // Z/R bracket was missing, tools/statediff fbdiff)
-            void KaleidoScope_UpdateCursorVtx(PlayState * play);
-            KaleidoScope_UpdateCursorVtx(play);
-        }
-#endif
-        KaleidoScope_DrawCursor(play, pauseCtx->pageIndex);
+        KaleidoScope_DrawCursor(play, pauseCtx->pageIndex); // (PORT: rebuilds the corner quads first)
     }
 
     // UI_OVERLAY_QUAD_INFO_ICON
@@ -3702,11 +3702,15 @@ void KaleidoScope_Update(PlayState* play) {
             pauseCtx->stickAdjX = input->rel.stick_x;
             pauseCtx->stickAdjY = input->rel.stick_y;
 
+#ifndef __3DS__ // PORT: built when drawn (KaleidoScope_DrawCursor)
             KaleidoScope_UpdateCursorVtx(play);
+#endif
             KaleidoScope_HandlePageToggles(pauseCtx, input);
         } else if ((pauseCtx->pageIndex == PAUSE_QUEST) && ((pauseCtx->mainState < PAUSE_MAIN_STATE_3) ||
                                                             (pauseCtx->mainState == PAUSE_MAIN_STATE_SONG_PROMPT))) {
+#ifndef __3DS__
             KaleidoScope_UpdateCursorVtx(play);
+#endif
         }
 
         if (pauseCtx->state == PAUSE_STATE_MAIN) {
