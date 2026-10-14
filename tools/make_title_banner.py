@@ -82,16 +82,14 @@ def open_or_render_shield(raw):
 
 
 def make_icon(shield):
-    """the shield on a light rounded square, 48x48 (composed at 4x, then reduced)"""
+    """the shield on a light square filling the whole icon, 48x48 (composed at 4x, then reduced). Fully opaque: the
+    HOME Menu shows transparent icon pixels as black (rounded corners showed as black corners, hardware)"""
     n = 192
     bg = Image.new("RGBA", (n, n))
     d = ImageDraw.Draw(bg)
     for y in range(n):
         t = y / (n - 1)
         d.line([(0, y), (n, y)], fill=(int(250 - 30 * t), int(250 - 25 * t), int(255 - 10 * t), 255))
-    mask = Image.new("L", (n, n), 0)
-    ImageDraw.Draw(mask).rounded_rectangle([0, 0, n - 1, n - 1], radius=n * 36 // 192, fill=255)
-    bg.putalpha(mask)
     shield = shield.crop(shield.getchannel("A").point(lambda v: 255 if v > 16 else 0).getbbox())
     scale = 172 / max(shield.size)
     shield = shield.resize((round(shield.width * scale), round(shield.height * scale)), Image.LANCZOS)

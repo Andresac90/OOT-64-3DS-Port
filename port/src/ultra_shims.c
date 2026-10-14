@@ -241,8 +241,24 @@ void Port3ds_PumpAudio(void) {
     extern void Port3ds_ScanBetweenUpdates(void);
     unsigned char prev = gPortProf;
     Port3ds_ScanBetweenUpdates(); /* (3ds_main.c: taps between updates) */
+    extern volatile int gPortInAudioPump;
+    extern u32 gPortPerfPumpGapMaxUs, gPortPerfPumpGapsLong, gPortPerfPumpLongestUs;
+    extern u64 svcGetSystemTick(void);
+    static u64 sLastTick;
+    u64 t0 = svcGetSystemTick();
+    u32 us;
+    if (sLastTick != 0) { /* perf: the longest wait between pumps (a gap when it outlasts the audio queued) */
+        us = (u32)((t0 - sLastTick) / 268); /* SYSCLOCK_ARM11 = 268 MHz */
+        if (us > gPortPerfPumpGapMaxUs) gPortPerfPumpGapMaxUs = us;
+        gPortPerfPumpGapsLong += us > 40000;
+    }
+    sLastTick = t0;
     gPortProf = 10; /* PROF_AUDIO (port_prof.h) */
+    gPortInAudioPump = 1;
     Port3ds_PumpAudio_impl();
+    us = (u32)((svcGetSystemTick() - t0) / 268);
+    if (us > gPortPerfPumpLongestUs) gPortPerfPumpLongestUs = us;
+    gPortInAudioPump = 0;
     gPortProf = prev;
 }
 static void Port3ds_PumpAudio_impl(void) {

@@ -18,7 +18,25 @@ No game builds are published; each version is a source release. See the [README]
   (visited rooms, the outlines with the Map, Link's room highlighted, a yellow arrow at his floor); tapping it again
   or the map goes back to the room map.
 
+- Touch screen, dungeons: a floor's map is clearly a preview - its floor as a title ("1F MAP") and a "BACK TO ROOM"
+  bar under it; a tap on the bar or anywhere on the map goes back to the room map with Link's arrow (the default).
+- Old 3DS speed: the game's hottest logic (collision, 3D math, matrices, skeletons, camera, actors) is built at -O3
+  (no fast-math: the same float results); game logic per update 4.5 -> 4.3 ms at Old 3DS speed in Azahar.
+
 ### Fixed
+- Touch screen: the OCARINA button did nothing indoors (houses, shops) when the ocarina was not on a C button. It
+  refused whenever all three C buttons were greyed out, and indoors the game greys out every item except the ocarina,
+  bottles and trade items. It now follows the game's own rule for the ocarina: refused only when the ocarina itself
+  would be greyed out (underwater, crawling, on horseback, minigames, scenes that forbid it).
+- HOME Menu -> Close could freeze the console (the HOME Menu's music kept playing). The C-stick service the game
+  opens is now closed before exit, and each shutdown step is written to `sdmc:/3ds/oot/exit.log` as it starts, so a
+  freeze that remains shows where it stopped.
+- Audio: clicks when the pause screen opened and when areas load. On the N64 the audio thread keeps running through
+  long game updates; here audio was only made between updates and while drawing, so an update that took a few
+  retraces left the DSP empty (every gap in a hardware `boot.log` came right after a load). The pause screen also
+  sleeps 50 ms waiting for Link's picture. Audio is now made on each retrace during the game's sleeps, DMA copies and
+  actor spawns. Azahar, pause screen opened and closed for 90 s: gaps 14 -> 4 (`load_pump=0` in settings turns it
+  off). New perf counters: the longest wait between audio pumps and the longest pump.
 - Pause screens: the selection cursor (the four corners around the item, song, map point) was not drawn. The N64
   builds its corners in the next frame's update, before the RSP reads them a frame late; the port draws each frame as
   built, so the corners were all at 0. They are now built when drawn (the Z/R arrows already were).

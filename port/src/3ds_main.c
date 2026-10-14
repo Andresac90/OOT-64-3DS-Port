@@ -161,6 +161,7 @@ static void Port3ds_SaveSettings(void) {
             if (sReplayCopyAB) fprintf(f, "replay_copy_ab=1\n");
             if (sSpeedRulesAB) fprintf(f, "speed_rules_ab=1\n");
             if (sSpeedRules) fprintf(f, "speed_rules=%d\n", sSpeedRules);
+            { extern int gPortLoadPump; if (!gPortLoadPump) fprintf(f, "load_pump=0\n"); }
             { extern int gPortAudioMargin; if (gPortAudioMargin >= 0) fprintf(f, "audio_margin=%d\n", gPortAudioMargin); }
             { extern int gPortAudioShare; if (gPortAudioShare != 55) fprintf(f, "audio_share=%d\n", gPortAudioShare); }
             if (sAudioShareAB) fprintf(f, "audio_share_ab=1\n");
@@ -227,6 +228,7 @@ static void Port3ds_LoadSettings(void) {
         if (sscanf(line, "replay_copy_ab=%d", &v) == 1) { sReplayCopyAB = v != 0; }
         if (sscanf(line, "speed_rules_ab=%d", &v) == 1) { sSpeedRulesAB = v != 0; }
         if (sscanf(line, "raw_relax=%d", &v) == 1 || sscanf(line, "speed_rules=%d", &v) == 1) { sSpeedRules = v < 0 ? 0 : v > 2 ? 2 : v; }
+        if (sscanf(line, "load_pump=%d", &v) == 1) { extern int gPortLoadPump; gPortLoadPump = v != 0; }
         if (sscanf(line, "audio_margin=%d", &v) == 1 && v >= 0 && v <= 2048) { extern int gPortAudioMargin; gPortAudioMargin = v; }
         if (sscanf(line, "interp_dump_span=%d", &v) == 1 && v >= 1 && v <= 400) { extern int gPortInterpDumpSpan; gPortInterpDumpSpan = v; }
         if (sscanf(line, "interp_dump_at=%d", &v) == 1 && v >= 0) { extern int gPortInterpDumpAt; gPortInterpDumpAt = v; }
@@ -733,17 +735,20 @@ static int FloorCount(void) {
 static int FloorBtnY(int k, int n) {
     return MAP_Y + (MAP_H - n * (FLOOR_BTN_H + 3) + 3) / 2 + k * (FLOOR_BTN_H + 3);
 }
+static void FloorLabel(int id, char lab[4]) {
+    if (id >= 1 && id <= 8) {
+        snprintf(lab, 4, "%dF", 9 - id);
+    } else {
+        snprintf(lab, 4, "B%d", id - 8);
+    }
+}
 static void DrawFloorButtons(void) {
     const PortFloorMap* f = &gPortFloorMap;
     int n = FloorCount(), k;
     for (k = 0; k < n; k++) {
         int x = MAP_X + 5, y = FloorBtnY(k, n), sel = f->slot[k] == sFloorView, id = f->label[k];
         char lab[4];
-        if (id >= 1 && id <= 8) {
-            snprintf(lab, sizeof(lab), "%dF", 9 - id);
-        } else {
-            snprintf(lab, sizeof(lab), "B%d", id - 8);
-        }
+        FloorLabel(id, lab);
         FillRect(x, y, FLOOR_BTN_W, FLOOR_BTN_H, PRGB(64, 46, 30));
         if (sel) {
             FillStone(x + 1, y + 1, FLOOR_BTN_W - 2, FLOOR_BTN_H - 2, 60, 96, 200, 6);
@@ -758,16 +763,29 @@ static void DrawFloorButtons(void) {
     }
 }
 /* the floor's map: 96x85 (two 48x85 CI4 halves, the second ALIGN16(2040) = 2048 bytes on), fitted right of the
- * buttons */
+ * buttons. PORT (2026-10-14, asked for): a floor's map is a preview and says so - its floor as a title, and a "BACK
+ * TO ROOM" bar under it (a tap anywhere on the map also goes back to the room map with Link's arrow) */
+#define FLOOR_TITLE_H 18
+#define FLOOR_BACK_H 20
 static void DrawFloorView(void) {
     const PortFloorMap* f = &gPortFloorMap;
     float s, ox, oy;
-    int x, y;
+    int x, y, k, cx = MAP_X + sMapInset + (MAP_W - sMapInset) / 2;
+    int bx = MAP_X + sMapInset + 8, bw = MAP_W - sMapInset - 16, by = MAP_Y + MAP_H - FLOOR_BACK_H - 8;
+    char lab[4] = "", title[16];
     DrawParchment();
+    for (k = 0; k < f->numFloors; k++) {
+        if (f->slot[k] == sFloorView) FloorLabel(f->label[k], lab);
+    }
+    snprintf(title, sizeof(title), "%s MAP", lab);
+    DrawTextCB(cx, MAP_Y + 9, title, PRGB(70, 44, 20), 1);
+    FillRect(bx, by, bw, FLOOR_BACK_H, PRGB(64, 46, 30));
+    FillStone(bx + 1, by + 1, bw - 2, FLOOR_BACK_H - 2, 60, 96, 200, 6);
+    DrawTextC(cx, by + 6, "BACK TO ROOM", COL_TEXT);
     if (f->tex == NULL || f->mapSlot != sFloorView) return; /* loading (the next update) */
-    s = fminf((MAP_W - sMapInset - 8) / 96.0f, (MAP_H - 8) / 85.0f);
+    s = fminf((MAP_W - sMapInset - 8) / 96.0f, (MAP_H - FLOOR_TITLE_H - FLOOR_BACK_H - 20) / 85.0f);
     ox = MAP_X + sMapInset + (MAP_W - sMapInset - 96 * s) * 0.5f;
-    oy = MAP_Y + (MAP_H - 85 * s) * 0.5f;
+    oy = MAP_Y + 4 + FLOOR_TITLE_H + (MAP_H - FLOOR_TITLE_H - FLOOR_BACK_H - 20 - 85 * s) * 0.5f;
     for (y = MAP_Y + 2; y < MAP_Y + MAP_H - 2; y++) {
         int ty = (int)floorf((y + 0.5f - oy) / s);
         if (ty < 0 || ty >= 85) continue;
@@ -1237,6 +1255,14 @@ capture:
 
 s8 gPortCamX, gPortCamY;     /* C-stick camera input for this update (z_camera.c) */
 int gPortMenuInput;          /* > 0 while a menu is up (set each update by the game: file select, pause) */
+static int sIrrst = -1; /* the C-stick service (New 3DS): 1 once open */
+/* closed before exit (gfx_3ds.c, HOME -> Close) */
+void Port3ds_InputExit(void) {
+    if (sIrrst == 1) {
+        irrstExit();
+    }
+    sIrrst = 0;
+}
 static void Port3ds_PollInput(void) {
     hidScanInput();
     u32 k = hidKeysHeld();
@@ -1272,7 +1298,6 @@ static void Port3ds_PollInput(void) {
      * hardware; settings cstick=0 makes it the four C buttons again (they are on Y/X/ZL/ZR/D-pad too) */
     gPortCamX = gPortCamY = 0;
     if (sCstickCamera) {
-        static int sIrrst = -1;
         circlePosition cs;
         if (sIrrst < 0) sIrrst = R_SUCCEEDED(irrstInit());
         if (sIrrst) {
@@ -1345,6 +1370,24 @@ void Port3ds_MaybePumpAudio(void) {
         if (now - sLastPumpMs > 4 * PORT_RETRACE_MS) sLastPumpMs = now; /* far behind: don't burst */
     }
 }
+/* PORT (2026-10-13): audio also keeps going through long updates. Hardware boot.log (New 3DS): every gap (the DSP ran
+ * dry: a click) came right after a load - a scene or room starting, the pause screen opening - where one update ran
+ * for a few retraces with no pump (pumps ran only during rendering and pacing). On the N64 the audio thread preempts
+ * the game on every retrace; here the places those updates spend their time call this, which pumps once per retrace
+ * elapsed: DMA copies, actor spawns and the game's sleeps (sleep_shim.c: 50 ms each time the pause screen opens).
+ * Game thread only, never inside a pump (audio loads DMA too). Azahar, pause screen opened and closed for 90 s: waits
+ * over 40 ms between pumps 13 -> 2, gaps 14 -> 4. settings load_pump=0: off. */
+int gPortLoadPump = 1;
+u32 gPortPerfPumpLongestUs; /* perf: the longest audio pump (engine + waiting for the mixer worker) */
+u32 gPortPerfPumpGapMaxUs, gPortPerfPumpGapsLong; /* perf: longest wait between audio pumps, waits > 40 ms */
+volatile int gPortInAudioPump; /* ultra_shims.c: Port3ds_PumpAudio running */
+static Thread sGameThread;
+static int sGameThreadSet;
+void Port3ds_PumpAudioInLoad(void) {
+    if (gPortLoadPump && !gPortInAudioPump && sGameThreadSet && threadGetCurrent() == sGameThread) {
+        Port3ds_MaybePumpAudio();
+    }
+}
 /* PORT PERF (2026-10-02): pacing runs on svcGetSystemTick in milliseconds (osGetTime has whole-millisecond
  * steps: a frame finishing 50.4 ms after the update's start read as 50 < the 50.14 ms budget and waited one
  * more retrace - exposed by the present gate, whose last frame goes out just after the third vblank) */
@@ -1396,7 +1439,11 @@ static void Port3ds_PaceFrame(void) {
     if (gRegEditor) rate = *(short*)((char*)gRegEditor + 0x14 + 126 * 2); /* R_UPDATE_RATE = SREG(30) */
     if (rate < 1) rate = 1;
     if (rate > 6) rate = 6;
-    int pumped = sMidFramePumps; /* already done during rendering */
+    int pumped = sMidFramePumps; /* already done during rendering (and loads) */
+    if (!sGameThreadSet) {
+        sGameThread = threadGetCurrent(); /* (NULL on the main thread) */
+        sGameThreadSet = 1;
+    }
     double now;
     /* with frame skip, time owed from late frames is made up by not waiting for it */
     const double budget = rate * kRetraceMs - (sSkipOn ? sBehindMs : 0.0);
@@ -1602,7 +1649,12 @@ static void Port3ds_PerfReport(unsigned frames) {
       PortDbgX("perf audio underruns (DSP ran dry)", gPortPerfAudioUnderruns);
       PortDbgX("perf audio buffers dropped (queue full)", gPortPerfAudioDrops);
       { extern int gPortRawRelax; PortDbgX("perf speed rules active (raw relax, no shade split)", (unsigned)gPortRawRelax); }
-      PortDbgX("perf audio margin samples", (unsigned)(gPortAudioMargin >= 0 ? gPortAudioMargin : gPortAudioCoreNow == 1 ? 512 : 0));
+      PortDbgX("perf audio margin samples", (unsigned)(gPortAudioMargin >= 0 ? gPortAudioMargin : gPortAudioCoreNow == 1 ? 512 : 256));
+      { extern u32 gPortPerfPumpGapMaxUs, gPortPerfPumpGapsLong;
+        PortDbgX("perf us longest wait between audio pumps", gPortPerfPumpGapMaxUs);
+        PortDbgX("perf audio pump waits over 40 ms", gPortPerfPumpGapsLong);
+        { extern u32 gPortPerfPumpLongestUs; PortDbgX("perf us longest audio pump", gPortPerfPumpLongestUs); gPortPerfPumpLongestUs = 0; }
+        gPortPerfPumpGapMaxUs = gPortPerfPumpGapsLong = 0; }
       gPortPerfAudioUnderruns = gPortPerfAudioDrops = 0; }
 #ifdef PORT_PERF_STAGES
     { extern u32 gPortRawWhy[8]; static const char* const why[8] = { "perf raw-off vtx near/frame", "perf raw-off vtx deep/frame",

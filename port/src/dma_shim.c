@@ -139,6 +139,12 @@ static void Dma_Copy(void* ram, uintptr_t vrom, u32 size) {
 #endif
     Dma_Copy_Impl(ram, vrom, size);
     gfx_texture_cache_invalidate_range(ram, size);
+#ifdef __3DS__
+    {
+        extern void Port3ds_PumpAudioInLoad(void);
+        Port3ds_PumpAudioInLoad(); /* audio keeps going through loads (3ds_main.c) */
+    }
+#endif
 }
 static void Dma_Copy_Impl(void* ram, uintptr_t vrom, u32 size) {
     u32 i;

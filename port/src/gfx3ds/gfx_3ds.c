@@ -361,18 +361,38 @@ static void gfx_3ds_get_dimensions(uint32_t *width, uint32_t *height)
 /* PORT (2026-09-29): service the HOME button / sleep / power once per frame (the game's own loop never
  * reaches gfx_3ds_main_loop, so nothing called aptMainLoop and HOME did nothing). aptMainLoop blocks
  * while the HOME menu is open and returns false when the user closes the software. */
+static void exit_step(const char* what, int first) {
+    FILE* f = fopen("sdmc:/3ds/oot/exit.log", first ? "w" : "a");
+    if (f) {
+        fprintf(f, "%s (gpu right %d)\n", what, (int)gspHasGpuRight());
+        fclose(f);
+    }
+}
 static void gfx_3ds_handle_events(void)
 {
     if (!aptMainLoop()) {
+        /* PORT (2026-10-13): HOME -> Close froze the console (hardware: the HOME Menu's music kept playing, the
+         * game never finished closing) and nothing after this point reached boot.log. Each step is now written
+         * to exit.log as it starts (opened and closed each time: nothing waits on the log writer), so the next
+         * freeze shows the step it stopped in; and the C-stick service, opened by the game, is closed. */
+        exit_step("close requested", 1);
         { extern void PortSram_FlushNow(void); PortSram_FlushNow(); } /* a save the game just made */
+        exit_step("save flushed", 0);
         { extern void Port3ds_LogFlush(void); Port3ds_LogFlush(); } /* log lines the writer has not written */
+        exit_step("log flushed", 0);
         /* PORT (2026-09-30): shut graphics down before exit(). exit() unmaps the app heap, and libctru's
          * GSP event thread (stack on that heap) was still running: HOME -> Close crashed with a data
          * abort in gspEventThreadMain (hardware, v17). gfxExit stops that thread. */
         flip_stop(); /* its thread presents through GSP: stopped before graphics shut down */
+        exit_step("presenter stopped", 0);
+        { extern void Port3ds_InputExit(void); Port3ds_InputExit(); }
+        exit_step("C-stick closed", 0);
         ndspExit();
+        exit_step("sound closed", 0);
         C3D_Fini();
+        exit_step("citro3d closed", 0);
         gfxExit();
+        exit_step("graphics closed, exit()", 0);
         exit(0);
     }
 }

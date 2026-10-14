@@ -3421,6 +3421,12 @@ Actor* Actor_Spawn(ActorContext* actorCtx, PlayState* play, s16 actorId, f32 pos
     Actor_Init(actor, play);
     gSegments[6] = temp;
 
+#ifdef __3DS__
+    {
+        extern void Port3ds_PumpAudioInLoad(void);
+        Port3ds_PumpAudioInLoad(); // PORT: audio keeps going through room loads (3ds_main.c)
+    }
+#endif
     return actor;
 }
 

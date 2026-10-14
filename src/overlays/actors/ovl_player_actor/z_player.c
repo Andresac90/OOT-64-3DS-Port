@@ -2630,13 +2630,43 @@ s32 Player_ItemIsItemAction(s32 item1, s32 itemAction) {
 /* NOT an index of Player_GetItemOnButton: index 4 there means "no item button pressed" and must stay
  * ITEM_NONE (reusing it made Link play the ocarina every frame nothing was pressed, even in the title
  * demo). */
+/* whether a C button's item is greyed out by an item rule of the scene (func_80083108, z_parameter.c) rather than
+ * by a state that greys out every C button (underwater, crawling, on horseback, minigames, cutscenes) */
+static s32 Port_CItemRestricted(PlayState* play, s32 item) {
+    InterfaceContext* interfaceCtx = &play->interfaceCtx;
+    s32 bottle = (item >= ITEM_BOTTLE_EMPTY) && (item <= ITEM_BOTTLE_POE);
+    s32 trade = (item >= ITEM_WEIRD_EGG) && (item <= ITEM_CLAIM_CHECK);
+
+    if ((interfaceCtx->restrictions.all != 0) && (item != ITEM_OCARINA_FAIRY) && (item != ITEM_OCARINA_OF_TIME) &&
+        !bottle && !trade && ((play->sceneId != SCENE_TREASURE_BOX_SHOP) || (item != ITEM_LENS_OF_TRUTH))) {
+        return true;
+    }
+    return ((interfaceCtx->restrictions.bottles != 0) && bottle) || ((interfaceCtx->restrictions.tradeItems != 0) && trade) ||
+           ((interfaceCtx->restrictions.hookshot != 0) && ((item == ITEM_HOOKSHOT) || (item == ITEM_LONGSHOT))) ||
+           ((interfaceCtx->restrictions.farores != 0) && (item == ITEM_FARORES_WIND)) ||
+           ((interfaceCtx->restrictions.dinsNayrus != 0) && ((item == ITEM_DINS_FIRE) || (item == ITEM_NAYRUS_LOVE)));
+}
+
+/* PORT (2026-10-14): the ocarina is usable whenever the game would light it on a C button. It used to be refused
+ * when all three C buttons were greyed out, but indoors (restrictions.all: houses, shops) the game greys out every
+ * item except the ocarina, bottles and trade items - with no ocarina on a C button the touch button did nothing
+ * there (hardware report). Now refused only when the ocarina is restricted or a C button is greyed out with no item
+ * rule behind it (a state that greys out every C button, the ocarina too). */
 static s32 Port_VirtualOcarinaItem(PlayState* play) {
     s32 item = INV_CONTENT(ITEM_OCARINA_FAIRY);
+    s32 i;
 
-    if ((play->bombchuBowlingStatus != 0) || (item != ITEM_OCARINA_FAIRY && item != ITEM_OCARINA_OF_TIME) || (play->interfaceCtx.restrictions.ocarina != 0) ||
-        ((gSaveContext.buttonStatus[1] == BTN_DISABLED) && (gSaveContext.buttonStatus[2] == BTN_DISABLED) &&
-         (gSaveContext.buttonStatus[3] == BTN_DISABLED))) {
+    if ((play->bombchuBowlingStatus != 0) || (item != ITEM_OCARINA_FAIRY && item != ITEM_OCARINA_OF_TIME) ||
+        (play->interfaceCtx.restrictions.ocarina != 0)) {
         return ITEM_NONE;
+    }
+    for (i = 1; i < 4; i++) {
+        s32 cItem = gSaveContext.save.info.equips.buttonItems[i];
+
+        if ((gSaveContext.buttonStatus[i] == BTN_DISABLED) && (cItem != ITEM_OCARINA_FAIRY) &&
+            (cItem != ITEM_OCARINA_OF_TIME) && !Port_CItemRestricted(play, cItem)) {
+            return ITEM_NONE;
+        }
     }
     return item;
 }
