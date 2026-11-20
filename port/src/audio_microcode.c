@@ -24,6 +24,7 @@
 extern void PortDbgX(const char* label, unsigned val);
 
 int sPortAudioUcodeEnable = 1;
+int gPortAudioSimd = 1; /* settings audio_simd=0: the scalar ADPCM / envelope / gain mixers (A/B on hardware) */
 
 #define ROUND_UP_64(v) (((v) + 63) & ~63)
 #define ROUND_UP_32(v) (((v) + 31) & ~31)
@@ -60,6 +61,15 @@ static struct {
     u16 filter_count;
     s16 filter[8];
 } rspa;
+
+#if defined(__3DS__) && defined(__ARM_ARCH_6K__)
+/* PORT PERF (2026-10-14): ADPCM coefficients packed for ARMv6 SMLAD, per codebook entry (table index) and output
+ * sample j of an 8-sample group: word 0 = (tbl[0][j], tbl[1][j]) against (prev2, prev1), words 1..4 = the
+ * coefficients of input pairs (ins[0], ins[1]) .. (ins[6], ins[7]): tbl[1][j - k - 1] for k < j, 0x800 (the
+ * << 11) for k == j, 0 after. Built on first use after each LOADADPCM (bit sAdpcmPkValid). */
+static u32 sAdpcmPk[8][8][5];
+static u8 sAdpcmPkValid;
+#endif
 
 static const s16 resample_table[64][4] = {
     { 0x0c39, 0x66ad, 0x0d46, 0xffdf }, { 0x0b39, 0x6696, 0x0e5f, 0xffd8 }, { 0x0a44, 0x6669, 0x0f83, 0xffd0 },
@@ -189,6 +199,9 @@ static void aLoadADPCMImpl(u32 nbytes, u32 src) {
     s = ext_ptr(src, nbytes);
     if (s == NULL) return;
     memcpy(rspa.adpcm_table, s, nbytes);
+#if defined(__3DS__) && defined(__ARM_ARCH_6K__)
+    sAdpcmPkValid = 0;
+#endif
 }
 
 static void aSetBufferImpl(u16 in, u16 out, u16 nbytes) {
@@ -222,23 +235,9 @@ static void aSetLoopImpl(u32 addr) {
     rspa.adpcm_loop_state = (s16*)ext_ptr(addr, sizeof(PortAdpcmState));
 }
 
-static void aADPCMdecImpl(u8 flags, s16* state) {
-    u8* in = BUF_U8(rspa.in);
-    s16* out = BUF_S16(rspa.out);
-    s32 nbytes = ROUND_UP_32(rspa.nbytes);
-    if (flags & A_INIT) {
-        memset(out, 0, 16 * sizeof(s16));
-    } else if (flags & A_LOOP) {
-        if (rspa.adpcm_loop_state != NULL) {
-            memcpy(out, rspa.adpcm_loop_state, 16 * sizeof(s16));
-        } else {
-            memset(out, 0, 16 * sizeof(s16));
-        }
-    } else {
-        memcpy(out, state, 16 * sizeof(s16));
-    }
-    out += 16;
-
+/* Decodes nbytes (a multiple of 32: two 8-sample groups per 9-byte or 5-byte frame) from in to out; out[-2] and
+ * out[-1] hold the previous two samples. */
+static void adpcm_dec_scalar(u8 flags, const u8* in, s16* out, s32 nbytes) {
     while (nbytes > 0) {
         int shift = *in >> 4;
         int table_index = *in++ & 0x7;
@@ -274,6 +273,95 @@ static void aADPCMdecImpl(u8 flags, s16* state) {
         }
         nbytes -= 16 * sizeof(s16);
     }
+}
+
+#if defined(__3DS__) && defined(__ARM_ARCH_6K__)
+static void adpcm_pack(int t) {
+    const s16(*tbl)[8] = rspa.adpcm_table[t];
+    int j, p;
+    for (j = 0; j < 8; j++) {
+        u32* w = sAdpcmPk[t][j];
+        w[0] = (u16)tbl[0][j] | ((u32)(u16)tbl[1][j] << 16);
+        for (p = 0; p < 4; p++) {
+            u16 c[2];
+            int h;
+            for (h = 0; h < 2; h++) {
+                int k = 2 * p + h;
+                c[h] = k < j ? (u16)tbl[1][j - k - 1] : k == j ? 0x800 : 0;
+            }
+            w[1 + p] = c[0] | ((u32)c[1] << 16);
+        }
+    }
+    sAdpcmPkValid |= 1 << t;
+}
+
+/* The same sums as adpcm_dec_scalar, two products per SMLAD: 28 instead of 44 multiplies per 8 samples. The
+ * accumulations wrap modulo 2^32 in both (SMLAD only sets the Q flag), so the result is identical. */
+static void adpcm_dec_smlad(u8 flags, const u8* in, s16* out, s32 nbytes) {
+    while (nbytes > 0) {
+        u32 shift = *in >> 4;
+        int table_index = *in++ & 0x7;
+        u32(*pk)[5];
+        int i;
+        if (!(sAdpcmPkValid & (1 << table_index))) adpcm_pack(table_index);
+        pk = sAdpcmPk[table_index];
+
+        for (i = 0; i < 2; i++) {
+            u32 ip[4];
+            u32 pp = (u16)out[-2] | ((u32)(u16)out[-1] << 16);
+            int j;
+            if (flags & 4) {
+                for (j = 0; j < 2; j++) {
+                    u32 b = (u32)*in++ << 24;
+                    u32 v0 = (u16)(((s32)b >> 30) << shift), v1 = (u16)(((s32)(b << 2) >> 30) << shift);
+                    u32 v2 = (u16)(((s32)(b << 4) >> 30) << shift), v3 = (u16)(((s32)(b << 6) >> 30) << shift);
+                    ip[j * 2] = v0 | (v1 << 16);
+                    ip[j * 2 + 1] = v2 | (v3 << 16);
+                }
+            } else {
+                for (j = 0; j < 4; j++) {
+                    u32 b = (u32)*in++ << 24;
+                    ip[j] = (u16)(((s32)b >> 28) << shift) | ((u32)(u16)(((s32)(b << 4) >> 28) << shift) << 16);
+                }
+            }
+            for (j = 0; j < 8; j++) {
+                const u32* c = pk[j];
+                s32 acc;
+                int p;
+                __asm__("smuad %0, %1, %2" : "=r"(acc) : "r"(pp), "r"(c[0]));
+                for (p = 0; p <= (j >> 1); p++) {
+                    __asm__("smlad %0, %1, %2, %0" : "+r"(acc) : "r"(ip[p]), "r"(c[1 + p]));
+                }
+                *out++ = clamp16(acc >> 11);
+            }
+        }
+        nbytes -= 16 * sizeof(s16);
+    }
+}
+#endif
+
+static void aADPCMdecImpl(u8 flags, s16* state) {
+    u8* in = BUF_U8(rspa.in);
+    s16* out = BUF_S16(rspa.out);
+    s32 nbytes = ROUND_UP_32(rspa.nbytes);
+    if (flags & A_INIT) {
+        memset(out, 0, 16 * sizeof(s16));
+    } else if (flags & A_LOOP) {
+        if (rspa.adpcm_loop_state != NULL) {
+            memcpy(out, rspa.adpcm_loop_state, 16 * sizeof(s16));
+        } else {
+            memset(out, 0, 16 * sizeof(s16));
+        }
+    } else {
+        memcpy(out, state, 16 * sizeof(s16));
+    }
+    out += 16;
+#if defined(__3DS__) && defined(__ARM_ARCH_6K__)
+    if (gPortAudioSimd) adpcm_dec_smlad(flags, in, out, nbytes);
+    else
+#endif
+    adpcm_dec_scalar(flags, in, out, nbytes);
+    out += (nbytes > 0 ? nbytes : 0) / (s32)sizeof(s16);
     memcpy(state, out - 16, 16 * sizeof(s16));
 }
 
@@ -338,77 +426,115 @@ static void aEnvSetup2Impl(u16 initial_vol_left, u16 initial_vol_right) {
     rspa.vol[1] = initial_vol_right;
 }
 
-static void aEnvMixerImpl(u16 in_addr, u16 n_samples, int swap_reverb, int neg_3, int neg_2, int neg_left,
-                          int neg_right, u32 wet_dry_addr) {
-    s16* in = BUF_S16(in_addr);
-    s16* dry[2] = { BUF_S16(((wet_dry_addr >> 24) & 0xFF) << 4), BUF_S16(((wet_dry_addr >> 16) & 0xFF) << 4) };
-    s16* wet[2] = { BUF_S16(((wet_dry_addr >> 8) & 0xFF) << 4), BUF_S16(((wet_dry_addr) & 0xFF) << 4) };
-    s16 negs[4] = { neg_left ? -1 : 0, neg_right ? -1 : 0, neg_3 ? -4 : 0, neg_2 ? -2 : 0 };
-    int swapped[2] = { swap_reverb ? 1 : 0, swap_reverb ? 0 : 1 };
-    int n = ROUND_UP_16(n_samples);
-    u16 vols[2] = { rspa.vol[0], rspa.vol[1] };
-    u16 rates[2] = { rspa.rate[0], rspa.rate[1] };
-    u16 vol_wet = rspa.vol_wet;
-    u16 rate_wet = rspa.rate_wet;
+typedef struct {
+    s16* in;
+    s16* dry[2];
+    s16* wet[2];
+    s16 negs[4];
+    int swapped[2];
+    int n;
+    u16 vols[2], rates[2], vol_wet, rate_wet;
+} PortEnvMix;
+
+static void envmix_scalar(PortEnvMix e) {
     int i, j;
+    do {
+        for (i = 0; i < 8; i++) {
+            s16 samples[2] = { *e.in, *e.in };
+            e.in++;
+            for (j = 0; j < 2; j++) {
+                samples[j] = (s16)((samples[j] * e.vols[j] >> 16) ^ e.negs[j]);
+            }
+            for (j = 0; j < 2; j++) {
+                *e.dry[j] = clamp16(*e.dry[j] + samples[j]);
+                e.dry[j]++;
+                *e.wet[j] = clamp16(*e.wet[j] + ((samples[e.swapped[j]] * e.vol_wet >> 16) ^ e.negs[2 + j]));
+                e.wet[j]++;
+            }
+        }
+        e.vols[0] += e.rates[0];
+        e.vols[1] += e.rates[1];
+        e.vol_wet += e.rate_wet;
+        e.n -= 8;
+    } while (e.n > 0);
+}
 
 #if defined(__3DS__) && defined(__ARM_ARCH_6K__)
-    if ((((uintptr_t)in | (uintptr_t)dry[0] | (uintptr_t)dry[1] | (uintptr_t)wet[0] | (uintptr_t)wet[1]) & 3) == 0) {
-        /* PORT PERF (2026-09-30): two samples per step; the four saturating accumulations are ARMv6
-         * QADD16 (per lane identical to clamp16(a + b)). Same per-sample products as the loop below. */
-        (void)i;
-        do {
-            for (i = 0; i < 8; i += 2) {
-                s16 x0 = in[0], x1 = in[1];
-                s16 l0 = (s16)((x0 * vols[0] >> 16) ^ negs[0]), l1 = (s16)((x1 * vols[0] >> 16) ^ negs[0]);
-                s16 r0 = (s16)((x0 * vols[1] >> 16) ^ negs[1]), r1 = (s16)((x1 * vols[1] >> 16) ^ negs[1]);
-                s16 s0[2] = { l0, r0 }, s1[2] = { l1, r1 };
-                in += 2;
-                for (j = 0; j < 2; j++) {
-                    u32 d = (u16)s0[j] | ((u32)(u16)s1[j] << 16);
-                    u32 w = (u16)(s16)((s0[swapped[j]] * vol_wet >> 16) ^ negs[2 + j]) |
-                            ((u32)(u16)(s16)((s1[swapped[j]] * vol_wet >> 16) ^ negs[2 + j]) << 16);
-                    u32* dp = (u32*)dry[j];
-                    u32* wp = (u32*)wet[j];
-                    __asm__("qadd16 %0, %0, %1" : "+r"(*dp) : "r"(d));
-                    __asm__("qadd16 %0, %0, %1" : "+r"(*wp) : "r"(w));
-                    dry[j] += 2;
-                    wet[j] += 2;
-                }
-            }
-            vols[0] += rates[0];
-            vols[1] += rates[1];
-            vol_wet += rate_wet;
-            n -= 8;
-        } while (n > 0);
+/* (a * signed bottom/top half of b) >> 16, from the 48-bit product: for a u16 volume and an s16 sample this is the
+ * scalar loop's (sample * vol) >> 16 */
+#define SMULWB(a, b) ({ s32 r_; __asm__("smulwb %0, %1, %2" : "=r"(r_) : "r"(a), "r"(b)); r_; })
+#define SMULWT(a, b) ({ s32 r_; __asm__("smulwt %0, %1, %2" : "=r"(r_) : "r"(a), "r"(b)); r_; })
+#define PKHBT16(lo, hi) ({ u32 r_; __asm__("pkhbt %0, %1, %2, lsl #16" : "=r"(r_) : "r"(lo), "r"(hi)); r_; })
+
+/* PORT PERF (2026-10-14): two samples per step in 32-bit words: SMULWB/SMULWT scale both samples of a word,
+ * PKHBT packs the halves, one EOR applies the sign flip to both (it is bitwise), QADD16 = clamp16(a + b) per half.
+ * Needs every buffer 4-byte aligned. */
+static void envmix_simd(PortEnvMix e) {
+    const u32* in = (const u32*)e.in;
+    u32* d0 = (u32*)e.dry[0];
+    u32* d1 = (u32*)e.dry[1];
+    u32* w0 = (u32*)e.wet[0];
+    u32* w1 = (u32*)e.wet[1];
+    u32 n0 = (u16)e.negs[0] * 0x10001u, n1 = (u16)e.negs[1] * 0x10001u;
+    u32 n2 = (u16)e.negs[2] * 0x10001u, n3 = (u16)e.negs[3] * 0x10001u;
+    int sw = e.swapped[0];
+    u32 v0 = e.vols[0], v1 = e.vols[1], vw = e.vol_wet;
+    do {
+        int i;
+        for (i = 0; i < 4; i++) {
+            u32 x = *in++;
+            u32 l = PKHBT16(SMULWB(v0, x), SMULWT(v0, x)) ^ n0;
+            u32 r = PKHBT16(SMULWB(v1, x), SMULWT(v1, x)) ^ n1;
+            u32 a = sw ? r : l, b = sw ? l : r; /* wet[0] takes samples[swapped[0]], wet[1] the other */
+            u32 wl = PKHBT16(SMULWB(vw, a), SMULWT(vw, a)) ^ n2;
+            u32 wr = PKHBT16(SMULWB(vw, b), SMULWT(vw, b)) ^ n3;
+            u32 t;
+            /* the scalar loop's order (dry, wet per side), so aliased buffers saturate the same way */
+            t = *d0; __asm__("qadd16 %0, %0, %1" : "+r"(t) : "r"(l)); *d0++ = t;
+            t = *w0; __asm__("qadd16 %0, %0, %1" : "+r"(t) : "r"(wl)); *w0++ = t;
+            t = *d1; __asm__("qadd16 %0, %0, %1" : "+r"(t) : "r"(r)); *d1++ = t;
+            t = *w1; __asm__("qadd16 %0, %0, %1" : "+r"(t) : "r"(wr)); *w1++ = t;
+        }
+        v0 = (u16)(v0 + e.rates[0]);
+        v1 = (u16)(v1 + e.rates[1]);
+        vw = (u16)(vw + e.rate_wet);
+        e.n -= 8;
+    } while (e.n > 0);
+}
+#endif
+
+static void aEnvMixerImpl(u16 in_addr, u16 n_samples, int swap_reverb, int neg_3, int neg_2, int neg_left,
+                          int neg_right, u32 wet_dry_addr) {
+    PortEnvMix e;
+    e.in = BUF_S16(in_addr);
+    e.dry[0] = BUF_S16(((wet_dry_addr >> 24) & 0xFF) << 4);
+    e.dry[1] = BUF_S16(((wet_dry_addr >> 16) & 0xFF) << 4);
+    e.wet[0] = BUF_S16(((wet_dry_addr >> 8) & 0xFF) << 4);
+    e.wet[1] = BUF_S16(((wet_dry_addr) & 0xFF) << 4);
+    e.negs[0] = neg_left ? -1 : 0;
+    e.negs[1] = neg_right ? -1 : 0;
+    e.negs[2] = neg_3 ? -4 : 0;
+    e.negs[3] = neg_2 ? -2 : 0;
+    e.swapped[0] = swap_reverb ? 1 : 0;
+    e.swapped[1] = swap_reverb ? 0 : 1;
+    e.n = ROUND_UP_16(n_samples);
+    e.vols[0] = rspa.vol[0];
+    e.vols[1] = rspa.vol[1];
+    e.rates[0] = rspa.rate[0];
+    e.rates[1] = rspa.rate[1];
+    e.vol_wet = rspa.vol_wet;
+    e.rate_wet = rspa.rate_wet;
+#if defined(__3DS__) && defined(__ARM_ARCH_6K__)
+    if (gPortAudioSimd && (((uintptr_t)e.in | (uintptr_t)e.dry[0] | (uintptr_t)e.dry[1] | (uintptr_t)e.wet[0] | (uintptr_t)e.wet[1]) &
+         3) == 0) {
+        envmix_simd(e);
         return;
     }
 #endif
-    do {
-        for (i = 0; i < 8; i++) {
-            s16 samples[2] = { *in, *in };
-            in++;
-            for (j = 0; j < 2; j++) {
-                samples[j] = (s16)((samples[j] * vols[j] >> 16) ^ negs[j]);
-            }
-            for (j = 0; j < 2; j++) {
-                *dry[j] = clamp16(*dry[j] + samples[j]);
-                dry[j]++;
-                *wet[j] = clamp16(*wet[j] + ((samples[swapped[j]] * vol_wet >> 16) ^ negs[2 + j]));
-                wet[j]++;
-            }
-        }
-        vols[0] += rates[0];
-        vols[1] += rates[1];
-        vol_wet += rate_wet;
-        n -= 8;
-    } while (n > 0);
+    envmix_scalar(e);
 }
 
-static void aMixImpl(u16 count, s16 gain, u16 in_addr, u16 out_addr) {
-    s32 nbytes = ROUND_UP_32(ROUND_DOWN_16(count << 4));
-    s16* in = BUF_S16(in_addr);
-    s16* out = BUF_S16(out_addr);
+static void mix_scalar(s32 nbytes, s16 gain, s16* in, s16* out) {
     int i;
     s32 sample;
 
@@ -429,6 +555,47 @@ static void aMixImpl(u16 count, s16 gain, u16 in_addr, u16 out_addr) {
         }
         nbytes -= 16 * sizeof(s16);
     }
+}
+
+#if defined(__3DS__) && defined(__ARM_ARCH_6K__)
+/* PORT PERF (2026-10-14): two samples per word: (out, in) pairs against (0x7fff, gain) with SMLAD, the -0x8000
+ * case with QSUB16 (= clamp16(out - in) per half). Needs both buffers 4-byte aligned. */
+static void mix_simd(s32 nbytes, s16 gain, s16* in_s, s16* out_s) {
+    const u32* in = (const u32*)in_s;
+    u32* out = (u32*)out_s;
+    u32 g = 0x7fff | ((u32)(u16)gain << 16);
+    s32 words = nbytes > 0 ? nbytes / 4 : 0;
+    if (gain == -0x8000) {
+        for (; words > 0; words--) {
+            u32 t = *out;
+            __asm__("qsub16 %0, %0, %1" : "+r"(t) : "r"(*in++));
+            *out++ = t;
+        }
+        return;
+    }
+    for (; words > 0; words--) {
+        u32 o = *out, x = *in++, p0, p1;
+        s32 a0, a1;
+        __asm__("pkhbt %0, %1, %2, lsl #16" : "=r"(p0) : "r"(o), "r"(x)); /* (out0, in0) */
+        __asm__("pkhtb %0, %1, %2, asr #16" : "=r"(p1) : "r"(x), "r"(o)); /* (out1, in1) */
+        __asm__("smlad %0, %1, %2, %3" : "=r"(a0) : "r"(p0), "r"(g), "r"(0x4000));
+        __asm__("smlad %0, %1, %2, %3" : "=r"(a1) : "r"(p1), "r"(g), "r"(0x4000));
+        *out++ = (u16)clamp16(a0 >> 15) | ((u32)(u16)clamp16(a1 >> 15) << 16);
+    }
+}
+#endif
+
+static void aMixImpl(u16 count, s16 gain, u16 in_addr, u16 out_addr) {
+    s32 nbytes = ROUND_UP_32(ROUND_DOWN_16(count << 4));
+    s16* in = BUF_S16(in_addr);
+    s16* out = BUF_S16(out_addr);
+#if defined(__3DS__) && defined(__ARM_ARCH_6K__)
+    if (gPortAudioSimd && (((uintptr_t)in | (uintptr_t)out) & 3) == 0) {
+        mix_simd(nbytes, gain, in, out);
+        return;
+    }
+#endif
+    mix_scalar(nbytes, gain, in, out);
 }
 
 static void aS8DecImpl(u8 flags, s16* state) {
@@ -651,6 +818,82 @@ static void PortAudio_SimdSelfTest(void) {
         r2 = a2;
         __asm__("qadd16 %0, %0, %1" : "+r"(r2) : "r"(b2));
         if ((s16)r2 != clamp16(a0 + b0) || (s16)(r2 >> 16) != clamp16(a1 + b1)) bad++;
+    }
+    { /* ADPCM: SMLAD decode vs the scalar one, random codebooks, prediction state and data, both frame kinds */
+        static s16 refb[2 + 64], simb[2 + 64];
+        u8 data[18];
+        s16 saveTbl[8][2][8];
+        memcpy(saveTbl, rspa.adpcm_table, sizeof(saveTbl));
+        for (n = 0; n < 3000; n++) {
+            int i, kind = n & 1;
+            for (i = 0; i < 8 * 2 * 8; i++) {
+                seed = seed * 1664525u + 1013904223u;
+                ((s16*)rspa.adpcm_table)[i] = (s16)(seed >> 16);
+            }
+            sAdpcmPkValid = 0;
+            for (i = 0; i < 18; i++) { seed = seed * 1664525u + 1013904223u; data[i] = (u8)(seed >> 24); }
+            seed = seed * 1664525u + 1013904223u;
+            refb[0] = simb[0] = (s16)seed;
+            refb[1] = simb[1] = (s16)(seed >> 16);
+            adpcm_dec_scalar(kind ? 4 : 0, data, refb + 2, 64);
+            adpcm_dec_smlad(kind ? 4 : 0, data, simb + 2, 64);
+            for (i = 0; i < 32; i++) if (refb[2 + i] != simb[2 + i]) { bad++; break; }
+        }
+        memcpy(rspa.adpcm_table, saveTbl, sizeof(saveTbl));
+        sAdpcmPkValid = 0;
+    }
+    { /* ENVMIXER: the SIMD loop vs the scalar one; every 4th case with wet = dry of the other side (aliased) */
+        static s16 ref[5][32] __attribute__((aligned(4))), sim[5][32] __attribute__((aligned(4)));
+        for (n = 0; n < 3000; n++) {
+            PortEnvMix e;
+            int i, k;
+            for (k = 0; k < 5; k++)
+                for (i = 0; i < 32; i++) {
+                    seed = seed * 1664525u + 1013904223u;
+                    ref[k][i] = sim[k][i] = (s16)(seed >> 16);
+                }
+            seed = seed * 1664525u + 1013904223u;
+            e.negs[0] = (seed & 1) ? -1 : 0;
+            e.negs[1] = (seed & 2) ? -1 : 0;
+            e.negs[2] = (seed & 4) ? -4 : 0;
+            e.negs[3] = (seed & 8) ? -2 : 0;
+            e.swapped[0] = (seed & 16) ? 1 : 0;
+            e.swapped[1] = !e.swapped[0];
+            e.n = 32;
+            for (k = 0; k < 2; k++) {
+                seed = seed * 1664525u + 1013904223u;
+                e.vols[k] = (u16)seed;
+                e.rates[k] = (u16)(seed >> 16);
+            }
+            seed = seed * 1664525u + 1013904223u;
+            e.vol_wet = (u16)seed;
+            e.rate_wet = (u16)(seed >> 16);
+            e.in = ref[0], e.dry[0] = ref[1], e.dry[1] = ref[2], e.wet[0] = ref[3], e.wet[1] = ref[4];
+            if ((n & 3) == 3) e.wet[0] = ref[2];
+            envmix_scalar(e);
+            e.in = sim[0], e.dry[0] = sim[1], e.dry[1] = sim[2], e.wet[0] = sim[3], e.wet[1] = sim[4];
+            if ((n & 3) == 3) e.wet[0] = sim[2];
+            envmix_simd(e);
+            if (memcmp(ref, sim, sizeof(ref)) != 0) bad++;
+        }
+    }
+    { /* MIXER: SMLAD / QSUB16 vs the scalar loop, every 8th case with gain -0x8000 */
+        static s16 rin[64] __attribute__((aligned(4))), rout[64] __attribute__((aligned(4)));
+        static s16 sout[64] __attribute__((aligned(4)));
+        for (n = 0; n < 3000; n++) {
+            s16 gain;
+            int i;
+            for (i = 0; i < 64; i++) {
+                seed = seed * 1664525u + 1013904223u;
+                rin[i] = (s16)seed;
+                rout[i] = sout[i] = (s16)(seed >> 16);
+            }
+            seed = seed * 1664525u + 1013904223u;
+            gain = (n & 7) == 7 ? -0x8000 : (s16)(seed >> 16);
+            mix_scalar(128, gain, rin, rout);
+            mix_simd(128, gain, rin, sout);
+            if (memcmp(rout, sout, sizeof(rout)) != 0) bad++;
+        }
     }
     PortDbgX("[audio] SIMD self-test mismatches (must be 0)", bad);
 }

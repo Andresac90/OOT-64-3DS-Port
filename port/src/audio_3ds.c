@@ -16,7 +16,7 @@
 #include <math.h>
 
 #define PORT_AUDIO_RATE   32000
-#define PORT_AUDIO_NBUFS  6 /* (4 before the Old 3DS margin below: room for one more frame queued) */
+#define PORT_AUDIO_NBUFS  10 /* (4 before the Old 3DS margin below, 6 until 2026-10-14: room for a 1536 margin) */
 #define PORT_AUDIO_MAXSAMPLES 1600 /* per submit; engine frames are ~544-736 */
 
 static bool sNdspOk = false;
@@ -112,6 +112,19 @@ void Port3ds_AudioSubmit(const s16* samples, int nsamples) {
     if (wb->status != NDSP_WBUF_DONE && wb->status != NDSP_WBUF_FREE) {
         gPortPerfAudioDrops++;
         audio_log_glitch("[audio] frame dropped (queue full), count", &sLogDrops);
+        /* shortcut: diagnostic for the Old 3DS queue-full drops (2026-10-17), delete once their cause is known */
+        if (sLogDrops <= 20) { /* too much queued (the engine over-produced) or statuses not updated (ndsp late)? */
+            extern void PortDbgX(const char* label, unsigned val);
+            int i, busy = 0, queued = 0;
+            for (i = 0; i < PORT_AUDIO_NBUFS; i++) {
+                if (sWaveBufs[i].status == NDSP_WBUF_QUEUED || sWaveBufs[i].status == NDSP_WBUF_PLAYING) {
+                    busy++;
+                    queued += (int)sWaveBufs[i].nsamples;
+                }
+            }
+            PortDbgX("[audio]  drop: busy buffers<<16|queued samples", ((unsigned)busy << 16) | (unsigned)(queued & 0xFFFF));
+            PortDbgX("[audio]  drop: DSP sample position", (unsigned)ndspChnGetSamplePos(0));
+        }
         if (++sAudioStuck >= 30) { /* ~0.5 s of drops: the queue is not moving */
             audio_resync("[audio] resync: the DSP queue stopped moving");
         }

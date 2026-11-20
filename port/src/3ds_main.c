@@ -1,6 +1,6 @@
 #include <malloc.h>
 /*
- * 3ds_main.c — Nintendo 3DS entry point (libctru). Replaces pc_main.c/pc_gfx.c.
+ * 3ds_main.c — Nintendo 3DS entry point (libctru).
  * Boots the port runtime, drives the OoT gamestate loop, and reads the real
  * 3DS buttons into the controller shim. Rendering goes through the citro3d
  * backend (gfx3ds/gfx_citro3d.c) via the same gfx_pc interface proven on PC.
@@ -85,6 +85,8 @@ static int sSpeedRules = 1; /* settings speed_rules (raw_relax): 0 off, 1 while 
                         * Active: gfx_pc.c gPortRawRelax (near-camera geometry stays raw) and no screen-linear shading
                         * splits - the per-triangle CPU work that dominates Old 3DS drawing on hardware (v58 profile) */
 static int sReplayCopyAB;
+static int sAudioMarginAB;        /* settings audio_margin_ab=1: the audio margin alternates default / 1536 every 2 reports */
+static int sAudioSimdAB;          /* settings audio_simd_ab=1: the ARMv6 SIMD mixer paths alternate every 2 reports */
 static int sSpeedRulesAB;         /* settings speed_rules_ab=1: speed rules 1 / 0 alternate every 2 reports (Old 3DS A/B) */         /* settings replay_copy_ab=1: replay by copy (gfx_citro3d.c) alternates every 2 reports */
 static int sO3dsLayout;          /* settings o3ds_layout=1: the Old 3DS thread layout on a New 3DS (with o3ds_sim=1) */
 int Port3ds_OnRenderThread(void);
@@ -160,9 +162,12 @@ static void Port3ds_SaveSettings(void) {
             { extern int gPortReplayCopy; if (!gPortReplayCopy && !sReplayCopyAB) fprintf(f, "replay_copy=0\n"); }
             if (sReplayCopyAB) fprintf(f, "replay_copy_ab=1\n");
             if (sSpeedRulesAB) fprintf(f, "speed_rules_ab=1\n");
+            if (sAudioSimdAB) fprintf(f, "audio_simd_ab=1\n");
+            if (sAudioMarginAB) fprintf(f, "audio_margin_ab=1\n");
+            { extern int gPortAudioSimd; if (!gPortAudioSimd && !sAudioSimdAB) fprintf(f, "audio_simd=0\n"); }
             if (sSpeedRules) fprintf(f, "speed_rules=%d\n", sSpeedRules);
             { extern int gPortLoadPump; if (!gPortLoadPump) fprintf(f, "load_pump=0\n"); }
-            { extern int gPortAudioMargin; if (gPortAudioMargin >= 0) fprintf(f, "audio_margin=%d\n", gPortAudioMargin); }
+            { extern int gPortAudioMargin; if (gPortAudioMargin >= 0 && !sAudioMarginAB) fprintf(f, "audio_margin=%d\n", gPortAudioMargin); }
             { extern int gPortAudioShare; if (gPortAudioShare != 55) fprintf(f, "audio_share=%d\n", gPortAudioShare); }
             if (sAudioShareAB) fprintf(f, "audio_share_ab=1\n");
             if (!sCstickCamera) fprintf(f, "cstick=0\n");
@@ -227,6 +232,9 @@ static void Port3ds_LoadSettings(void) {
         if (sscanf(line, "raw_vtx_ab=%d", &v) == 1) { sRawAB = v != 0; }
         if (sscanf(line, "replay_copy_ab=%d", &v) == 1) { sReplayCopyAB = v != 0; }
         if (sscanf(line, "speed_rules_ab=%d", &v) == 1) { sSpeedRulesAB = v != 0; }
+        if (sscanf(line, "audio_simd_ab=%d", &v) == 1) { sAudioSimdAB = v != 0; }
+        if (sscanf(line, "audio_margin_ab=%d", &v) == 1) { sAudioMarginAB = v != 0; }
+        if (sscanf(line, "audio_simd=%d", &v) == 1) { extern int gPortAudioSimd; gPortAudioSimd = v != 0; }
         if (sscanf(line, "raw_relax=%d", &v) == 1 || sscanf(line, "speed_rules=%d", &v) == 1) { sSpeedRules = v < 0 ? 0 : v > 2 ? 2 : v; }
         if (sscanf(line, "load_pump=%d", &v) == 1) { extern int gPortLoadPump; gPortLoadPump = v != 0; }
         if (sscanf(line, "audio_margin=%d", &v) == 1 && v >= 0 && v <= 2048) { extern int gPortAudioMargin; gPortAudioMargin = v; }
@@ -1329,8 +1337,8 @@ static void Port3ds_PollInput(void) {
     s3dsButtons = b;
 }
 
-/* render hooks — override sched_shim's weak PortGfx_RunTask (the 3DS analogue
- * of pc_gfx.c). Drives the citro3d backend via the gfx_pc interface. */
+/* render hooks — override sched_shim's weak PortGfx_RunTask. Drives the citro3d backend via the gfx_pc
+ * interface. */
 static int sGfxInited = 0;
 
 void PortGfx_Init(void) {
@@ -1653,6 +1661,7 @@ static void Port3ds_PerfReport(unsigned frames) {
       { extern u32 gPortPerfPumpGapMaxUs, gPortPerfPumpGapsLong;
         PortDbgX("perf us longest wait between audio pumps", gPortPerfPumpGapMaxUs);
         PortDbgX("perf audio pump waits over 40 ms", gPortPerfPumpGapsLong);
+        { extern int gPortAudioSimd; PortDbgX("perf audio SIMD mixer on", (unsigned)gPortAudioSimd); }
         { extern u32 gPortPerfPumpLongestUs; PortDbgX("perf us longest audio pump", gPortPerfPumpLongestUs); gPortPerfPumpLongestUs = 0; }
         gPortPerfPumpGapMaxUs = gPortPerfPumpGapsLong = 0; }
       gPortPerfAudioUnderruns = gPortPerfAudioDrops = 0; }
@@ -1730,7 +1739,8 @@ static void Port3ds_PerfReport(unsigned frames) {
             "prof tex", "prof rect", "prof mtx", "prof flush", "prof audio", "prof pace", "prof swap",
             "prof gpu wait", "prof replay", "prof input", "prof vtx.light", "prof submit", "prof tri split",
             "prof gpu palette", "prof gpu pack", "prof vtx.box", "prof vtx.raw", "prof raw emit",
-            "prof c3d context", "prof c3d uniforms", "prof c3d draw" };
+            "prof c3d context", "prof c3d uniforms", "prof c3d draw", "prof dl.tex", "prof dl.mode", "prof dl.branch",
+            "prof dl.misc" };
         u32 tot = 0;
         int i;
         for (i = 0; i < PROF_COUNT; i++) tot += sProfHist[i];
@@ -2131,7 +2141,7 @@ void PortGfx_RunTask(OSTask* task) {
           /* PORT (2026-10-01): the report goes to boot.log only while a measurement switch is on (prof,
            * perf_ab, gpu_ab, aa_ab): ~50 lines every 15 s, each flushed to the SD card, otherwise */
           { extern int gPortPerfAB; sLogMute = !(sProfOn || gPortPerfAB || sGpuAB || sAaAB || sCmdflushAB || sPresentAB || sOverlapAB ||
-                                                     sRawAB || sRenderThreadAB || sAudioShareAB || sReplayCopyAB || sSpeedRulesAB); }
+                                                     sRawAB || sRenderThreadAB || sAudioShareAB || sReplayCopyAB || sSpeedRulesAB || sAudioSimdAB || sAudioMarginAB); }
           PortDbgX("perf updates/s x10", (unsigned)(3000000ull / (t1 - t0 ? t1 - t0 : 1)));
           PortDbgX("perf frames shown/s x10 (60fps interp)",
                    (unsigned)((300ull - sSkipCount + sInterpFrames) * 10000ull / (t1 - t0 ? t1 - t0 : 1)));
@@ -2308,6 +2318,16 @@ void PortGfx_RunTask(OSTask* task) {
               static unsigned sSpeedReports;
               if (sSpeedRulesAB && (++sSpeedReports % 2) == 0) { /* latched per update (gPortRawRelax) */
                   sSpeedRules = sSpeedRules ? 0 : 1;
+              }
+              static unsigned sMarginReports;
+              if (sAudioMarginAB && (++sMarginReports % 2) == 0) { /* read at every osAiGetLength */
+                  extern int gPortAudioMargin;
+                  gPortAudioMargin = gPortAudioMargin == 1536 ? -1 : 1536;
+              }
+              static unsigned sSimdReports;
+              if (sAudioSimdAB && (++sSimdReports % 2) == 0) { /* read per microcode op */
+                  extern int gPortAudioSimd;
+                  gPortAudioSimd = !gPortAudioSimd;
               }
               static unsigned sCopyReports;
               if (sReplayCopyAB && (++sCopyReports % 2) == 0) { /* read when a recording ends: next update */

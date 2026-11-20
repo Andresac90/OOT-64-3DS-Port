@@ -195,7 +195,7 @@ s32 osContInit(OSMesgQueue* mq, u8* bitpattern, OSContStatus* status) {
 }
 s32 osContStartReadData(OSMesgQueue* mq) { PortShim_RaiseEvent(OS_EVENT_SI); (void)mq; return 0; }
 
-/* keyboard -> pad, implemented in pc_gfx.c */
+/* buttons -> pad, implemented in 3ds_main.c */
 extern unsigned short PortInput_GetPad(signed char* outX, signed char* outY);
 
 void osContGetReadData(OSContPad* pad) {

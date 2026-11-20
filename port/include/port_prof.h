@@ -34,6 +34,11 @@ enum {
     PROF_C3D_CTX,    /* citro3d C3Di_UpdateContext: dirty render state, textures, combiners, program */
     PROF_C3D_UNIF,   /* citro3d C3D_UpdateUniforms */
     PROF_C3D_DRAW,   /* citro3d draw command (fixed register sequence) */
+    /* PORT (2026-10-14): the walk's state commands by kind (gfx_pc.c sOpProf) */
+    PROF_DL_TEX,     /* texture image, tiles, loads, palettes */
+    PROF_DL_MODE,    /* other modes, combiner, geometry mode, colours */
+    PROF_DL_BRANCH,  /* G_DL, G_ENDDL, branches, culling */
+    PROF_DL_MISC,    /* movemem (lights, viewport), moveword (segments), texture scale, no-ops */
     PROF_COUNT
 };
 extern volatile unsigned char gPortProf;

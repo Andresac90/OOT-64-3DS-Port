@@ -9,7 +9,7 @@
 extern int fprintf();
 extern void* stderr;
 
-/* renderer hook — pc_gfx.c overrides; default counts frames silently */
+/* renderer hook — 3ds_main.c overrides; default counts frames silently */
 void __attribute__((weak)) PortGfx_RunTask(OSTask* task) {
     static u32 frames = 0;
     frames++;

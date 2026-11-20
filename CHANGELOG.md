@@ -20,6 +20,19 @@ No game builds are published; each version is a source release. See the [README]
 
 - Touch screen, dungeons: a floor's map is clearly a preview - its floor as a title ("1F MAP") and a "BACK TO ROOM"
   bar under it; a tap on the bar or anywhere on the map goes back to the room map with Link's arrow (the default).
+- Audio mixer: ADPCM decoding, the envelope mixer and the gain mix use the 3DS CPU's SIMD instructions, with the
+  same output sample for sample (checked against the plain code at every start; the result is in `boot.log`).
+  Hardware (New 3DS in Old 3DS mode): mixer work per task -20%, the game's wait for the mixer 13.6 -> 2.5 ms per
+  update, frames shown +20% (14.2 -> 17.1 per second). Settings: `audio_simd=0` = the plain code, `audio_simd_ab=1` alternates.
+- Performance report: profiler stages per display-list command kind (textures, modes, branches, other).
+- Audio: 10 sound buffers instead of 6, room for a larger queue on the Old 3DS; `audio_margin_ab=1` alternates the
+  queued margin between 16 and 48 ms, and the first sound frames dropped with a full queue log the queue's state.
+- `tools/net3ds.sh`: fetch `boot.log` and send builds and test settings to the console over Wi-Fi (ftpd or FBI's
+  remote install), without taking the SD card out.
+- `docs/RENDERER.md`: a one-page overview of the renderer (vertex paths, interpolation, replay, stereo, threads).
+
+### Removed
+- The PC port's OpenGL/SDL files the renderer started from (never built for the 3DS).
 - Old 3DS speed: the game's hottest logic (collision, 3D math, matrices, skeletons, camera, actors) is built at -O3
   (no fast-math: the same float results); game logic per update 4.5 -> 4.3 ms at Old 3DS speed in Azahar.
 

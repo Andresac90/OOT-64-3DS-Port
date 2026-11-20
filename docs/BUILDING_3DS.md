@@ -67,7 +67,8 @@ without it the step ends with `md5sum: WARNING: 1 computed checksum did NOT matc
 
 ### HOME Menu art (optional)
 `port/banner.bnr` is committed, so builds need nothing else. To regenerate the stereoscopic banner
-(`tools/make_banner.sh`, or `tools/make_link_banner.py` for Link from your game data) you need bannertool, Python
+(`tools/make_banner.sh`; from your game data: `tools/make_title_banner.py` for the title-screen logo and the
+Hylian Shield icon, `tools/make_link_banner.py` for Link) you need bannertool, Python
 3.10+ with Pillow and gltflib (`pip install gltflib pillow`), and pycgfx:
 `git clone https://github.com/skyfloogle/pycgfx tools/pycgfx` (ignored by git). The tools write a side-by-side
 preview of both eyes next to the banner.
@@ -111,6 +112,10 @@ performance on hardware with `perf_ab=1` and `prof=1` in `settings.txt`.
   frame skip is on and while the logic frame is about to miss its refresh).
   The report's `frames displayed/s (est)` counts frames that reached the screen (a frame finished in the same
   refresh as the next one is never shown); `frames shown/s` counts frames drawn.
+- Without taking the SD card out: run [ftpd](https://github.com/mtheall/ftpd) on the console and use
+  `tools/net3ds.sh IP log` (fetches the logs to `build/3ds/hwlogs/`), `tools/net3ds.sh IP put` (uploads
+  `build/3ds/oot.cia` to `sdmc:/cias/`, then install it with FBI) and `tools/net3ds.sh IP settings_b FILE`. Or install
+  directly with FBI's Remote Install -> Receive URLs over the network and `tools/net3ds.sh IP fbi`.
 - Azahar at Old 3DS speed: set `cpu_clock_percentage=25` in Azahar's `qt-config.ini` (restore 100 after). It
   approximates the Old 3DS's CPU time, not its GPU, and multi-core timing is not representative.
 

@@ -5020,6 +5020,21 @@ static const uint8_t sKeepsTriState[256] = {
     [(uint8_t)G_RDPHALF_1] = 1, [(uint8_t)G_BRANCH_Z] = 1, [(uint8_t)G_CULLDL] = 1,
 #endif
 };
+/* PORT (2026-10-14): the profiler stage of each command (prof=1), so the walk's time splits by command kind */
+static const uint8_t sOpProf[256] = {
+    [0 ... 255] = PROF_DL, /* (GCC range; the entries below override it) */
+    [G_MTX] = PROF_MTX, [(uint8_t)G_POPMTX] = PROF_MTX, [G_VTX] = PROF_VTX,
+    [(uint8_t)G_TRI1] = PROF_TRI, [(uint8_t)G_TRI2] = PROF_TRI, [(uint8_t)G_QUAD] = PROF_TRI,
+    [G_SETTIMG] = PROF_DL_TEX, [G_LOADBLOCK] = PROF_DL_TEX, [G_LOADTILE] = PROF_DL_TEX, [G_SETTILE] = PROF_DL_TEX,
+    [G_SETTILESIZE] = PROF_DL_TEX, [G_LOADTLUT] = PROF_DL_TEX, [(uint8_t)G_TEXTURE] = PROF_DL_TEX,
+    [(uint8_t)G_SETOTHERMODE_L] = PROF_DL_MODE, [(uint8_t)G_SETOTHERMODE_H] = PROF_DL_MODE,
+    [(uint8_t)G_RDPSETOTHERMODE] = PROF_DL_MODE, [G_SETCOMBINE] = PROF_DL_MODE, [G_GEOMETRYMODE] = PROF_DL_MODE,
+    [G_SETENVCOLOR] = PROF_DL_MODE, [G_SETPRIMCOLOR] = PROF_DL_MODE, [G_SETFOGCOLOR] = PROF_DL_MODE,
+    [G_SETFILLCOLOR] = PROF_DL_MODE,
+    [G_DL] = PROF_DL_BRANCH, [(uint8_t)G_ENDDL] = PROF_DL_BRANCH, [(uint8_t)G_BRANCH_Z] = PROF_DL_BRANCH,
+    [(uint8_t)G_CULLDL] = PROF_DL_BRANCH, [(uint8_t)G_RDPHALF_1] = PROF_DL_BRANCH,
+    [G_MOVEMEM] = PROF_DL_MISC, [(uint8_t)G_MOVEWORD] = PROF_DL_MISC, [(uint8_t)G_NOOP] = PROF_DL_MISC,
+};
 static void gfx_run_dl(Gfx* cmd) {
     int dummy = 0;
 #ifdef __3DS__
@@ -5084,6 +5099,7 @@ static void gfx_run_dl(Gfx* cmd) {
 #if defined(__3DS__) && defined(PORT_PERF_STAGES)
         uint64_t tOp = PERF_T(); /* perf_stages: time per opcode (G_DL sub-lists excluded) */
 #endif
+        PROF_SET(sOpProf[opcode & 0xFF]); /* (PROF_DL for the rest: syncs, rectangles, scissor, images) */
         switch (opcode) {
 #ifdef __3DS__
             /* PORT (2026-09-30): stereo depth tags (gDPNoOpTag 0x3D5E3D0m; z_vr_box_draw.c): m = 0 normal,

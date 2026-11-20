@@ -37,14 +37,16 @@ This project is not affiliated with, endorsed by, or sponsored by Nintendo.
 - **Accuracy work:** the renderer is compared frame by frame against the N64 running the same inputs
   (tools in `tools/statediff`), and the audio is compared against the N64's output.
 - Saves to the SD card (`sdmc:/3ds/oot/save.bin`).
-- A HOME Menu banner: original artwork (the title and an ocarina under a night sky), or Link as the game draws
-  him when you build it from your game data (see Building).
+- A HOME Menu icon and banner: original artwork (a drawn fairy; the title and an ocarina under a night sky), or,
+  made from your own game data at build time, the Hylian Shield icon and the title-screen *Ocarina of Time* logo
+  as the banner with the first notes of Zelda's Lullaby (see Building).
 
 ## Status
 
-Every scene of the game loads for both ages, and the game state matches the N64's (compared field by field
-with the N64 running the same inputs). A full playthrough on hardware is still in progress, so keep backups of
-`sdmc:/3ds/oot/save.bin`. Remaining items for 1.0: [docs/RELEASE_1.0.md](docs/RELEASE_1.0.md).
+Version 1.0 is out. Every scene of the game loads for both ages, and the game state matches the N64's (compared
+field by field with the N64 running the same inputs). Keep backups of `sdmc:/3ds/oot/save.bin` all the same. What
+was verified for 1.0: [docs/RELEASE_1.0.md](docs/RELEASE_1.0.md). The work in progress is 60 frames per second on
+the Old 3DS.
 
 | | New 3DS | Old 3DS |
 |---|---|---|
@@ -132,20 +134,16 @@ make VERSION=ntsc-1.0 COMPARE=0 -j8
 
 # 5. Build the 3DS port
 make -f Makefile.3ds cia             # -> build/3ds/oot.cia (install with FBI)
-make -f Makefile.3ds cci             # -> build/3ds/oot.3ds (for the Azahar emulator)
-```
+make -f Makefile.3ds cci **Optional, the game's logo on the HOME Menu, from your game data** (needs the Azahar emulator, Python 3.10+ with
+Pillow and [bannertool](https://github.com/diasurgical/bannertool)): `python3 tools/make_title_banner.py` makes
+the HOME Menu banner from the title screen's *Ocarina of Time* logo, with the first seconds of Zelda's Lullaby as
+its sound (`--sound item`: the item fanfare), and the Hylian Shield as the icon. Run it before step 5; later builds
+use it. Other choices, made the same way: `python3 tools/make_link_banner.py` puts Link as the game draws him on the
+banner (`--white`: on white) and `python3 tools/make_navi_icon.py` puts Navi on the icon; the last tool run wins.
+These files (`port/banner_local.bnr`, `port/icon_local.png`) are made from Nintendo's data, so they are ignored by
+git and must never be shared; without them the build uses the original artwork (a drawn fairy and an ocarina).
 
-Step 3 also creates `baseroms/ntsc-1.0/baserom-decompressed.z64`, which the game reads at run time.
-
-**Optional, Link and Navi on the HOME Menu, from your game data** (needs the Azahar emulator and Python 3.10+
-with Pillow): `python3 tools/make_link_banner.py` captures Link as the game draws him (the pause menu's preview of
-his 3D model) and makes the HOME Menu banner from it: Link on a transparent background (`--white`: on white;
-`port/banner_local.bnr`; also needs
-[bannertool](https://github.com/diasurgical/bannertool)), and `python3 tools/make_navi_icon.py` renders Navi into the icon (`port/icon_local.png`). Or
-`python3 tools/make_title_banner.py`: the Hylian Shield as the icon and the title-screen logo as the banner, with the
-first seconds of Zelda's Lullaby as its sound (`--sound item`: the item fanfare). Run them before step 5; later builds
-use them (the last one run wins). These files
-are made from Nintendo's models, so they are ignored by git and must never be shared; without them the build uses
+re made from Nintendo's models, so they are ignored by git and must never be shared; without them the build uses
 the original artwork (a drawn fairy and an ocarina).
 
 **Troubleshooting (macOS):** if Anaconda or Miniconda is on your `PATH`, the audio tools can link against
@@ -218,7 +216,7 @@ For bug reports and measurements only; the defaults are the fastest and most acc
 | `audio_margin` | automatic | samples kept queued for the DSP beyond the current frame (Old 3DS: 512, against crackling) |
 | `gpu_vtx` | 1 | vertex processing on the GPU; 0 = on the CPU |
 | `o3ds_sim`, `o3ds_layout` | 0 | on a New 3DS: 1 = Old 3DS speed (268 MHz, no L2 cache) / the Old 3DS thread layout |
-| `perf_ab`, `raw_vtx_ab`, `render_thread_ab`, `audio_share_ab`, `replay_copy_ab`, `speed_rules_ab`, ... | 0 | 1 = alternate one option during a session to compare both in `boot.log` |
+| `perf_ab`, `raw_vtx_ab`, `render_thread_ab`, `audio_share_ab`, `replay_copy_ab`, `speed_rules_ab`, `audio_simd_ab`, ... | 0 | 1 = alternate one option during a session to compare both in `boot.log` |
 
 For testing, a second set of settings can sit next to the first: if `sdmc:/3ds/oot/settings_b.txt` exists, holding
 L while the game starts uses it instead of `settings.txt` (read from it and saved to it), so two setups can be
@@ -269,6 +267,7 @@ Licenses and terms of the code this port builds on: [THIRD_PARTY_NOTICES.md](THI
 ## Documentation
 
 - [docs/BUILDING_3DS.md](docs/BUILDING_3DS.md): build, emulator testing and debugging
+- [docs/RENDERER.md](docs/RENDERER.md): how the renderer works (start here for graphics code)
 - [docs/3ds-touch-panel.md](docs/3ds-touch-panel.md): controls, touch panel, minimap
 - [docs/3ds-stereo-3d.md](docs/3ds-stereo-3d.md): stereoscopic 3D design
 - [docs/3ds-60fps-plan.md](docs/3ds-60fps-plan.md): performance and 60 fps work

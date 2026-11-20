@@ -552,3 +552,120 @@ depth copy nothing. statediff builds keep the eager per-frame copy. The asynchro
   in later frames with the matrices, lights and camera refreshed would bring Kokiri Forest's ~43 ms of translation
   toward ~15 ms, the budget for 60 frames per second next to the game logic and audio. Other N64 ports on the 3DS
   (Super Mario 64: 30 fps on an Old 3DS, a lighter game) do not reach 60 there either.
+
+### 2026-10-14: display-list cache (Old 3DS speed rules)
+
+- **Where an Old 3DS update goes** (Azahar at 25% CPU clock, Old 3DS thread layout, Kokiri Forest, new profiler stages
+  per display-list command kind): audio ~25% of all time (engine on the game thread, mostly waiting for the mixer on
+  the system core), game logic ~13%, drawing ~50%. Inside the drawing no single command kind dominates: triangle setup
+  ~11%, texture commands ~8%, the interpreter itself ~7%, vertex loads ~7%, citro3d state/uniforms ~5%. Today's
+  calibration of the 25% clock is about twice as slow as last night's for drawing (game logic matches the hardware's
+  ~9 ms per update), so only A/B comparisons within one session are used below.
+- **Comparison: Mario Kart Wii on the 3DS** (a reimplementation: its tools convert the disc's models into 3DS formats
+  once, the 3DS renders them natively) runs at 30 fps on an Old 3DS and 60 on a New 3DS. This port runs the N64 game
+  itself and translates its display lists every drawn frame; the cache below is the runtime version of "convert once".
+- **Display-list cache** (`gfx_pc.c` dlc_*, `gfx_citro3d.c` blk*; settings `dlc=0` off, `dlc_ab=1` alternates every 2
+  reports, `dlc_check=1` verifies): a static display list is translated once while its backend calls are recorded -
+  state calls, raw-path palette entries and parameters, draws with their indices - and later frames re-issue that
+  block with the frame's matrix slot and light set. A block starts at a G_DL call or right after a G_CULLDL that did
+  not cull (room pieces test their box every frame) and ends where that list returns.
+  - Inputs: while a block is recorded, every piece of render state it reads before setting it is noted by group
+    (tiles, texture image, TMEM slots, palette banks, other-mode and geometry-mode bits, combiner, colours only where
+    the combiner uses them, texture scale, lights, fog); a block is re-issued only when those inputs match. Keying the
+    whole render state never matched (leftover tile sizes, light padding, the shader from the previous draw); the
+    viewport and scissor stay outside blocks (the letterbox animates the scissor).
+  - Outputs: after a re-issue, only the state groups the block set are taken from the recording; every block re-sends
+    the draw state it uses (`sRsDirty`), so the backend state before it is not an input; the re-issue skips state the
+    GPU already has.
+  - Never cached: matrix loads, processed vertex loads (CPU-lit, generated, blended), level-of-detail branches,
+    rectangles, segment/light/viewport changes, data in the per-frame display-list pools, models whose vertex loads are
+    numbered for the 60 fps skinned blend (their loads must be counted every frame - Link drew with limbs out of place
+    in the in-between frames until these were excluded), 3D, off-screen targets, draw ids (tools). Vertices are copied
+    again from the game's memory on each use; a block's display-list words are dropped as soon as a DMA copies over
+    them and re-summed on every 8th use; texture-cache wraps and invalidations drop every block.
+  - Recording draws every triangle of a block (no CPU rejection, G_CULLDL inside passes): the GPU clips what a later
+    camera does not see (Kokiri Forest: +15% triangles, +20% draws).
+- **Exactness:** `dlc_check=1` translates a list again wherever a block would be re-issued and compares the op stream,
+  vertices, indices, inputs and the state left behind: 0 differences in ~53,000 comparisons in Kokiri Forest (after
+  fixing uninitialised padding in the stream) and 1 in ~79,000 over the 101-scene tour (a recording that could not be
+  cached, not a difference in output); the tour reached all 101 scenes with the same per-scene game state as with the
+  cache off (the tour needs `sd_nocolor=1` for this: its colour readbacks use draw ids, which keep the cache off).
+  Deku Tree, Hyrule Field, Kakariko and Kokiri Forest drawn with the cache look right in Azahar.
+- **Cost (Azahar, Old 3DS speed, Kokiri Forest, same session):** ~90 blocks re-issued per drawn frame, ~3,300 of
+  ~4,300 display-list commands skipped; display-list CPU time -5 to -9% per report, frames shown +5%. The cache's own
+  work (lookup, re-issuing through citro3d, state after the block) is ~10% of all samples, and the characters - Link,
+  Saria, Navi, the Kokiri - are not cached (matrix loads inside their limbs, numbered skinned loads).
+- **Hardware A/B (New 3DS with `o3ds_sim=1 o3ds_layout=1 dlc_ab=1 prof=1`, 12 reports, 2026-10-14):** ~1,750 of
+  ~4,200 commands skipped per frame, but display-list CPU time unchanged (paired reports in the same place: 35.3/36.0
+  ms on vs 34.4-35.5 ms off) and frames shown not higher. The cache's own stages are 12-18% of all samples on
+  hardware (vs ~10% in Azahar), mostly `dlc ops` (re-issuing through citro3d) then `dlc find`/`dlc exit`: what it
+  saves in translation it spends re-issuing. **Removed from the code 2026-11-20** (about 1,300 lines; no gain on
+  hardware). Worth retrying only if blocks are re-issued as captured GPU command words, as replay-by-copy does for
+  the in-between frames.
+- **Honest status for 60 fps on an Old 3DS:** the update's 50 ms must hold logic (~9 ms on hardware), audio, the walk
+  and two copied in-between frames; the walk has to drop by about 45% from hardware v60's 43-49 ms. The cache as it
+  stands is a first step (rooms and props). Next, in order of expected gain: limbs whose matrices come from segment
+  0x0D (record the matrix loads as inputs and re-issue them with the frame's matrices), re-issuing blocks as captured
+  GPU command words instead of through citro3d (the replay-by-copy mechanism per block), and the Old 3DS audio mixer's
+  cost.
+
+### 2026-10-14: audio pumps no longer block the drawing (Old 3DS)
+
+The same hardware log (12 reports, New 3DS in Old 3DS mode) showed `audio wait for ucode` at 0.3-15 ms per update:
+the game thread, pumping audio from inside the display-list walk once per retrace, waited for the previous task on the
+mixer worker (system core, 55% share; 4.5-13.5 ms per task there). The prof `audio` stage was 5-32% of all samples.
+`Port3ds_MaybePumpAudio` now leaves a due pump to its next call (256 commands later) while the worker is busy, up to
+one retrace overdue; after that it waits as before, so audio never lags more than one retrace further. Azahar can't
+judge the gain (its cores share one host thread; at 25% clock the mixer is saturated either way); there the audio
+underruns were the same with the deferral on and off (300 s A/B). Hardware A/B: `audio_defer_ab=1`.
+Also from the same log, for later: "tri setup" (15% of samples) is the whole triangle cost - the interpreter sets
+that stage for every triangle command, so it includes `raw_tri_fast` and the next command's read; and the mixer's
+hottest commands (older hardware logs with perf_stages) are the envelope mixer, ADPCM decoding, resampling, the filter
+and the mix - ADPCM's 44 multiply-adds per 8 samples could use ARMv6 SMLAD pairs, bit-exact.
+
+Hardware A/B of the deferral (2026-10-14, 40 reports, New 3DS in Old 3DS mode, `audio_defer_ab`): it rarely
+applies (0-176 deferred pumps per 300 updates, ~21 on average) and changed nothing measurable: `audio wait for ucode`
+2.4 ms on vs 2.8 ms off per update, frames displayed 15.9 vs 16.9 per second (scene noise is larger). The wait comes
+from the engine's own audio step, not the mid-frame pumps: in busy scenes the worker needs 11-14 ms per task, three
+tasks per update, so it is close to saturated (waits up to 16 ms per update). The lever is a cheaper mixer.
+**Removed 2026-11-20** (no measurable effect), with its settings.
+
+### 2026-10-14: cheaper audio mixer (ARMv6 SIMD, bit-exact)
+
+Three of the five most expensive microcode commands now use ARMv6 SIMD, each checked against the scalar code in
+`PortAudio_SimdSelfTest` (3,000 random cases each, 0 mismatches; a deliberately broken variant gives thousands):
+- ADPCM decoding: per codebook entry, the coefficients are packed once (after each LOADADPCM) as pairs against
+  (prev2, prev1) and the input pairs, including the `<< 11` term as 0x800; 28 SMUAD/SMLAD instead of 44 multiplies per
+  8 samples. The sums wrap modulo 2^32 in both versions.
+- Envelope mixer: SMULWB/SMULWT scale both samples of a word by the volume (the 48-bit product's top 32 bits =
+  `(sample * vol) >> 16`), PKHBT packs them, one EOR flips both signs, QADD16 accumulates (same order as the scalar
+  loop: dry then wet per side, so aliased buffers saturate the same way).
+- Gain mix: (out, in) pairs against (0x7fff, gain) with SMLAD, the -0x8000 case with QSUB16.
+Azahar (title demo, `perf_stages=1`): envelope mixer -35%, ADPCM -24%, mix unchanged, worker time per task -11%
+(3977 -> 3549 us). Resampling (4 separately rounded products per sample) is now the largest. Hardware A/B:
+`audio_simd_ab=1` (`audio_simd=0` = scalar).
+
+First hardware run (2026-10-14) was spoiled by `perf_stages=1` in the test settings: it reads the system tick (an SVC)
+twice per microcode command on the mixer's 55%-share core, so each task took 14-18 ms instead of ~8, the game thread
+waited up to 60 ms per update for the mixer, audio crackled and updates dropped to ~10 per second, with SIMD on and
+off alike. Within that run the envelope mixer was -29% with SIMD. Rerun with `prof=1` only.
+
+Rerun (2026-10-14, 31 reports, `prof=1`, `audio_simd_ab`): SIMD on vs off (16 / 15 reports, same session):
+mixer task 8.3 vs 10.4 ms (-20%), game thread waiting for the mixer 2.5 vs 13.6 ms per update, frames displayed 17.1 vs
+14.2 per second (+20%), updates 22.4 vs 18.1 per second (the game keeps or catches up to full speed), underruns 3 vs 1
+per report (both low). Without SIMD the mixer saturates in busy scenes (waits of 26-58 ms per update); with it the
+worst report waited 7.8 ms. On by default.
+
+The tester still heard much crackling and frame drops in that session. The audio counters match the run before the
+mixer change (per report: ~1.8 gaps where the DSP ran dry, ~4 frames dropped with the queue full, ~2 waits over 40 ms
+between pumps), so this is the Old 3DS mode baseline, not a regression: gaps follow updates where the CPU falls
+behind (frames skipped up to 140 of 300). Next: `audio_margin_ab=1` alternates the queued margin between 512 samples
+(16 ms) and 1536 (48 ms more latency, covers the 40 ms waits); 10 DSP buffers instead of 6 so the larger margin
+has room.
+
+Margin A/B on hardware (2026-10-17, 19 reports): this session had few gaps either way (4 in all); the audible
+glitches were frames dropped with the queue full: 41 in 10 reports at 512, 17 in 9 at 1536. With 10 buffers and the
+engine aiming at about one frame plus the margin, a full queue means either the engine produced too much or ndsp
+had not updated the buffer statuses yet; the next build logs the busy buffers, queued samples and DSP position at the
+first 20 drops.
+
