@@ -1,78 +1,89 @@
-# 60 fps on Old and New 3DS — research and plan
+# 60 fps on the 3DS: status, what worked, what's next
 
-Goal: 60 rendered frames per second on both the New 3DS and the Old 3DS, with the game's logic still
-running at its designed 20 updates/s (N64-identical gameplay). Status 2026-09-30: the game holds
-19.6–19.7 updates/s on a New 3DS, i.e. full N64 speed at 20 fps.
+The game logic always runs at the N64's 20 updates per second (anything else changes the game's speed). "60 fps"
+means drawing 3 frames per update: the update's own frame plus 2 in-between frames with every object's position
+blended. How the renderer does that: [RENDERER.md](RENDERER.md). This page is the performance story: the current
+status first, then the dated lab notebook with every measurement.
 
-## Why this is an architecture problem, not a speed problem
+## Status (2026-11-21)
 
-- OoT's logic advances once every 3 N64 video retraces (R_UPDATE_RATE = 3, 20 Hz). Physics, animation,
-  timers and cutscene scripts all assume that step. Running the logic 3× as often makes the whole game
-  3× faster. 60 fps therefore means *interpolated* frames: 2 extra frames drawn between logic updates,
-  with every object's transform blended between the previous and current update. Ship of Harkinian
-  (SoH) does this on PC.
-- The 3DS CPU is far faster than the N64's (New 3DS: 4 × 804 MHz ARM11 vs 93.75 MHz VR4300), but
-  this port currently does on the CPU what the N64 did on its RSP co-processor: display-list
-  interpretation, vertex transform, lighting, texgen, fog and clipping (`gfx_pc.c`, a Fast3D
-  interpreter). That costs 16–25 ms per frame on a New 3DS. Measured hardware breakdown, v10, busy
-  scenes:
-
-  | Stage | Time per frame |
-  |---|---|
-  | Game logic + display-list build | 2–6 ms |
-  | Display-list interpretation (CPU) | 16–25 ms |
-  | GPU wait | 10–14 ms |
-  | Audio (main thread) | 1.5–5 ms, mostly waiting for the audio worker |
-
-  Interpolated rendering the naive way re-runs the whole display list for every drawn frame:
-  3 × 20 ms = 60 ms of work per 50 ms logic frame. That doesn't fit even on the New 3DS, and the Old
-  3DS CPU is ~3× slower (268 MHz, no L2 cache).
-- **Conclusion:** 60 fps on both consoles needs the per-frame cost moved off the CPU. The idea is to
-  interpret each logic frame's display list once, and let the GPU re-draw it three times with
-  interpolated matrices.
-
-## Target architecture
-
-1. **GPU vertex transform.** The PICA200 vertex shader applies the N64 modelview × projection, the
-   lighting (N64 directional + ambient lights), texgen, and the fog factor, from uniforms. The CPU
-   uploads raw N64 vertices (converted once per vertex buffer, not per triangle). This removes most
-   of `gfx_sp_vertex` / `gfx_sp_tri1` CPU work. The PICA can't cull or clip per N64 rules on its own,
-   so CPU-side work stays only where the game needs it (G_CULLDL bounding volumes, the few CPU reads).
-2. **Recorded frames.** Interpreting a logic frame's display list produces a list of GPU draws: vertex
-   buffer range, state, and a *matrix slot* per draw instead of baked positions. Drawing a frame means
-   replaying that list: cheap citro3d state + draw calls, no interpretation.
-3. **Interpolation.** Each matrix slot is matched with the same slot of the previous logic frame.
-   Drawn frames at t = 0, 1/3 and 2/3 use lerped (translation) / slerped (rotation) matrices; the
-   camera is interpolated the same way. Matching strategy, in order of robustness:
-   a. game-side tags: `Matrix_*` calls and `MATRIX_FINALIZE` sites carry an id (actor pointer +
-      limb index + call site), like SoH's `FrameInterpolation_RecordOpenChild`;
-   b. fallback: display-list position plus the called DL's address.
-   Unmatched slots (spawns, culled-in) are drawn un-interpolated.
-4. **Pacing.** Present on every retrace (60 Hz). Run the logic update every 3rd retrace, on a second
-   core where possible (New 3DS: 4 cores; Old 3DS: the syscore can take audio).
-
-## Phases (each ends with a measurable gate)
-
-| Phase | Work | Gate |
+| | New 3DS | Old 3DS |
 |---|---|---|
-| P0 Measure | Per-stage timing build (`PORT_EXTRA=-DPORT_PERF_STAGES`). An **Old 3DS simulation** switch on New 3DS hardware (`osSetSpeedupEnable(false)`: 268 MHz, no L2), since only a New 3DS is available. | Breakdown per stage on both speeds |
-| P1 Cheap wins | Audio fully asynchronous (no main-thread wait, ~4.5 ms). Pacing fix (done in v10). Batching: fewer draw calls / state changes. | N3DS steady 20; O3DS-sim ≥ 20 |
-| P2 GPU transform | Vertex shader does MV×P, lights, texgen, fog. CPU keeps G_CULLDL and CPU-visible results. Verify with `tools/statediff` fbdiff (must not regress vs N64). | DL CPU ≤ 6 ms/frame on N3DS |
-| P3 Recorded frames | Draw list per logic frame, replayed per drawn frame. | Replay ≤ 3 ms CPU |
-| P4 Interpolation | Matrix-slot matching (game-side ids), camera interpolation, 60 Hz presentation. | 60 fps N3DS; image identical to N64 at t=0 frames |
-| P5 Old 3DS | Tune O3DS-sim until 60. Fallback: 30 (t = 0, 1/2), selectable. | O3DS-sim 60 (or a 30 option) |
+| Game speed | full (20 updates/s) | full, by skipping the drawing of an update when it falls behind |
+| Frames shown per second | **60** in 2D and 3D (hardware) | **about 17** in big scenes (Kokiri Forest, Hyrule Field), **about 45** in interiors (Link's house); hardware: a New 3DS running at Old 3DS speed |
+| Limit | none in normal play | the CPU: translating the N64 display list each update |
 
-## Risks
+The New 3DS goal is done. The Old 3DS goal (60 everywhere) is open and may not be reachable in the big scenes; see
+the budget below.
 
-- **GPU fill rate.** The New 3DS 800×480 AA mode costs 10–14 ms of GPU per frame. At 60 fps the GPU
-  budget is 16.7 ms per frame. Options: 400×240 without AA when interpolating (the Old 3DS has no wide
-  mode anyway).
-- **Effects that read back the framebuffer or depth** (pause background, lens flare, Navi glow): these
-  are once per logic frame, and are fine.
-- **Interpolation artifacts** at teleports/cuts: detect big jumps and skip interpolation for that
-  slot, as SoH does.
+## The Old 3DS budget
 
-## Progress log
+One update is 50 ms (3 screen refreshes). For 60 fps it must hold the game logic, the audio, one full display-list
+walk and two in-between frames, all on one 268 MHz core without a level-2 cache:
+
+| Work per update (big scene, hardware) | Now | Needed for 60 |
+|---|---|---|
+| Game logic | 5-9 ms | same |
+| Audio (engine + waiting for the mixer) | ~5 ms | same |
+| Display-list walk (translate + draw the first frame) | ~31 ms (35-65 ms per walk before the mixer work) | ~25 ms or less |
+| Two in-between frames (copies of the first) | ~2 ms | same |
+
+Where the walk's time goes (hardware profiler, share of all samples): triangle setup 14%, game logic 12%, audio
+10%, citro3d's per-draw work 9%, vertex bounding boxes 6%, raw-path emit 6%, textures 7%, interpreter 3%. No single
+part dominates, so there is no one fix left that halves it.
+
+## What was built, and what it gave
+
+| Change | Result | Where |
+|---|---|---|
+| Frame interpolation from game-side tags | 60 fps drawing without changing game speed | 2026-09-30 |
+| GPU vertex path, then the raw vertex path (the GPU does the N64's vertex work) | raw path: renderer CPU -15% (emulator), +10-25% fps on hardware | 2026-10-01, 2026-10-04 |
+| Flip presenter, CPU/GPU overlap | the game never waits for the screen refresh; even frame pacing | 2026-10-03 |
+| Render thread (New 3DS core 2) | New 3DS 60 in 2D and 3D | 2026-10-03 |
+| In-between frames by copying the first frame's GPU commands | in-between frame 4.8 -> 0.8 ms; Old 3DS Link's house 28 -> 46 fps | 2026-10-05 |
+| Old 3DS speed rules (all triangles on the fast path, GPU near clip) | Kokiri 12.5 -> 16 fps (Old 3DS mode) | 2026-10-05 |
+| Camera-space lighting | Link 7.5 -> 6.0 ms per update (Old 3DS speed) | 2026-10-05 |
+| SIMD audio mixer (bit-exact) | Old 3DS mode: frames shown 14.2 -> 17.1 per second, audio wait 13.6 -> 2.5 ms | 2026-10-14 |
+
+## What was tried and dropped
+
+| Idea | Why it was dropped |
+|---|---|
+| Screen-linear shading on the GPU | perfect in the emulator, smeared textures on hardware (texture-coordinate precision) |
+| Anti-aliasing on by default | doubles the GPU's work; off by default (`aa=1`) |
+| Old 3DS: game or drawing on the second core | that core is the system core: 3-4x slower, starved system services |
+| Display-list cache (static lists translated once, re-issued later) | skipped 40% of commands but re-issuing cost as much as it saved; removed 2026-11-20 |
+| Audio pump deferral | rarely applied, no measurable effect; removed 2026-11-20 |
+
+## Open problems and next ideas
+
+- **Old 3DS audio glitches** in busy scenes: short gaps when an update stalls, and sound frames dropped with a full
+  queue. A larger queue (48 ms) halved the drops; the current test build logs the queue's state at each drop to find
+  the cause.
+- **Old 3DS walk cost**, in order of expected gain: re-issue static scenery as captured GPU command words (what
+  replay-by-copy already does for whole frames) rather than through citro3d; cheaper triangle setup; fewer
+  citro3d state calls per draw. Even together these are unlikely to reach 60 in the biggest scenes; a steady 20 to
+  30 there and 60 indoors is the realistic target.
+
+## Background: why this is an architecture problem (2026-09-30)
+
+- OoT's logic steps once every 3 video refreshes (`R_UPDATE_RATE` = 3, 20 Hz). Physics, animation and cutscenes
+  assume that step, so running it faster speeds up the whole game. 60 fps has to come from interpolated frames.
+- The port first did on the CPU everything the N64's RSP co-processor did (display-list interpretation, vertex
+  transform, lighting, fog, clipping): 16-25 ms per frame on a New 3DS. Drawing three frames that way needs 60 ms per
+  50 ms update. The plan was to translate each update once, move the vertex work to the GPU's vertex shader, and draw
+  the in-between frames from a recording. Phases, all done except the last:
+
+| Phase | Work | Status |
+|---|---|---|
+| P0 Measure | per-stage profiler, Old 3DS simulation on a New 3DS (`o3ds_sim`) | done |
+| P1 Cheap wins | asynchronous audio, pacing, fewer state changes | done |
+| P2 GPU transform | vertex shader does the N64's vertex work, checked against the N64 frame by frame | done (GPU and raw paths) |
+| P3 Recorded frames | in-between frames from a recording instead of a second walk | done (replay, then copy) |
+| P4 Interpolation | game-side tags, 60 Hz presentation | done (New 3DS 60) |
+| P5 Old 3DS | 60 at Old 3DS speed | open |
+
+## Lab notebook (dated, oldest first)
 
 ### 2026-09-30
 

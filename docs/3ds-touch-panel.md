@@ -112,7 +112,7 @@ bounding box and scaled to fit (at most 3×), because the N64 textures place the
 ## Not done yet / ideas
 
 - Tabs don't switch pages while paused; they close the menu, like START.
-- Map textures only; no fog-of-war rooms or floor selector.
+- The room map shows the map texture only; visited rooms are coloured on the floor maps, not on the room map.
 - No B-button (sword) display. Only the three N64 C slots are shown.
 - The arrow direction follows `shape.rot.y` with world +x to the right and +z down. This has been
   checked against the arrow position, but not against a side-by-side N64 capture.

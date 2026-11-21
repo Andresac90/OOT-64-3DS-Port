@@ -1,9 +1,44 @@
 # 3DS stereoscopic 3D
 
-The 3D slider works. When the slider is down there is no extra cost: the renderer uses the normal mono
-mode (800px wide with anti-aliasing on hardware).
+The 3D slider works on hardware, at 60 frames per second on a New 3DS. With the slider down there is no extra
+cost: the renderer uses the normal mono mode (800 px wide).
 
-## Design
+## Current design (summary)
+
+- **Two eyes, one walk.** With the slider up, the top screen switches to a 240×800 target holding both 400×240 eyes.
+  Each draw is issued twice (one viewport per eye); the display list is translated once.
+- **The shift.** Each eye moves every vertex sideways in clip space: `x += ±sep · (w − c)`, where w is the vertex's
+  depth and c the convergence (the depth that lands on the screen plane). This is true off-axis stereo, the same on
+  both sides of the screen; any curve or clamp on it cracks shared triangle edges (v3 below).
+  `sep` = slider × 0.04 (about 16 px of disparity at infinity at full slider).
+- **Convergence** `c`, recomputed every frame (`gfx_3ds.c gfx_3ds_update_stereo`):
+  1. start at Link's depth;
+  2. no further than the geometry at the screen borders (13 probes, the 3rd nearest), so nothing in front of the
+     screen is cut by the frame edge;
+  3. no further than 1.25 × the nearest on-screen 3D surface (`STEREO_POPOUT_MAX` 0.25), so nothing pops out more
+     than 25% (added 2026-10-06 after Navi popped out painfully in the Deku Tree cutscene);
+  4. halved in pre-rendered rooms; clamped to 4..600;
+  5. moves toward a nearer target fast (0.3 per frame) and toward a farther one slowly (0.04), so depth doesn't
+     "breathe".
+- **Fixed layers** (tagged by the game with `gDPNoOpTag(0x3D5E3D0m)`): the sky at infinity, pre-rendered room
+  pictures at 75% depth, the HUD and the title logo flat on the screen plane; file select and pause menu flat.
+- **Readbacks** (pause background, lens flare depth) use the left eye.
+
+## Verifying in Azahar
+
+1. Set `factor_3d=100` and `render_3d=1` (side by side) in
+   `~/Library/Application Support/Azahar/config/qt-config.ini`. Azahar reports the factor as the
+   slider position.
+2. Create `sdmc:/3ds/oot/capture_stereo`. Every 300 stereo frames the full 240×800 target (8-byte
+   header w, h, then detiled RGBA8) is written to `stereo_fb.bin`.
+3. Measure the per-region horizontal shift between the eyes. Expected at full slider: sky about +16 px
+   (right eye image to the right = behind the screen), the HUD 0, nothing far in front of the screen.
+   Comfort can only be judged on a console.
+4. Restore the config and remove the flag afterwards.
+
+The sections below are the history, in order: what each version did and what hardware testing showed.
+
+## v1 (2026-09-30, first version; superseded)
 
 - **Mode switch** (`port/src/gfx3ds/gfx_3ds.c`, `gfx_3ds_update_stereo`): this runs every frame
   *before* `C3D_FrameBegin`, because citro3d `svcBreak`s on `C3D_RenderTargetDelete` inside a frame.
@@ -41,24 +76,10 @@ mode (800px wide with anti-aliasing on hardware).
   `ViewW/ViewH`. Their buffers are dropped on a switch and reallocated. The capture buffer is sized for
   the mono target, which is the larger of the two.
 
-## Verifying in Azahar
+### v1 known limits (resolved later)
 
-1. Set `factor_3d=100` and `render_3d=1` (side by side) in
-   `~/Library/Application Support/Azahar/config/qt-config.ini`. Azahar reports the factor as the
-   slider position.
-2. Create `sdmc:/3ds/oot/capture_stereo`. Every 300 stereo frames the full 240×800 target (8-byte
-   header w, h, then detiled RGBA8) is written to `stereo_fb.bin`.
-3. Measure the per-region horizontal shift between the eyes. Expected at full slider: sky and horizon
-   +12 px (right eye image to the right = behind the screen), close-up Link and the HUD 0.
-4. Restore the config and remove the flag afterwards.
-
-## Known limits / next steps
-
-- Hardware performance is not measured yet. Draw calls double; the pixel count is half that of the
-  mono 800px-AA mode.
-- Switching from stereo back to mono (slider down) has only been exercised on hardware, not in the
-  emulator.
-- Convergence and strength are constants; a settings option could expose them.
+- Hardware performance was not measured yet (since then: 60 fps in 3D on a New 3DS).
+- Convergence and strength are constants; a settings option could expose them (still true).
 
 ## v2 (2026-09-30, after hardware feedback "not deep enough; Link pops out in 2D rooms")
 
@@ -105,7 +126,7 @@ mode (800px wide with anti-aliasing on hardware).
 - **Measured, Kokiri Forest:** walls +11 px (behind), Link 0, floor around and below him ≈ 0 with a gentle
   forward gradient, HUD 0.
 
-## v4 (2026-09-30): research-based design — the current one
+## v4 (2026-09-30): research-based design (the basis of the current one)
 
 ### What the research says
 
@@ -143,7 +164,7 @@ Positive values are behind the screen.
 - A floating window (a black mask on one eye's edge) for objects that do cross the side borders in front.
 - Expose strength and convergence as settings.
 
-### Menus (v15)
+## Menus (v15)
 
 The file select and the pause menu draw their panels as perspective 3D. Under automatic convergence
 they came out at mixed depths ("hurts the eye" on hardware). These gamestates set
@@ -151,10 +172,17 @@ they came out at mixed depths ("hurts the eye" on hardware). These gamestates se
 then a flat screen-depth layer, and the sky / room background sits at half depth behind it. Measured:
 file-select panels and text at 0, sky behind; all pause pages at 0.
 
-### Pre-rendered room edges (v18)
+## Pre-rendered room edges (v18)
 
 The room picture is shifted sideways for depth, which uncovered its edge: a "void" strip beside shop
 rooms in 3D (hardware v17). In pre-rendered rooms, everything but the HUD is now zoomed horizontally by
 the shift plus 50% (`sRoomZoom`, shader `eye.z`). Zooming the picture *and* the 3D actors keeps them
 aligned; it acts as a slight FOV change. Measured in the Kokiri Shop: no void pixels at the 4:3 edges
 in either eye.
+
+## Pop-out limit (2026-10-06)
+
+Hardware, Deku Tree cutscene at full 3D: Navi, flying at the lens, popped out painfully. The border probes only
+guard the screen edges. The renderer now also tracks the nearest on-screen 3D vertex (`gfx_pc.c gPortStereoNearW`,
+fed by every vertex path, including the raw paths since 2026-10-07) and keeps the convergence within 1.25 × that
+depth. Measured in Azahar: Navi +7 px (behind the screen) instead of popping out.

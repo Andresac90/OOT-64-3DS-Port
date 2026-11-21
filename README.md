@@ -51,10 +51,10 @@ the Old 3DS.
 | | New 3DS | Old 3DS |
 |---|---|---|
 | Game speed (N64 = 20 updates/s) | full speed | full speed |
-| Frames shown per second | 60 in 2D and 3D (measured on hardware) | depends on the scene: about 15–17 in the biggest (Kokiri Forest), around 45 in interiors such as Link's house, fewer in 3D (measured on a New 3DS running at Old 3DS speed with the Old 3DS's thread layout, and in the emulator at Old 3DS speed); 60 everywhere is still being worked on |
+| Frames shown per second | 60 in 2D and 3D (measured on hardware) | depends on the scene: about 17 in the biggest (Kokiri Forest, Hyrule Field), around 45 in interiors such as Link's house, fewer in 3D (measured on a New 3DS running at Old 3DS speed with the Old 3DS's thread layout); more is being worked on |
 | Stereoscopic 3D | yes | yes |
 
-Measurements and the work behind them: [docs/3ds-60fps-plan.md](docs/3ds-60fps-plan.md).
+Status, what worked and what's next: [docs/3ds-60fps-plan.md](docs/3ds-60fps-plan.md).
 
 ## Requirements
 

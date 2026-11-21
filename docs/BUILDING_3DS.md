@@ -101,16 +101,20 @@ performance on hardware with `perf_ab=1` and `prof=1` in `settings.txt`.
 
 ## 6. Logs and settings
 - The game writes its log to `sdmc:/3ds/oot/boot.log` (rewritten at each launch).
-- `sdmc:/3ds/oot/settings.txt` holds the options; see the README's [Settings](../README.md#settings).
-  Measurement switches (the periodic performance report in `boot.log` is written only while one is on):
-  `prof=1` (sampling profiler, memory use), `perf_ab=1` (New 3DS alternates full speed and Old 3DS speed every
-  minute), `gpu_ab=1` (alternates the CPU and GPU vertex paths), `aa_ab=1` (alternates anti-aliasing),
-  `cmdflush_ab=1` (alternates the frame-end cache flush), `present_ab=1` (alternates the present gate every 4 reports),
-  `fps60=0` (interpolation off), `gpu_vtx=0` (CPU vertex path; the GPU one is the default), `present_gate=0` (frames submitted as soon as
-  drawn, as before 2026-10-02), `split_ratio` (x100), `split_px`, `split_depth` (fixed N64-shading split
-  thresholds), `split_auto=0` (New 3DS: never switch to the coarse thresholds; by default they are used while
-  frame skip is on and while the logic frame is about to miss its refresh).
-  The report's `frames displayed/s (est)` counts frames that reached the screen (a frame finished in the same
+- `sdmc:/3ds/oot/settings.txt` holds the options; see the README's [Settings](../README.md#settings). With
+  `sdmc:/3ds/oot/settings_b.txt` present, holding L at start uses that file instead: a second setup for tests.
+- Measurement settings. The performance report in `boot.log` (every 300 updates) is written only while one is on:
+
+  | Setting | What it does |
+  |---|---|
+  | `prof=1` | sampling profiler by stage, memory use, the full performance report |
+  | `perf_stages=1` | timer per display-list command and per audio command. Heavy: on an Old 3DS (or `o3ds_sim`) it slows the audio mixer enough to crackle, so don't use it for speed tests there |
+  | `o3ds_sim=1`, `o3ds_layout=1` | on a New 3DS: Old 3DS CPU speed (268 MHz, no L2 cache) and the Old 3DS thread layout |
+  | `perf_ab=1` | New 3DS alternates full speed and Old 3DS speed every 4 reports |
+  | `*_ab=1` (`raw_vtx_ab`, `replay_copy_ab`, `audio_simd_ab`, `audio_margin_ab`, ...) | alternates one option every 2 reports, so one session measures both sides |
+  | `fps60=0`, `gpu_vtx=0`, `raw_vtx=0` | turn off interpolation, the GPU vertex path, the raw vertex path |
+
+  In the report, `frames displayed/s (est)` counts frames that reached the screen (a frame finished in the same
   refresh as the next one is never shown); `frames shown/s` counts frames drawn.
 - Without taking the SD card out: run [ftpd](https://github.com/mtheall/ftpd) on the console and use
   `tools/net3ds.sh IP log` (fetches the logs to `build/3ds/hwlogs/`), `tools/net3ds.sh IP put` (uploads
@@ -132,4 +136,5 @@ The tour and boot-flow tools replace `build/3ds` with an instrumented build; reb
 ## More
 - Controls, touch panel and minimap: [3ds-touch-panel.md](3ds-touch-panel.md)
 - Stereoscopic 3D: [3ds-stereo-3d.md](3ds-stereo-3d.md)
+- How the renderer works: [RENDERER.md](RENDERER.md)
 - Performance and 60 fps: [3ds-60fps-plan.md](3ds-60fps-plan.md)

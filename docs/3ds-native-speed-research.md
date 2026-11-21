@@ -4,7 +4,13 @@ Goal: the game at the N64's full speed (20 updates per second) on both consoles,
 per second where the hardware allows it. This page collects what other N64-to-3DS ports did, with
 their measured results, and ranks what applies here.
 
-## Where the time goes today
+> **Status (2026-11-21):** this is the research from early October, kept for its survey of other ports. Of the
+> ranked plan below, 1, 2, 3 and 5 are done (frame skip, render thread, the raw vertex path, saves written in the
+> background), and 4 partly (cheap program switches; textures are still all RGBA8). The game runs at full speed on
+> both consoles. For today's numbers and next steps see [3ds-60fps-plan.md](3ds-60fps-plan.md); for how the
+> renderer works, [RENDERER.md](RENDERER.md).
+
+## Where the time went (2026-10-01)
 
 Hardware profile, Old 3DS speed (New 3DS at 268 MHz without L2, `perf_ab=1`), GPU vertex path, one
 update takes about 98 ms against the N64's 50 ms:
